@@ -15,6 +15,10 @@
 //!   [`ViewResult`], `dot`/`mermaid` emit the view's graph nodes.
 //! - `query <driver> <query> [--param k=v …]` — raw `query` op
 //!   passthrough.
+//! - `serve [--port N]` — the localhost HTTP bridge for the web host:
+//!   `/api/*` JSON endpoints over the same [`Host`] plus static
+//!   serving of the Nuxt build (`web/.output/public`). First stdout
+//!   line is `listening http://127.0.0.1:<port>`.
 //! - `manifest` / `schema` — the CLI's own capability manifest and
 //!   verb schema (sibling convention: tamias/kuda).
 //!
@@ -29,7 +33,9 @@
 //! `$TAMIAS_HOME/drivers` — set `PATH`/`TAMIAS_HOME` to point the CLI
 //! at fixture drivers (integration tests do exactly this).
 
+mod http;
 mod render;
+mod serve;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use pavo_core::{Host, Params, PavoError};
@@ -94,6 +100,13 @@ enum Command {
         /// JSON output.
         #[arg(long)]
         json: bool,
+    },
+    /// Serve the web bridge — localhost HTTP API + static Nuxt host.
+    Serve {
+        /// Port to bind on 127.0.0.1 (0 = pick a free port; the
+        /// actual port is printed as the first stdout line).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
     },
     /// Print the pavo capability manifest (JSON).
     Manifest,
@@ -184,6 +197,9 @@ fn run(cli: Cli) -> Result<(), Fail> {
             params,
             json,
         }) => cmd_query(&driver, &query, &params, json),
+        Some(Command::Serve { port }) => {
+            serve::run(port).map_err(|e| Fail::err(format!("serve: {e}")))
+        }
         Some(Command::Manifest) => {
             println!(
                 "{}",
@@ -192,7 +208,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
                     "version": env!("CARGO_PKG_VERSION"),
                     "verbs": [
                         "drivers", "views", "chrome", "view", "query",
-                        "manifest", "schema"
+                        "serve", "manifest", "schema"
                     ],
                 })
             );
@@ -239,6 +255,10 @@ fn schema_doc() -> Value {
                 "summary": "raw query-op passthrough",
                 "args": ["<driver>", "<query>", "--param K=V (repeatable)"],
                 "flags": {"--json": "bool"}
+            },
+            "serve": {
+                "summary": "localhost HTTP bridge for the web host (api + static)",
+                "flags": {"--port": "u16 (0 = free port, printed on stdout)"}
             },
             "manifest": {"summary": "print the pavo capability manifest (JSON)"},
             "schema": {"summary": "print this verb schema (JSON)"}
@@ -311,8 +331,9 @@ fn cmd_drivers(json: bool) -> Result<(), Fail> {
     Ok(())
 }
 
-/// Per-slot contribution counts for the `drivers` summary.
-fn contrib_counts(c: &pavo_protocol::Contributes) -> Value {
+/// Per-slot contribution counts for the `drivers` summary (shared
+/// with `serve`'s `/api/drivers`).
+pub(crate) fn contrib_counts(c: &pavo_protocol::Contributes) -> Value {
     let mut map = Map::new();
     for (name, entries) in [
         ("navbar", &c.navbar),
