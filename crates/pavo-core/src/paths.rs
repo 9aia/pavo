@@ -27,3 +27,29 @@ pub fn tamias_home() -> PathBuf {
 pub fn drivers_dir() -> PathBuf {
     tamias_home().join("drivers")
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    // One test, sequential env mutation — parallel tests mutating the
+    // same vars would race each other (and anything reading env).
+    #[test]
+    fn tamias_home_resolution_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // $TAMIAS_HOME wins outright.
+        let custom = tmp.path().join("custom-home");
+        std::env::set_var("TAMIAS_HOME", &custom);
+        std::env::set_var("XDG_DATA_HOME", tmp.path().join("xdg"));
+        assert_eq!(tamias_home(), custom);
+        assert_eq!(drivers_dir(), custom.join("drivers"));
+
+        // Without it, $XDG_DATA_HOME/tamias.
+        std::env::remove_var("TAMIAS_HOME");
+        assert_eq!(tamias_home(), tmp.path().join("xdg/tamias"));
+
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+}

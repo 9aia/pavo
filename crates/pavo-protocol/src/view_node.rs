@@ -412,3 +412,33 @@ impl ViewNode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use serde_json::json;
+
+    /// Every kind parses and `base()`/`base_mut()` reach its NodeBase.
+    #[test]
+    fn base_accessors_cover_all_kinds() {
+        let kinds = [
+            json!({"kind":"panel","title":"P"}),
+            json!({"kind":"table","title":"T","columns":[],"rows":[]}),
+            json!({"kind":"tree","title":"Tr","items":[]}),
+            json!({"kind":"graph","title":"G","nodes":[],"edges":[]}),
+            json!({"kind":"form","title":"F","fields":[]}),
+            json!({"kind":"kv","title":"K","pairs":[]}),
+            json!({"kind":"markdown","title":"M","text":"hi"}),
+            json!({"kind":"embed","title":"E","component":"c"}),
+            json!({"kind":"row","title":"R","children":[]}),
+            json!({"kind":"column","title":"C","children":[]}),
+        ];
+        for (i, v) in kinds.into_iter().enumerate() {
+            let mut node: ViewNode = serde_json::from_value(v).unwrap();
+            assert!(node.base().title.is_some(), "kind {i}");
+            node.base_mut().id = Some(format!("n{i}"));
+            assert_eq!(node.base().id.as_deref(), Some(format!("n{i}").as_str()));
+        }
+    }
+}

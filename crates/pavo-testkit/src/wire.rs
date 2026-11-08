@@ -187,3 +187,33 @@ impl Drop for Session {
         let _ = self.child.wait();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn wire_error_display_is_informative() {
+        let cases = [
+            WireError::Io(std::io::Error::other("boom")),
+            WireError::Timeout {
+                timeout: Duration::from_millis(5),
+            },
+            WireError::Exited {
+                detail: "stdout closed".to_string(),
+            },
+            WireError::BadResponse {
+                line: "not json".to_string(),
+            },
+        ];
+        for e in &cases {
+            let s = e.to_string();
+            assert!(!s.is_empty());
+        }
+        // BadResponse truncates long lines.
+        let long = "x".repeat(500);
+        let s = WireError::BadResponse { line: long }.to_string();
+        assert!(s.len() < 200, "{s}");
+    }
+}

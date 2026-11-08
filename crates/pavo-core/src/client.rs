@@ -278,7 +278,20 @@ impl DriverClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = cmd.spawn()?;
+        // Freshly-written drivers can hit ETXTBSY (`ExecutableFileBusy`)
+        // when exec'd the instant the writer's close lands — retry
+        // briefly (same shape as pavo-testkit's `spawn_retry`).
+        let mut attempt = 0u32;
+        let mut child = loop {
+            match cmd.spawn() {
+                Ok(child) => break child,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 20 => {
+                    attempt += 1;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
         let taken = (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (Some(stdin), Some(stdout), Some(stderr)) = taken else {
             // Don't leak a spawned child on a partial-pipe failure.

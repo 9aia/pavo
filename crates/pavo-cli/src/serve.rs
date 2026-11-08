@@ -182,6 +182,13 @@ struct ApiFail {
     message: String,
 }
 
+#[cfg(test)]
+impl std::fmt::Debug for ApiFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ApiFail({} {})", self.status, self.message)
+    }
+}
+
 impl ApiFail {
     fn new(status: u16, message: impl Into<String>) -> Self {
         Self {
@@ -582,4 +589,364 @@ fn view_page_stub(reference: &str) -> Response {
         ),
     };
     html_page(reference, &body_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use pavo_core::PavoError;
+    use std::sync::{Arc, Mutex};
+
+    fn host() -> Arc<Mutex<Host>> {
+        Arc::new(Mutex::new(Host::discover()))
+    }
+
+    fn req(method: &str, target: &str) -> Request {
+        Request {
+            method: method.to_string(),
+            target: target.to_string(),
+            headers: vec![],
+            body: vec![],
+        }
+    }
+
+    fn body_string(resp: &Response) -> String {
+        String::from_utf8_lossy(&resp.body).into_owned()
+    }
+
+    #[test]
+    fn mime_for_common_and_unknown() {
+        assert!(mime_for(Path::new("a.html")).starts_with("text/html"));
+        assert!(mime_for(Path::new("a.css")).starts_with("text/css"));
+        assert!(mime_for(Path::new("a.mjs")).starts_with("text/javascript"));
+        assert!(mime_for(Path::new("a.woff2")).starts_with("font/woff2"));
+        assert!(mime_for(Path::new("a.bin")).starts_with("application/octet"));
+        assert!(mime_for(Path::new("noext")).starts_with("application/octet"));
+        assert!(mime_for(Path::new(".hidden")).starts_with("application/octet"));
+    }
+
+    #[test]
+    fn resolve_static_serves_files_dirs_and_rejects_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("index.html"), "<h1>root</h1>").unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("page.html"), "page").unwrap();
+        std::fs::create_dir(root.join("dirindex")).unwrap();
+        std::fs::write(root.join("dirindex").join("index.html"), "di").unwrap();
+
+        assert_eq!(
+            resolve_static(root, "/index.html").unwrap(),
+            root.join("index.html").canonicalize().unwrap()
+        );
+        // Directory → index.html inside it.
+        assert!(resolve_static(root, "/dirindex").is_some());
+        // `..` escapes rejected outright.
+        assert!(resolve_static(root, "/../etc/passwd").is_none());
+        assert!(resolve_static(root, "/sub/../../x").is_none());
+        // Missing file.
+        assert!(resolve_static(root, "/nope.txt").is_none());
+    }
+
+    #[test]
+    fn html_escape_covers_markup_chars() {
+        assert_eq!(
+            html_escape("<a href=\"x\">&'</a>"),
+            "&lt;a href=&quot;x&quot;&gt;&amp;'&lt;/a&gt;"
+        );
+        assert_eq!(html_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn view_target_prefers_ref_then_driver_view() {
+        let p = parse_query_for_test("ref=demo%3Aboard&driver=x&view=y");
+        assert_eq!(view_target(&p).unwrap(), "demo:board");
+
+        let p = parse_query_for_test("driver=myco&view=item");
+        assert_eq!(view_target(&p).unwrap(), "myco:item");
+
+        // Bare driver = its first view.
+        let p = parse_query_for_test("driver=myco");
+        assert_eq!(view_target(&p).unwrap(), "myco");
+
+        let p = parse_query_for_test("view=only");
+        let err = view_target(&p).unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("missing view ref"));
+    }
+
+    fn parse_query_for_test(q: &str) -> Vec<(String, String)> {
+        crate::http::parse_query(q)
+    }
+
+    #[test]
+    fn api_fail_maps_error_kinds_to_status() {
+        let cases = [
+            (PavoError::BadViewRef("x".into()), 400),
+            (PavoError::UnknownDriver("d".into()), 404),
+            (
+                PavoError::UnknownView {
+                    driver: "d".into(),
+                    view: "v".into(),
+                },
+                404,
+            ),
+            (PavoError::Io(std::io::Error::other("x")), 500),
+        ];
+        for (e, want) in cases {
+            assert_eq!(ApiFail::from(e).status, want);
+        }
+    }
+
+    #[test]
+    fn route_health_and_unknown_endpoint() {
+        let host = host();
+        let (resp, _) = route(&req("GET", "/api/health"), &host, None);
+        assert_eq!(resp.status, 200);
+        let body: Value = serde_json::from_str(&body_string(&resp)).unwrap();
+        assert_eq!(body["ok"], true);
+
+        let (resp, _) = route(&req("GET", "/api/nope"), &host, None);
+        assert_eq!(resp.status, 404);
+        let body: Value = serde_json::from_str(&body_string(&resp)).unwrap();
+        assert_eq!(body["ok"], false);
+        assert!(body["error"].as_str().unwrap().contains("unknown endpoint"));
+    }
+
+    #[test]
+    fn route_method_rules() {
+        let host = host();
+        // POST to an api endpoint → 405 + Allow.
+        let (resp, _) = route(&req("POST", "/api/health"), &host, None);
+        assert_eq!(resp.status, 405);
+        assert!(resp
+            .extra
+            .iter()
+            .any(|(k, v)| k == "allow" && v == "GET, HEAD"));
+
+        // HEAD gets an empty body.
+        let (resp, _) = route(&req("HEAD", "/api/health"), &host, None);
+        assert_eq!(resp.status, 200);
+        assert!(resp.body.is_empty());
+
+        // POST to a static path → 405.
+        let (resp, _) = route(&req("POST", "/anything"), &host, None);
+        assert_eq!(resp.status, 405);
+    }
+
+    #[test]
+    fn static_response_without_web_root_serves_landing_and_404() {
+        let (resp, _) = route(&req("GET", "/"), &host(), None);
+        assert_eq!(resp.status, 200);
+        assert!(resp.content_type.contains("text/html"));
+        let body = body_string(&resp);
+        assert!(body.contains("<h1>pavo</h1>"), "{body}");
+
+        // /view/<ref> stub renders the error inline for a bad ref.
+        let (resp, _) = route(&req("GET", "/view/ghost%3Anope"), &host(), None);
+        assert_eq!(resp.status, 200);
+        assert!(body_string(&resp).contains("error"));
+
+        // Unknown static path → 404 with the no-build hint.
+        let (resp, _) = route(&req("GET", "/missing.png"), &host(), None);
+        assert_eq!(resp.status, 404);
+        assert!(body_string(&resp).contains("no web build"));
+    }
+
+    #[test]
+    fn static_response_with_web_root_prefers_spa_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("200.html"), "SPA-200").unwrap();
+        std::fs::write(root.join("index.html"), "IDX").unwrap();
+
+        // Real file wins over fallback.
+        let resp = static_response("/index.html", Some(root));
+        assert_eq!(resp.status, 200);
+        assert_eq!(body_string(&resp), "IDX");
+
+        // Extensionless path → 200.html (preferred over index.html).
+        let resp = static_response("/view/demo:board", Some(root));
+        assert_eq!(resp.status, 200);
+        assert_eq!(body_string(&resp), "SPA-200");
+
+        // Path with an extension misses → 404.
+        let resp = static_response("/missing.js", Some(root));
+        assert_eq!(resp.status, 404);
+
+        // Without 200.html the fallback chain reaches index.html.
+        std::fs::remove_file(root.join("200.html")).unwrap();
+        let resp = static_response("/dashboard", Some(root));
+        assert_eq!(body_string(&resp), "IDX");
+    }
+
+    #[test]
+    fn find_web_root_honors_pavo_web_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY-FREE env mutation: single-threaded concern only if a
+        // concurrent test calls find_web_root — none do.
+        std::env::set_var("PAVO_WEB_DIR", tmp.path());
+        assert_eq!(find_web_root(), Some(tmp.path().to_path_buf()));
+        std::env::set_var("PAVO_WEB_DIR", tmp.path().join("missing"));
+        assert_eq!(find_web_root(), None);
+        std::env::remove_var("PAVO_WEB_DIR");
+    }
+
+    /// Minimal sh fixture driver (`demo`) answering manifest + the
+    /// serve wire — kept alive via `TempDir::keep`.
+    const DEMO_DRIVER: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/demo/board","queries":["items"]}]}' ;;
+      *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{}}}' ;;
+      *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
+      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    /// A Host over a tempdir fixture driver — env-free discovery.
+    fn fixture_host() -> Arc<Mutex<Host>> {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let driver = bin.join("tamias-driver-demo");
+        std::fs::write(&driver, DEMO_DRIVER).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let root = tmp.path().to_path_buf();
+        // Keep the tempdir alive for the process lifetime.
+        let _keep = tmp.keep();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let opts = pavo_core::discovery::DiscoveryOptions {
+            path: Some(std::ffi::OsString::from(&bin)),
+            tamias_home: Some(home),
+            ..Default::default()
+        };
+        Arc::new(Mutex::new(Host::discover_with(opts)))
+    }
+
+    fn api(host: &Arc<Mutex<Host>>, target: &str) -> Response {
+        let (path, query) = http::split_target(target);
+        let pairs = http::parse_query(query);
+        api_route(path, &pairs, host)
+    }
+
+    fn envelope(resp: &Response) -> Value {
+        serde_json::from_str(&body_string(resp)).unwrap()
+    }
+
+    #[test]
+    fn api_drivers_views_chrome_with_fixture() {
+        let host = fixture_host();
+        let body = envelope(&api(&host, "/api/drivers"));
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["result"][0]["driver"], "demo");
+        assert_eq!(body["result"][0]["view_count"], 1);
+
+        let body = envelope(&api(&host, "/api/views"));
+        assert_eq!(body["result"][0]["namespaced"], "demo:board");
+
+        let body = envelope(&api(&host, "/api/chrome"));
+        assert_eq!(body["ok"], true);
+        assert!(body["result"]["navbar"].is_array());
+
+        let body = envelope(&api(&host, "/api/renderers"));
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["result"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn api_view_and_query_roundtrip() {
+        let host = fixture_host();
+        let body = envelope(&api(&host, "/api/view?ref=demo%3Aboard"));
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["result"]["view"]["id"], "board");
+
+        // driver+view split form + param passthrough.
+        let body = envelope(&api(&host, "/api/view?driver=demo&view=board&param.x=1"));
+        assert_eq!(body["ok"], true, "{body}");
+
+        // /api/raw alias.
+        let body = envelope(&api(&host, "/api/raw?ref=demo:board"));
+        assert_eq!(body["ok"], true, "{body}");
+
+        // Missing ref → 400 envelope.
+        let resp = api(&host, "/api/view");
+        assert_eq!(resp.status, 400);
+        assert_eq!(envelope(&resp)["ok"], false);
+
+        // Unknown driver → 404.
+        let resp = api(&host, "/api/view?ref=ghost:board");
+        assert_eq!(resp.status, 404);
+
+        // Malformed ref → 400 (BadViewRef maps to 400).
+        let resp = api(&host, "/api/view?ref=demo%3A");
+        assert_eq!(resp.status, 400);
+    }
+
+    #[test]
+    fn api_query_roundtrip_and_errors() {
+        let host = fixture_host();
+        let body = envelope(&api(&host, "/api/query?driver=demo&query=items"));
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["result"]["data"], serde_json::json!([1, 2]));
+
+        // Missing params → 400.
+        let resp = api(&host, "/api/query?driver=demo");
+        assert_eq!(resp.status, 400);
+        let resp = api(&host, "/api/query?query=items");
+        assert_eq!(resp.status, 400);
+
+        // Unknown driver → 404.
+        let resp = api(&host, "/api/query?driver=ghost&query=x");
+        assert_eq!(resp.status, 404);
+    }
+
+    #[test]
+    fn api_render_validates_params() {
+        let host = fixture_host();
+        // Missing kind → 400.
+        let resp = api(&host, "/api/render?surface=cli");
+        assert_eq!(resp.status, 400);
+        // Missing surface → 400.
+        let resp = api(&host, "/api/render?kind=graph");
+        assert_eq!(resp.status, 400);
+        // node isn't JSON → 400.
+        let resp = api(&host, "/api/render?kind=graph&surface=cli&node=%7Bbad");
+        assert_eq!(resp.status, 400);
+        // data isn't a JSON object → 400.
+        let resp = api(
+            &host,
+            "/api/render?kind=graph&surface=cli&node=%7B%7D&data=%5B1%5D",
+        );
+        assert_eq!(resp.status, 400);
+        // Well-formed but unclaimed kind → host-level error (500 or 404).
+        let resp = api(
+            &host,
+            "/api/render?kind=graph&surface=cli&node=%7B%22kind%22%3A%22graph%22%7D",
+        );
+        assert!(resp.status >= 400, "{}", resp.status);
+    }
+
+    #[test]
+    fn head_request_to_static_path_has_empty_body() {
+        let host = host();
+        let (resp, _) = route(&req("HEAD", "/missing.png"), &host, None);
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.is_empty());
+    }
 }

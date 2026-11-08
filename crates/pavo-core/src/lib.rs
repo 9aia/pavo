@@ -25,6 +25,10 @@
 //!   discovery → manifests → clients → views/routes/chrome.
 //! - [`viewnode`] — walk/evaluate helpers over the ViewNode IR
 //!   (`find_nodes`, `collect_queries`, KV degradation).
+//! - [`renderers`] — renderer-plugin registry: manifest `renderers[]`
+//!   declarations → kind claims, conflict resolution, `render` ops.
+//! - [`paths`] — `<tamias-home>` resolution (`$TAMIAS_HOME` →
+//!   `$XDG_DATA_HOME/tamias` → `~/.local/share/tamias` → `./tamias`).
 //! - [`cache`] — small TTL cache for view models.
 //! - [`error`] — the crate's [`error::PavoError`] type.
 

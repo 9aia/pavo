@@ -410,3 +410,74 @@ fn always_ok_driver_fails_malformed_check() {
         "{violations:?}"
     );
 }
+
+#[test]
+fn session_spawn_missing_driver_is_io_error() {
+    let missing = PathBuf::from("/nonexistent/tamias-driver-nope");
+    match Session::spawn(missing.as_path()) {
+        Err(pavo_testkit::wire::WireError::Io(_)) => {}
+        other => panic!("expected Io error, got {}", other.is_ok()),
+    }
+}
+
+#[test]
+fn session_call_surfaces_bad_response_and_timeout() {
+    // bad_json_once: the first response line isn't a Response.
+    let fx = FixtureDriver::builder("fx")
+        .failure(Failure {
+            bad_json_once: true,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let mut s = Session::spawn(fx.path()).unwrap();
+    let err = s
+        .call(&json!({"op": "views"}), Duration::from_millis(500))
+        .unwrap_err();
+    assert!(
+        matches!(err, pavo_testkit::wire::WireError::BadResponse { .. }),
+        "{err}"
+    );
+
+    // delay_ms beyond the request timeout → WireError::Timeout, and
+    // has_exited stays false (process is alive, just slow).
+    let fx = FixtureDriver::builder("fx")
+        .failure(Failure {
+            delay_ms: 5_000,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let mut s = Session::spawn(fx.path()).unwrap();
+    let err = s
+        .call(&json!({"op": "views"}), Duration::from_millis(200))
+        .unwrap_err();
+    assert!(
+        matches!(err, pavo_testkit::wire::WireError::Timeout { .. }),
+        "{err}"
+    );
+    assert!(!s.has_exited());
+    assert!(s.driver().ends_with("tamias-driver-fx"));
+}
+
+#[test]
+fn session_exited_when_driver_dies() {
+    // exit_after: the process exits on the 2nd request — the next
+    // request sees stdout close → WireError::Exited.
+    let fx = FixtureDriver::builder("fx")
+        .failure(Failure {
+            exit_after: Some(2),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let mut s = Session::spawn(fx.path()).unwrap();
+    let _ = s.call(&json!({"op": "views"}), Duration::from_secs(5));
+    let err = s
+        .call(&json!({"op": "views"}), Duration::from_secs(5))
+        .unwrap_err();
+    assert!(
+        matches!(err, pavo_testkit::wire::WireError::Exited { .. }),
+        "{err}"
+    );
+}

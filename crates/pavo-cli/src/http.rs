@@ -396,4 +396,165 @@ mod tests {
         assert_eq!(split_target("/api/view?ref=x"), ("/api/view", "ref=x"));
         assert_eq!(split_target("/api/health"), ("/api/health", ""));
     }
+
+    #[test]
+    fn query_get_first_wins() {
+        let p = parse_query("a=1&a=2&b=x");
+        assert_eq!(query_get(&p, "a"), Some("1"));
+        assert_eq!(query_get(&p, "b"), Some("x"));
+        assert_eq!(query_get(&p, "c"), None);
+    }
+
+    #[test]
+    fn collect_params_skips_empty_and_non_param_keys() {
+        let p = parse_query("param.=x&paramok=1&param.a=%7B%7D&flag");
+        let m = collect_params(&p);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["a"], serde_json::json!({}));
+    }
+
+    /// A connected loopback pair: (client, server). The server end is
+    /// what `read_request`/`Response::write` operate on.
+    fn pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    fn send(client: &mut std::net::TcpStream, bytes: &[u8]) {
+        client.write_all(bytes).unwrap();
+        client.flush().unwrap();
+    }
+
+    #[test]
+    fn read_request_parses_head_and_headers() {
+        let (mut client, mut server) = pair();
+        send(
+            &mut client,
+            b"GET /api/health?x=1 HTTP/1.1\r\nHost: localhost\r\nX-Test: yes\r\n\r\n",
+        );
+        let req = read_request(&mut server).unwrap().unwrap();
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.target, "/api/health?x=1");
+        assert_eq!(req.header("host"), Some("localhost"));
+        assert_eq!(req.header("x-test"), Some("yes"));
+        assert_eq!(req.header("missing"), None);
+        assert!(!req.wants_close());
+    }
+
+    #[test]
+    fn read_request_accepts_lf_only_terminator() {
+        let (mut client, mut server) = pair();
+        send(&mut client, b"HEAD / HTTP/1.1\n\n");
+        let req = read_request(&mut server).unwrap().unwrap();
+        assert_eq!(req.method, "HEAD");
+        assert_eq!(req.target, "/");
+    }
+
+    #[test]
+    fn read_request_eof_on_idle_is_none() {
+        let (client, mut server) = pair();
+        drop(client);
+        assert!(matches!(read_request(&mut server), Ok(None)));
+    }
+
+    #[test]
+    fn read_request_malformed_variants_error() {
+        // Bad request line.
+        let (mut client, mut server) = pair();
+        send(&mut client, b"garbage\r\n\r\n");
+        assert!(matches!(
+            read_request(&mut server),
+            Err(ReadError::Http { status: 400, .. })
+        ));
+        drop((client, server));
+
+        // Header without a colon.
+        let (mut client, mut server) = pair();
+        send(&mut client, b"GET / HTTP/1.1\r\nno-colon-here\r\n\r\n");
+        assert!(matches!(
+            read_request(&mut server),
+            Err(ReadError::Http { status: 400, .. })
+        ));
+        drop((client, server));
+
+        // Non-numeric Content-Length.
+        let (mut client, mut server) = pair();
+        send(
+            &mut client,
+            b"POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n",
+        );
+        assert!(matches!(
+            read_request(&mut server),
+            Err(ReadError::Http { status: 400, .. })
+        ));
+    }
+
+    #[test]
+    fn read_request_reads_body_by_content_length() {
+        let (mut client, mut server) = pair();
+        send(
+            &mut client,
+            b"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello",
+        );
+        let req = read_request(&mut server).unwrap().unwrap();
+        assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn read_request_rejects_oversized_body_declaration() {
+        let (mut client, mut server) = pair();
+        let declared = MAX_BODY + 1;
+        send(
+            &mut client,
+            format!("POST / HTTP/1.1\r\nContent-Length: {declared}\r\n\r\n").as_bytes(),
+        );
+        assert!(matches!(
+            read_request(&mut server),
+            Err(ReadError::Http { status: 413, .. })
+        ));
+    }
+
+    #[test]
+    fn read_request_rejects_oversized_head() {
+        let (mut client, mut server) = pair();
+        let filler = vec![b'A'; MAX_HEAD + 16];
+        send(&mut client, &filler);
+        assert!(matches!(
+            read_request(&mut server),
+            Err(ReadError::Http { status: 431, .. })
+        ));
+    }
+
+    #[test]
+    fn response_write_serializes_status_headers_body() {
+        let (mut client, mut server) = pair();
+        let resp = Response::json(200, &serde_json::json!({"ok": true}), true);
+        resp.write(&mut server, false).unwrap();
+        drop(server);
+        let mut out = String::new();
+        client.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"), "{out}");
+        assert!(out.contains("content-type: application/json"), "{out}");
+        assert!(out.contains("access-control-allow-origin: *"), "{out}");
+        assert!(out.contains("connection: keep-alive"), "{out}");
+        assert!(out.ends_with("{\"ok\":true}"), "{out}");
+    }
+
+    #[test]
+    fn response_write_extra_headers_and_close_and_unknown_status() {
+        let (mut client, mut server) = pair();
+        let mut resp = Response::raw(418, "text/plain", b"teapot".to_vec(), false);
+        resp.extra.push(("allow".to_string(), "GET".to_string()));
+        resp.write(&mut server, true).unwrap();
+        drop(server);
+        let mut out = String::new();
+        client.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 418 Status\r\n"), "{out}");
+        assert!(out.contains("allow: GET\r\n"), "{out}");
+        assert!(out.contains("connection: close\r\n"), "{out}");
+        assert!(!out.contains("access-control-allow-origin"), "{out}");
+    }
 }
