@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""tamias-driver-demo — the reference pavo view driver.
+
+A self-contained demo driver (Python 3 stdlib only) that shows off the
+ViewNode IR: a board with table+kv+markdown, a module-dependency graph,
+and an event timeline — plus navbar/dashboard/statusbar contributions.
+
+Wire surface (ndjson JSON-RPC over `serve`, one JSON object per line):
+
+    {"op":"manifest"}                      -> DriverManifest
+    {"op":"views"}                         -> [ViewSummary, ...]
+    {"op":"view","view":"board"}          -> ViewResult
+    {"op":"query","query":"items",...}    -> QueryResult
+
+`tamias-driver-demo manifest` and `tamias-driver-demo capabilities`
+answer the discovery probes pavo runs before spawning `serve`.
+"""
+
+import json
+import sys
+
+NAME = "demo"
+
+# ---------------------------------------------------------------- data
+
+ITEMS = [
+    {"id": "T-001", "title": "pavo scaffold", "status": "done", "priority": "high"},
+    {"id": "T-002", "title": "driver discovery", "status": "done", "priority": "high"},
+    {"id": "T-003", "title": "ViewNode renderers", "status": "wip", "priority": "med"},
+    {"id": "T-004", "title": "web host islands", "status": "open", "priority": "med"},
+    {"id": "T-005", "title": "myco driver", "status": "open", "priority": "low"},
+    {"id": "T-006", "title": "config driver", "status": "blocked", "priority": "high"},
+]
+
+DEPS = {
+    "nodes": [
+        {"id": "pavo-protocol", "label": "pavo-protocol", "kind": "crate"},
+        {"id": "pavo-core", "label": "pavo-core", "kind": "crate"},
+        {"id": "pavo-cli", "label": "pavo-cli", "kind": "crate"},
+        {"id": "pavo-tui", "label": "pavo-tui", "kind": "crate"},
+        {"id": "pavo-testkit", "label": "pavo-testkit", "kind": "crate"},
+        {"id": "tamias", "label": "tamias", "kind": "external"},
+        {"id": "myco", "label": "myco", "kind": "external"},
+    ],
+    "edges": [
+        {"from": "pavo-protocol", "to": "tamias", "label": "ref types"},
+        {"from": "pavo-core", "to": "pavo-protocol", "label": "uses"},
+        {"from": "pavo-core", "to": "tamias", "label": "drivers"},
+        {"from": "pavo-cli", "to": "pavo-core", "label": "uses"},
+        {"from": "pavo-cli", "to": "pavo-protocol", "label": "uses"},
+        {"from": "pavo-tui", "to": "pavo-core", "label": "uses"},
+        {"from": "pavo-testkit", "to": "pavo-protocol", "label": "conformance"},
+        {"from": "pavo-testkit", "to": "tamias", "label": "fixtures"},
+    ],
+}
+
+EVENTS = {
+    "items": [
+        {
+            "label": "2025-11 scaffold",
+            "detail": "workspace + protocol landed",
+            "children": [
+                {"label": "pavo-protocol", "detail": "wire types + ViewNode IR"},
+                {"label": "pavo-core", "detail": "discovery + clients + host"},
+            ],
+        },
+        {
+            "label": "2025-11 surfaces",
+            "detail": "CLI renderer + integration tests",
+            "children": [
+                {"label": "pavo-cli", "detail": "text/dot/mermaid formats"},
+            ],
+        },
+        {
+            "label": "next",
+            "detail": "TUI canvas, web islands, product drivers",
+        },
+    ]
+}
+
+
+def counts():
+    out = {}
+    for item in ITEMS:
+        out[item["status"]] = out.get(item["status"], 0) + 1
+    out["total"] = len(ITEMS)
+    return out
+
+
+QUERIES = {
+    "items": ITEMS,
+    "counts": None,  # computed
+    "deps": DEPS,
+    "events": EVENTS,
+}
+
+
+def query_data(name, params):
+    if name == "counts":
+        return counts()
+    if name == "items" and params.get("status"):
+        wanted = params["status"]
+        return [i for i in ITEMS if i["status"] == wanted]
+    return QUERIES.get(name)
+
+
+# ---------------------------------------------------------------- views
+
+def q(name):
+    return {"name": name, "op": "query", "params": {}}
+
+
+VIEWS = [
+    {
+        "id": "board",
+        "title": "Board",
+        "route": "/demo/board",
+        "description": "Work items as a table, with status counts and a footer.",
+        "queries": [q("items"), q("counts")],
+        "root": {
+            "kind": "column",
+            "title": "Board",
+            "children": [
+                {"kind": "kv", "title": "Counts", "query": "counts", "pairs": []},
+                {
+                    "kind": "table",
+                    "title": "Items",
+                    "query": "items",
+                    "sortable": True,
+                    "columns": [
+                        {"key": "id", "title": "ID", "width": 6},
+                        {"key": "title", "title": "Title"},
+                        {"key": "status", "title": "Status", "width": 8},
+                        {"key": "priority", "title": "Priority", "width": 8},
+                    ],
+                },
+                {
+                    "kind": "markdown",
+                    "text": "*tamias-driver-demo* — canned data; try `--param status=open`.",
+                },
+            ],
+        },
+    },
+    {
+        "id": "deps",
+        "title": "Deps",
+        "route": "/demo/deps",
+        "description": "Fake crate dependency graph — try --format mermaid.",
+        "queries": [q("deps")],
+        "root": {
+            "kind": "graph",
+            "title": "Module dependencies",
+            "query": "deps",
+            "layout": "mermaid",
+        },
+    },
+    {
+        "id": "timeline",
+        "title": "Timeline",
+        "route": "/demo/timeline",
+        "description": "Milestone tree — nested events with details.",
+        "queries": [q("events")],
+        "root": {
+            "kind": "tree",
+            "title": "Timeline",
+            "query": "events",
+            "expandable": True,
+        },
+    },
+]
+
+MANIFEST = {
+    "name": NAME,
+    "title": "Demo",
+    "icon": "🦚",
+    "version": "0.1.0",
+    "verbs": ["manifest", "serve"],
+    "capabilities": ["pavo"],
+    "contributes": {
+        "navbar": [
+            {"id": "nav-board", "title": "Demo board", "route": "/demo/board", "priority": 10},
+            {"id": "nav-deps", "title": "Demo deps", "route": "/demo/deps", "priority": 20},
+        ],
+        "dashboard": [
+            {"id": "dash", "title": "Demo snapshot", "route": "/demo/board", "priority": 90},
+        ],
+        "statusbar": [
+            {"id": "status", "title": "demo", "route": "/demo/board", "priority": 95},
+        ],
+    },
+    "views": VIEWS,
+}
+
+
+def summary(spec):
+    return {
+        "id": spec["id"],
+        "title": spec["title"],
+        "route": spec["route"],
+        "description": spec.get("description"),
+        "queries": [b["name"] for b in spec.get("queries", [])],
+    }
+
+
+def view_result(view_id, params):
+    for spec in VIEWS:
+        if spec["id"] == view_id:
+            data = {}
+            for binding in spec.get("queries", []):
+                data[binding["name"]] = query_data(binding["name"], params)
+            return {"view": spec, "data": data}
+    return None
+
+
+# ---------------------------------------------------------------- wire
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def respond_ok(result):
+    emit({"ok": True, "result": result})
+
+
+def respond_err(msg):
+    emit({"ok": False, "error": str(msg)})
+
+
+def dispatch(obj):
+    op = obj.get("op")
+    if op == "manifest":
+        respond_ok(MANIFEST)
+    elif op == "views":
+        respond_ok([summary(v) for v in VIEWS])
+    elif op == "view":
+        result = view_result(obj.get("view"), obj.get("params") or {})
+        if result is None:
+            respond_err("unknown view: %s" % obj.get("view"))
+        else:
+            respond_ok(result)
+    elif op == "query":
+        name = obj.get("query")
+        respond_ok({"query": name, "data": query_data(name, obj.get("params") or {})})
+    else:
+        respond_err("unknown op: %s" % op)
+
+
+def serve():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            respond_err("invalid JSON request")
+            continue
+        if not isinstance(obj, dict):
+            respond_err("request must be a JSON object")
+            continue
+        dispatch(obj)
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        sys.stderr.write("usage: tamias-driver-demo manifest|capabilities|serve\n")
+        return 1
+    verb = args[0]
+    if verb == "manifest":
+        sys.stdout.write(json.dumps(MANIFEST, indent=2) + "\n")
+        return 0
+    if verb == "capabilities":
+        sys.stdout.write(json.dumps({
+            "capabilities": MANIFEST["capabilities"],
+            "verbs": MANIFEST["verbs"],
+        }) + "\n")
+        return 0
+    if verb == "serve":
+        return serve()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

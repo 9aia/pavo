@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""tamias-driver-myco — THIN reference driver: proxy a product's serve.
+
+This is the pattern every real product driver follows: the driver owns
+its pavo manifest + ViewNode trees (discovery never needs the product
+running) and translates `view`/`query` ops onto the product's own
+`serve` wire.
+
+The product here is `myco`, whose `serve` speaks JSON-RPC 2.0 with
+verb-named methods (`todo.list`, `adr.list`, `view`, `status`, …).
+This driver keeps one `myco serve` child for its whole `serve`
+session, translates pavo query names to myco methods, and degrades
+gracefully: with no `myco` on PATH, `manifest`/`views` still answer
+while `view`/`query` return `ok:false` "myco not installed".
+
+Op translation (the part a production driver would grow):
+
+    pavo {"op":"query","query":"items"}  -> myco method "todo.list"
+    pavo {"op":"query","query":"adrs"}   -> myco method "adr.list"
+    pavo {"op":"query","query":"board"}  -> myco method "view" {name:board}
+    pavo {"op":"query","query":"status"} -> myco method "status"
+
+myco discovers the repo from the cwd it inherits — run `pavo` inside
+a myco-managed repo and the views show *that* repo's ledger.
+
+The production version of this driver lives in the myco repo — this
+example exists to prove the proxy pattern end-to-end.
+"""
+
+import json
+import shutil
+import subprocess
+import sys
+
+NAME = "myco"
+
+MYCO_BIN = shutil.which("myco")
+
+# pavo query/binding name -> (myco method, static params)
+METHODS = {
+    "items": ("todo.list", {}),
+    "board": ("view", {"name": "board"}),
+    "adrs": ("adr.list", {}),
+    "status": ("status", {}),
+}
+
+VIEWS = [
+    {
+        "id": "board",
+        "title": "Board",
+        "route": "/myco/board",
+        "description": "The myco work ledger (proxied to `myco serve`).",
+        "queries": [
+            {"name": "items", "op": "query", "params": {}},
+            {"name": "status", "op": "query", "params": {}},
+        ],
+        "root": {
+            "kind": "column",
+            "title": "Myco board",
+            "children": [
+                {"kind": "kv", "title": "Ledger", "query": "status", "pairs": []},
+                {
+                    "kind": "table",
+                    "title": "Items",
+                    "query": "items",
+                    "columns": [
+                        {"key": "id", "title": "ID", "width": 8},
+                        {"key": "title", "title": "Title"},
+                        {"key": "status", "title": "Status", "width": 12},
+                    ],
+                },
+            ],
+        },
+    },
+    {
+        "id": "items",
+        "title": "Items",
+        "route": "/myco/items",
+        "description": "Flat TODO list (proxied `todo.list`).",
+        "queries": [{"name": "items", "op": "query", "params": {}}],
+        "root": {
+            "kind": "table",
+            "title": "Items",
+            "query": "items",
+            "columns": [
+                {"key": "id", "title": "ID", "width": 8},
+                {"key": "title", "title": "Title"},
+                {"key": "status", "title": "Status", "width": 12},
+                {"key": "priority", "title": "Priority", "width": 8},
+            ],
+        },
+    },
+    {
+        "id": "adrs",
+        "title": "ADRs",
+        "route": "/myco/adrs",
+        "description": "Architecture decision records (proxied `adr.list`).",
+        "queries": [{"name": "adrs", "op": "query", "params": {}}],
+        "root": {
+            "kind": "table",
+            "title": "ADRs",
+            "query": "adrs",
+            "columns": [
+                {"key": "id", "title": "ID", "width": 10},
+                {"key": "title", "title": "Title"},
+                {"key": "status", "title": "Status", "width": 10},
+            ],
+        },
+    },
+]
+
+MANIFEST = {
+    "name": NAME,
+    "title": "Myco",
+    "icon": "📋",
+    "version": "0.1.0",
+    "verbs": ["manifest", "serve"],
+    "capabilities": ["pavo"],
+    "contributes": {
+        "navbar": [
+            {"id": "nav-board", "title": "Myco", "route": "/myco/board", "priority": 20},
+        ],
+    },
+    "views": VIEWS,
+}
+
+
+class MycoSession:
+    """One `myco serve` child speaking JSON-RPC 2.0, spawned lazily and
+    kept for the driver's whole `serve` lifetime."""
+
+    def __init__(self):
+        self.proc = None
+        self.next_id = 0
+
+    def _spawn(self):
+        self.proc = subprocess.Popen(
+            [MYCO_BIN, "serve"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+    def call(self, method, params):
+        """-> (ok, payload_or_error). Never raises."""
+        if MYCO_BIN is None:
+            return False, "myco not installed"
+        if self.proc is None or self.proc.poll() is not None:
+            try:
+                self._spawn()
+            except Exception as e:
+                return False, "myco serve spawn failed: %s" % e
+        self.next_id += 1
+        rid = self.next_id
+        request = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+        try:
+            self.proc.stdin.write(json.dumps(request) + "\n")
+            self.proc.stdin.flush()
+            line = self.proc.stdout.readline()
+        except Exception as e:
+            self._kill()
+            return False, "myco serve io failed: %s" % e
+        if not line:
+            self._kill()
+            return False, "myco serve closed without a response"
+        try:
+            resp = json.loads(line)
+        except Exception:
+            self._kill()
+            return False, "myco serve returned non-JSON: %s" % line[:120]
+        if resp.get("id") != rid:
+            # myco is sequential; a mismatched id means the wire
+            # desynced — kill so the next call respawns cleanly.
+            self._kill()
+            return False, "myco serve response id mismatch"
+        if "error" in resp and resp["error"] is not None:
+            err = resp["error"]
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            return False, "myco %s: %s" % (method, msg)
+        return True, resp.get("result")
+
+    def _kill(self):
+        if self.proc is not None:
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+            self.proc = None
+
+    def close(self):
+        self._kill()
+
+
+_SESSION = MycoSession()
+
+
+def query_data(name, params):
+    """Translate a pavo query name to a myco method call."""
+    if name not in METHODS:
+        return None
+    method, static = METHODS[name]
+    merged = dict(static)
+    merged.update(params or {})
+    ok, payload = _SESSION.call(method, merged)
+    if not ok:
+        return {"error": payload}
+    return payload
+
+
+def summary(spec):
+    return {
+        "id": spec["id"],
+        "title": spec["title"],
+        "route": spec["route"],
+        "description": spec.get("description"),
+        "queries": [b["name"] for b in spec.get("queries", [])],
+    }
+
+
+def view_result(view_id, params):
+    for spec in VIEWS:
+        if spec["id"] == view_id:
+            data = {}
+            for binding in spec.get("queries", []):
+                data[binding["name"]] = query_data(binding["name"], params)
+            return {"view": spec, "data": data}
+    return None
+
+
+# ---------------------------------------------------------------- wire
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def respond_ok(result):
+    emit({"ok": True, "result": result})
+
+
+def respond_err(msg):
+    emit({"ok": False, "error": str(msg)})
+
+
+def dispatch(obj):
+    op = obj.get("op")
+    params = obj.get("params") or {}
+    if op == "manifest":
+        respond_ok(MANIFEST)
+    elif op == "views":
+        respond_ok([summary(v) for v in VIEWS])
+    elif op == "view":
+        result = view_result(obj.get("view"), params)
+        if result is None:
+            respond_err("unknown view: %s" % obj.get("view"))
+        else:
+            respond_ok(result)
+    elif op == "query":
+        name = obj.get("query")
+        payload = query_data(name, params)
+        if payload is None:
+            respond_err("unknown query: %s" % name)
+        else:
+            respond_ok({"query": name, "data": payload})
+    else:
+        respond_err("unknown op: %s" % op)
+
+
+def serve():
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                respond_err("invalid JSON request")
+                continue
+            if not isinstance(obj, dict):
+                respond_err("request must be a JSON object")
+                continue
+            dispatch(obj)
+    finally:
+        _SESSION.close()
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        sys.stderr.write("usage: tamias-driver-myco manifest|capabilities|serve\n")
+        return 1
+    verb = args[0]
+    if verb == "manifest":
+        sys.stdout.write(json.dumps(MANIFEST, indent=2) + "\n")
+        return 0
+    if verb == "capabilities":
+        sys.stdout.write(json.dumps({
+            "capabilities": MANIFEST["capabilities"],
+            "verbs": MANIFEST["verbs"],
+            "myco": MYCO_BIN is not None,
+        }) + "\n")
+        return 0
+    if verb == "serve":
+        return serve()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

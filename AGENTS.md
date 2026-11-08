@@ -98,6 +98,7 @@ cargo xtask check          # fmt + clippy -D warnings
 cargo xtask test           # whole suite (nextest if present)
 cargo xtask coverage       # llvm-cov report (HTML → target/llvm-cov/html)
 cargo xtask install        # release-install pavo → ~/.cargo/bin
+./scripts/smoke-examples.sh  # run examples/drivers/* end-to-end via pavo
 ```
 
 Git hooks live in `.hooks/` when present (`core.hooksPath` =
