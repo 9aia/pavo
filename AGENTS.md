@@ -139,7 +139,11 @@ check`.
 
 ## Docs
 
-`docs/` worktree (VitePress → GitHub Pages) is planned, not yet
-created. Module doc comments (`//!`) in `pavo-protocol` are the
-reference seed — keep them accurate; generated docs will feed from
-them.
+`docs/` worktree (VitePress + Diátaxis → GitHub Pages at
+`9aia.com/pavo`) lives on the orphan `docs` branch — gitignored on
+`main`, never commit its contents here. `cargo xtask site` runs
+`docs:gen` + `vitepress build`; `docs/scripts/deploy-docs.sh`
+publishes `.vitepress/dist` to `gh-pages`. Module doc comments
+(`//!`) in `pavo-protocol` are the reference seed — keep them
+accurate; `gen-crate-map.py` renders the crate map from workspace
+Cargo.tomls (never hand-edit the generated sections).

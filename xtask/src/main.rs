@@ -8,6 +8,7 @@
 //!   extra args pass through, e.g. `--fail-under-lines 97`
 //! - `install`  — release-install `pavo` + `tamias-driver-config`
 //!   into ~/.cargo/bin
+//! - `site`     — build the docs site (docs/ worktree, VitePress)
 
 use std::process::{Command, ExitStatus};
 
@@ -112,6 +113,41 @@ fn install() -> i32 {
     i32::from(!ok)
 }
 
+fn site() -> i32 {
+    if !std::path::Path::new("docs/package.json").exists() {
+        eprintln!("no docs/ worktree — `git worktree add --orphan -b docs docs` first");
+        return 1;
+    }
+    let pkg = if have("bun") { "bun" } else { "npm" };
+    let _ = run_in("docs", &[pkg, "install"]).success();
+    run_in("docs", &[pkg, "run", "docs:build"])
+        .code()
+        .unwrap_or(1)
+}
+
+/// Run a command in a subdirectory — used by `site` for the docs
+/// worktree (which may not be a cargo workspace member).
+fn run_in(dir: &str, args: &[&str]) -> ExitStatus {
+    Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(dir)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("xtask: failed to spawn {} in {dir}: {e}", args[0]);
+            std::process::exit(1)
+        })
+}
+
+fn have(cmd: &str) -> bool {
+    Command::new(cmd)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Verb dispatch — split from `main` so the unknown-verb path is
 /// unit-testable without spawning cargo.
 fn dispatch(cmd: &str, rest: &[String]) -> i32 {
@@ -120,9 +156,10 @@ fn dispatch(cmd: &str, rest: &[String]) -> i32 {
         "test" => test(),
         "coverage" => coverage(rest),
         "install" => install(),
+        "site" => site(),
         other => {
             eprintln!(
-                "usage: cargo xtask <check|test|coverage|install>\n  unknown verb: {other:?}"
+                "usage: cargo xtask <check|test|coverage|install|site>\n  unknown verb: {other:?}"
             );
             2
         }
