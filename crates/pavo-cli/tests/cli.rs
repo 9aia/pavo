@@ -366,3 +366,36 @@ fn manifest_and_schema_self_description() {
     assert!(v["verbs"]["view"].is_object());
     assert!(v["exit_codes"]["2"].is_string());
 }
+
+#[test]
+fn open_without_tty_and_no_target_is_usage_error() {
+    let fx = fixture();
+    // Tests run with piped stdio — never a TTY — so bare `open`
+    // must fail as usage rather than spawning pavo-tui.
+    let o = pavo(&fx, &["open"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("needs a terminal"), "{}", stderr(&o));
+}
+
+#[test]
+fn open_non_tty_falls_back_to_text_view() {
+    let fx = fixture();
+    let o = pavo(&fx, &["open", "demo:board"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("not a TTY"),
+        "missing fallback note: {}",
+        stderr(&o)
+    );
+    let out = stdout(&o);
+    assert!(out.contains("Board"), "{out}");
+    assert!(out.contains("T-1"), "{out}");
+}
+
+#[test]
+fn open_unknown_target_errors() {
+    let fx = fixture();
+    let o = pavo(&fx, &["open", "ghost:board"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("unknown driver"), "{}", stderr(&o));
+}

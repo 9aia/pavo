@@ -19,6 +19,10 @@
 //!   `/api/*` JSON endpoints over the same [`Host`] plus static
 //!   serving of the Nuxt build (`web/.output/public`). First stdout
 //!   line is `listening http://127.0.0.1:<port>`.
+//! - `open [<driver>:<view>]` — hand off to `pavo-tui` (the ratatui
+//!   surface) with the deep link, or the bare dashboard when no
+//!   target is given. On a non-TTY it falls back to `pavo view`
+//!   text output for the given target.
 //! - `manifest` / `schema` — the CLI's own capability manifest and
 //!   verb schema (sibling convention: tamias/kuda).
 //!
@@ -40,6 +44,7 @@ mod serve;
 use clap::{Parser, Subcommand};
 use pavo_core::{Host, Params, PavoError};
 use serde_json::{json, Map, Value};
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -110,6 +115,13 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         port: u16,
     },
+    /// Open a view in the TUI (`pavo-tui`) — the interactive surface.
+    /// Falls back to `view` text output when stdout is not a TTY.
+    Open {
+        /// `<driver>:<view>` deep link (bare `<driver>` = its first
+        /// view). Omit to open the TUI dashboard.
+        target: Option<String>,
+    },
     /// Print the pavo capability manifest (JSON).
     Manifest,
     /// Print the CLI verb schema (JSON).
@@ -162,7 +174,7 @@ impl From<PavoError> for Fail {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(f) => {
             eprintln!("pavo: {}", f.msg);
             ExitCode::from(f.code)
@@ -170,29 +182,32 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), Fail> {
+/// `Ok` carries the process exit code (only `open` can produce a
+/// non-zero one — it propagates `pavo-tui`'s status).
+fn run(cli: Cli) -> Result<u8, Fail> {
     match cli.command {
         None => {
             println!("pavo {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
+            Ok(0)
         }
-        Some(Command::Drivers { json }) => cmd_drivers(json),
-        Some(Command::Views { driver, json }) => cmd_views(driver.as_deref(), json),
-        Some(Command::Chrome { json }) => cmd_chrome(json),
+        Some(Command::Drivers { json }) => cmd_drivers(json).map(|_| 0),
+        Some(Command::Views { driver, json }) => cmd_views(driver.as_deref(), json).map(|_| 0),
+        Some(Command::Chrome { json }) => cmd_chrome(json).map(|_| 0),
         Some(Command::View {
             target,
             params,
             format,
-        }) => cmd_view(&target, &params, &format),
+        }) => cmd_view(&target, &params, &format).map(|_| 0),
         Some(Command::Query {
             driver,
             query,
             params,
             json,
-        }) => cmd_query(&driver, &query, &params, json),
-        Some(Command::Serve { port }) => {
-            serve::run(port).map_err(|e| Fail::err(format!("serve: {e}")))
-        }
+        }) => cmd_query(&driver, &query, &params, json).map(|_| 0),
+        Some(Command::Serve { port }) => serve::run(port)
+            .map(|_| 0)
+            .map_err(|e| Fail::err(format!("serve: {e}"))),
+        Some(Command::Open { target }) => cmd_open(target.as_deref()),
         Some(Command::Manifest) => {
             println!(
                 "{}",
@@ -201,11 +216,11 @@ fn run(cli: Cli) -> Result<(), Fail> {
                     "version": env!("CARGO_PKG_VERSION"),
                     "verbs": [
                         "drivers", "views", "chrome", "view", "query",
-                        "serve", "manifest", "schema"
+                        "serve", "open", "manifest", "schema"
                     ],
                 })
             );
-            Ok(())
+            Ok(0)
         }
         Some(Command::Schema) => {
             println!(
@@ -213,7 +228,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
                 serde_json::to_string_pretty(&schema_doc())
                     .map_err(|e| Fail::err(format!("schema serialization: {e}")))?
             );
-            Ok(())
+            Ok(0)
         }
     }
 }
@@ -253,6 +268,11 @@ fn schema_doc() -> Value {
                 "summary": "localhost HTTP bridge for the web host (api + static)",
                 "flags": {"--port": "u16 (0 = free port, printed on stdout)"}
             },
+            "open": {
+                "summary": "open a view in pavo-tui (interactive surface); \
+                            non-TTY falls back to view text output",
+                "args": ["<driver>:<view> (optional — omit for the dashboard)"]
+            },
             "manifest": {"summary": "print the pavo capability manifest (JSON)"},
             "schema": {"summary": "print this verb schema (JSON)"}
         },
@@ -262,6 +282,63 @@ fn schema_doc() -> Value {
 }
 
 // ---------- verbs ----------
+
+/// `pavo open` — hand the deep link to `pavo-tui` on a TTY, else
+/// degrade to `view` text output. Returns `pavo-tui`'s exit status.
+fn cmd_open(target: Option<&str>) -> Result<u8, Fail> {
+    if std::io::stdout().is_terminal() {
+        return spawn_tui(target);
+    }
+    let Some(target) = target else {
+        return Err(Fail::usage(
+            "pavo open needs a terminal for the TUI — pass <driver>:<view> \
+             (or use `pavo view`) for text output",
+        ));
+    };
+    eprintln!("pavo: not a TTY — rendering text output instead of the TUI");
+    cmd_view(target, &[], "text").map(|_| 0)
+}
+
+/// Candidate `pavo-tui` binaries: the sibling of this executable
+/// (covers `cargo run`/target-dir installs) then `PATH`.
+fn tui_candidates() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join("pavo-tui"));
+        }
+    }
+    out.push(std::path::PathBuf::from("pavo-tui"));
+    out
+}
+
+/// Spawn `pavo-tui` (inheriting stdio) with the optional deep link
+/// and propagate its exit status.
+fn spawn_tui(target: Option<&str>) -> Result<u8, Fail> {
+    let mut last_err = String::new();
+    for cand in tui_candidates() {
+        let mut cmd = std::process::Command::new(&cand);
+        if let Some(t) = target {
+            cmd.arg(t);
+        }
+        match cmd.status() {
+            Ok(status) => {
+                // Signals yield no code; clamp exotic values to 1.
+                let code = status
+                    .code()
+                    .and_then(|c| u8::try_from(c).ok())
+                    .unwrap_or(1);
+                return Ok(code);
+            }
+            Err(e) => last_err = format!("{}: {e}", cand.display()),
+        }
+    }
+    Err(Fail::err(format!(
+        "pavo-tui not found on PATH or next to pavo ({last_err}) — \
+         install it (`cargo xtask install` or `cargo install --path crates/pavo-tui`) \
+         or run `cargo run -p pavo-tui`"
+    )))
+}
 
 fn cmd_drivers(json: bool) -> Result<(), Fail> {
     let mut host = Host::discover();
