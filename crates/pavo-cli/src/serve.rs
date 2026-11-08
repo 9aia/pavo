@@ -18,6 +18,7 @@
 //! - `GET /api/view?ref=<driver>:<view>` (+ `param.<k>=<v>`) → ViewResult
 //! - `GET /api/raw?ref=…` → same as `/api/view`
 //! - `GET /api/query?driver=<d>&query=<q>` (+ `param.<k>=<v>`) → QueryResult
+//! - `GET /api/submit?ref=<d>:<v>[&form=<id>][&values=<json>]` → SubmitResult
 //! - `GET /api/renderers` → the renderer-plugin registry (kind claims)
 //! - `GET /api/render?kind=<k>&node=<json>&data=<json>&surface=<s>[&format=<f>]`
 //!   → RenderModel — routes to the claiming driver's `render` op
@@ -170,6 +171,7 @@ fn api_route(path: &str, pairs: &[(String, String)], host: &Host) -> Response {
         "chrome" => api_chrome(host),
         "view" | "raw" => api_view(host, pairs),
         "query" => api_query(host, pairs),
+        "submit" => api_submit(host, pairs),
         "renderers" => api_renderers(host),
         "render" => api_render(host, pairs),
         _ => Err(ApiFail::new(404, format!("unknown endpoint '{endpoint}'"))),
@@ -324,6 +326,23 @@ fn api_query(host: &Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> 
         .ok_or_else(|| ApiFail::new(400, "missing 'query' param"))?;
     let params: Params = http::collect_params(pairs).into_iter().collect();
     let result = host.query(driver, query, params)?;
+    serde_json::to_value(&result).map_err(|e| ApiFail::new(500, e.to_string()))
+}
+
+/// `GET /api/submit` — the `submit` wire op over HTTP. `ref` (or
+/// `driver`+`view`) names the target like `/api/view`; `form` is the
+/// optional form-node id; field values come from a JSON object in
+/// `?values={…}` or, absent that, the `param.<k>=<v>` convention
+/// `/api/view` uses.
+fn api_submit(host: &Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
+    let target = view_target(pairs)?;
+    let form = http::query_get(pairs, "form");
+    let values: Params = match http::query_get(pairs, "values") {
+        Some(raw) => serde_json::from_str(raw)
+            .map_err(|e| ApiFail::new(400, format!("'values' isn't a JSON object: {e}")))?,
+        None => http::collect_params(pairs).into_iter().collect(),
+    };
+    let result = host.submit(&target, form, values)?;
     serde_json::to_value(&result).map_err(|e| ApiFail::new(500, e.to_string()))
 }
 
@@ -875,6 +894,7 @@ if [ "$1" = serve ]; then
       *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/demo/board","queries":["items"]}]}' ;;
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
+      *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
       *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
     esac
   done
@@ -982,6 +1002,33 @@ exit 1
 
         // Unknown driver → 404.
         let resp = api(&host, "/api/query?driver=ghost&query=x");
+        assert_eq!(resp.status, 404);
+    }
+
+    #[test]
+    fn api_submit_roundtrip() {
+        let host = fixture_host();
+        // values as a JSON object.
+        let body = envelope(&api(
+            &host,
+            "/api/submit?ref=demo%3Aboard&values=%7B%22k%22%3A%22v%22%7D",
+        ));
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["result"]["message"], "saved");
+
+        // param.* fallback + form id.
+        let body = envelope(&api(
+            &host,
+            "/api/submit?driver=demo&view=board&form=f1&param.k=v",
+        ));
+        assert_eq!(body["ok"], true, "{body}");
+
+        // Missing ref → 400; bad values JSON → 400; unknown view → 404.
+        let resp = api(&host, "/api/submit");
+        assert_eq!(resp.status, 400);
+        let resp = api(&host, "/api/submit?ref=demo:board&values=%7Bbad");
+        assert_eq!(resp.status, 400);
+        let resp = api(&host, "/api/submit?ref=demo:nope");
         assert_eq!(resp.status, 404);
     }
 

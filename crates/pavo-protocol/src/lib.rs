@@ -34,4 +34,4 @@ pub use view_node::{
     GraphNodeItem, KvNode, KvPair, MarkdownNode, NodeBase, PanelNode, RowNode, TableColumn,
     TableNode, TreeItem, TreeNode, ViewNode,
 };
-pub use wire::{Request, Response, WireError};
+pub use wire::{Request, Response, SubmitResult, WireError};

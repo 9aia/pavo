@@ -183,7 +183,10 @@
           "items": { "$ref": "#/$defs/formField" },
           "default": []
         },
-        "submit_op": { "type": ["string", "null"] },
+        "submit_op": {
+          "type": ["string", "null"],
+          "description": "Driver-side action invoked on submit (\"set\", \"update\", \"add\", …); the wire op is always `submit`. Absent = preview-only form."
+        },
         "submit_label": { "type": ["string", "null"] }
       },
       "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
@@ -199,7 +202,13 @@
         "options": { "type": "array", "items": { "type": "string" } },
         "default": {},
         "value": {},
-        "hint": { "type": ["string", "null"] }
+        "hint": { "type": ["string", "null"] },
+        "editable": {
+          "type": "boolean",
+          "default": true,
+          "description": "false renders the field read-only on interactive surfaces; its value is never submitted."
+        },
+        "placeholder": { "type": ["string", "null"] }
       }
     },
     "kv": {

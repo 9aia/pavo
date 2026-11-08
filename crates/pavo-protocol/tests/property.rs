@@ -286,6 +286,8 @@ fn form_node() -> BoxedStrategy<ViewNode> {
                             default,
                             value,
                             hint,
+                            editable: true,
+                            placeholder: None,
                         },
                     )
                     .collect(),

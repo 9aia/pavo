@@ -71,6 +71,15 @@ impl<V: Clone> TtlCache<V> {
         }
     }
 
+    /// Drop every key starting with `prefix` — e.g. all cached
+    /// `driver:view␟params` entries for one view after a `submit`
+    /// mutates its backing state.
+    pub fn invalidate_prefix(&self, prefix: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.retain(|k, _| !k.starts_with(prefix));
+        }
+    }
+
     /// Drop everything.
     pub fn clear(&self) {
         if let Ok(mut inner) = self.inner.lock() {

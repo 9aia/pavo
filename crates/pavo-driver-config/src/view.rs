@@ -61,6 +61,44 @@ fn show_view() -> ViewSpec {
     }
 }
 
+/// `config:edit` — the interactive proof: a `form` node whose
+/// `submit_op` is `"set"`. Submitting sends `{"op":"submit","view":
+/// "edit","values":{"key":…,"value":…}}`; the driver writes the
+/// key through the same `set` query path.
+fn edit_view() -> ViewSpec {
+    ViewSpec {
+        id: "edit".to_string(),
+        title: "Edit config".to_string(),
+        route: "/config/edit".to_string(),
+        description: Some(
+            "Set a namespaced config key — the suite's first \
+             interactive form (submit wire op)."
+                .to_string(),
+        ),
+        queries: vec![],
+        root: node(json!({
+            "kind": "column",
+            "title": "Edit config",
+            "children": [
+                {"kind": "form", "id": "set-config", "title": "Set key",
+                 "submit_op": "set", "submit_label": "Save",
+                 "fields": [
+                    {"key": "key", "label": "Key", "kind": "text",
+                     "required": true, "placeholder": "myco.theme",
+                     "hint": "dotted namespaced path, e.g. myco.theme or kuda.index"},
+                    {"key": "value", "label": "Value", "kind": "text",
+                     "required": true, "placeholder": "dark",
+                     "hint": "JSON scalar or string — 42, true, \"dark\""}
+                 ]},
+                {"kind": "markdown", "text":
+                    "Writes the project-level `pavo.toml`/`pavo.json` \
+                     (nearest ancestor of the driver's cwd). Values \
+                     parse as JSON when possible, else strings."}
+            ]
+        })),
+    }
+}
+
 /// `config:sources` — just the provenance table.
 fn sources_view() -> ViewSpec {
     ViewSpec {
@@ -119,7 +157,7 @@ pub fn manifest() -> DriverManifest {
             }],
             ..Contributes::default()
         },
-        views: vec![show_view(), sources_view()],
+        views: vec![show_view(), sources_view(), edit_view()],
         renderers: Vec::new(),
     }
 }

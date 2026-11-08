@@ -63,6 +63,14 @@ in the workspace tree; `.yaml`/`.yml` files surface as `error` rows in
 | ------------------ | ------------------ | -------------------------------------------- |
 | `config:show`      | `/config`          | resolved KV + sources table + resolution doc |
 | `config:sources`   | `/config/sources`  | provenance table only                        |
+| `config:edit`      | `/config/edit`     | **interactive form** — set any key via submit |
+
+`config:edit` carries a `form` node (`submit_op: "set"`). Submitting
+`{"op":"submit","view":"edit","values":{"key":"myco.theme",
+"value":"dark"}}` writes the key through the same path as `query
+set` and answers a `SubmitResult` (`message`/`data`, or `errors`
+per missing field). CLI equivalent: `pavo submit config:edit
+--param key=myco.theme --param value=dark`.
 
 Contributes a `statusbar` entry linking to `/config`.
 

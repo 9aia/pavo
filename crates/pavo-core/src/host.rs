@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pavo_protocol::wire::{QueryResult, ViewResult, ViewSummary};
+use pavo_protocol::wire::{QueryResult, SubmitResult, ViewResult, ViewSummary};
 use pavo_protocol::{DriverManifest, RenderModel};
 use serde_json::Value;
 
@@ -410,6 +410,57 @@ impl Host {
         self.with_client(driver, |client| client.query(query, params))
     }
 
+    /// `{"op":"submit"}` — submit a form's field values to the driver
+    /// that owns `target` (`"<driver>:<view>"`, bare `"<driver>"` =
+    /// its first view, same as [`Host::resolve_view`]). `form`
+    /// optionally names the form node's `id` when the view carries
+    /// several forms.
+    ///
+    /// On success every cached result for that `driver:view` is
+    /// invalidated — submits mutate driver state, so the next
+    /// `resolve_view` must re-fetch (a returned
+    /// [`SubmitResult::view`] is *not* inserted into the cache; it
+    /// belongs to the submitting renderer).
+    ///
+    /// # Errors
+    /// [`PavoError::BadViewRef`] / [`PavoError::UnknownDriver`] /
+    /// [`PavoError::UnknownView`] for bad targets; `ok:false` driver
+    /// answers (validation failures included — check
+    /// [`SubmitResult::errors`] on `Ok`) propagate as
+    /// [`PavoError::Driver`].
+    pub fn submit(
+        &self,
+        target: &str,
+        form: Option<&str>,
+        values: Params,
+    ) -> Result<SubmitResult, PavoError> {
+        let (driver, view) = self.parse_target(target)?;
+        let manifest = self.manifest(&driver)?;
+        let view_id = match view {
+            Some(v) => v,
+            None => manifest
+                .views
+                .first()
+                .map(|v| v.id.clone())
+                .ok_or_else(|| PavoError::UnknownView {
+                    driver: driver.clone(),
+                    view: "<default>".to_string(),
+                })?,
+        };
+        if !manifest.views.iter().any(|v| v.id == view_id) {
+            return Err(PavoError::UnknownView {
+                driver,
+                view: view_id,
+            });
+        }
+        let result = self.with_client(&driver, |client| client.submit(&view_id, form, values))?;
+        // Submits mutate state — drop every cached params variant of
+        // this view so the next resolve re-fetches.
+        self.view_cache
+            .invalidate_prefix(&format!("{driver}:{view_id}\u{1f}"));
+        Ok(result)
+    }
+
     /// `{"op":"views"}` passthrough — the driver's view summaries
     /// straight from its `serve` (may differ from manifest-derived
     /// [`Host::list_views`] if the driver computes views dynamically).
@@ -596,6 +647,7 @@ if [ "$1" = serve ]; then
       *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/fx/board","queries":["items"]}]}' ;;
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/fx/board","root":{"kind":"kv","pairs":[]}},"data":{"items":[1,2]}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
+      *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
       *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"fx","title":"Fx","version":"0.1.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/fx/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
     esac
   done
@@ -635,7 +687,13 @@ exit 1
         write_driver(&bin, "tamias-driver-lz", LZ);
         let home = tmp.path().join("home");
 
-        let host = Host::discover_with(opts(&bin, &home));
+        // Short timeout: lz's serve never answers `submit`, and the
+        // test shouldn't wait out the default 10s.
+        let host = Host::discover_with(opts(&bin, &home)).with_client_config(ClientConfig {
+            timeout: Duration::from_secs(2),
+            max_restarts: 0,
+            ..ClientConfig::default()
+        });
         assert_eq!(host.drivers().len(), 2);
 
         // chrome merges eager + lazy manifests
@@ -675,6 +733,19 @@ exit 1
         // query passthrough
         let q = host.query("fx", "items", Params::new()).unwrap();
         assert_eq!(q.data, serde_json::json!([1, 2]));
+
+        // submit: namespaced + bare-driver targets, then cache drop
+        let s = host.submit("fx:board", None, Params::new()).unwrap();
+        assert_eq!(s.message.as_deref(), Some("saved"));
+        assert!(host.submit("lz", None, Params::new()).is_err()); // lz has no submit op
+        assert!(matches!(
+            host.submit("fx:nope", None, Params::new()),
+            Err(PavoError::UnknownView { .. })
+        ));
+        // resolve again post-submit — the view cache was invalidated
+        // for fx:board (refetch succeeds against the same fixture).
+        let v = host.resolve_view("fx:board", Params::new()).unwrap();
+        assert_eq!(v.result.data["items"], serde_json::json!([1, 2]));
     }
 
     #[test]

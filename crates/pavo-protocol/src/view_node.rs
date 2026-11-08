@@ -262,16 +262,25 @@ pub struct GraphEdge {
 }
 
 /// `form` — input fields plus a submit op.
+///
+/// A form is *interactive* when it carries a [`FormNode::submit_op`]
+/// (or sits in a view whose driver answers the wire `submit` op —
+/// see [`crate::wire::Request::Submit`]). Fields with
+/// [`FormField::editable`] `false` render read-only even on
+/// interactive surfaces; the rest submit their `key` → value pairs.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FormNode {
-    /// Shared node fields.
+    /// Shared node fields — `base.id` is the form's submit target
+    /// (the wire `submit` op's optional `form` param).
     #[serde(flatten)]
     pub base: NodeBase,
     /// Field declarations, in display order.
     #[serde(default)]
     pub fields: Vec<FormField>,
-    /// Wire op invoked on submit (e.g. `"set"`, `"update"`). When
-    /// absent the renderer may only preview the form.
+    /// Driver-side action invoked on submit (e.g. `"set"`, `"update"`,
+    /// `"add"`) — the driver maps it to its own behavior; the wire op
+    /// is always `submit`. When absent the renderer may only preview
+    /// the form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submit_op: Option<String>,
     /// Submit button label; renderers default to "Submit".
@@ -322,6 +331,21 @@ pub struct FormField {
     /// Help text rendered under the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Whether the field accepts user input on interactive surfaces.
+    /// `false` renders the current `value` read-only (a `value`-only
+    /// display field inside a form). Defaults to `true` — fields in
+    /// forms predating this flag were always meant to be inputs.
+    #[serde(default = "default_true")]
+    pub editable: bool,
+    /// Placeholder text shown while the field is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+/// Serde default for [`FormField::editable`] — fields are editable
+/// unless a driver says otherwise.
+fn default_true() -> bool {
+    true
 }
 
 /// `kv` — key/value pairs: detail panes, metadata, and the universal
@@ -442,5 +466,31 @@ mod tests {
             node.base_mut().id = Some(format!("n{i}"));
             assert_eq!(node.base().id.as_deref(), Some(format!("n{i}").as_str()));
         }
+    }
+
+    /// Pre-`editable`/`placeholder` form JSON still parses — fields
+    /// default to editable, placeholders to absent.
+    #[test]
+    fn legacy_form_field_json_still_parses() {
+        let node: ViewNode = serde_json::from_value(json!({
+            "kind": "form",
+            "id": "prefs",
+            "submit_op": "set",
+            "fields": [
+                {"key": "theme", "label": "Theme", "kind": "select",
+                 "options": ["dark", "light"], "value": "dark"},
+                {"key": "note", "label": "Note", "editable": false,
+                 "value": "read-only", "placeholder": "type here"}
+            ]
+        }))
+        .unwrap();
+        let ViewNode::Form(form) = node else {
+            panic!("expected form");
+        };
+        assert_eq!(form.base.id.as_deref(), Some("prefs"));
+        assert!(form.fields[0].editable);
+        assert!(form.fields[0].placeholder.is_none());
+        assert!(!form.fields[1].editable);
+        assert_eq!(form.fields[1].placeholder.as_deref(), Some("type here"));
     }
 }

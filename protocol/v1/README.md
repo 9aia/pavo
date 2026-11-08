@@ -41,10 +41,42 @@ Design context: `project/project/proposals/proposal-0003-*` and
    `props`) to the top level. `embed` is the escape hatch for rich
    renderers.
 3. **Wire ops** — one JSON object per line:
-   requests `{"op":"manifest|views|view|query|render", …}`,
+   requests `{"op":"manifest|views|view|query|render|submit", …}`,
    responses `{"ok":true,"result":…}` / `{"ok":false,"error":"…"}`.
    Same convention as `tamias-serve`, `myco serve`, `cuora serve`,
    `sepia serve`.
+
+## Interactive forms (`submit`)
+
+`form` ViewNodes are interactive: fields marked `editable` (default
+`true`; `false` renders read-only and is never submitted) collect
+user input, and surfaces post it with the `submit` op:
+
+```
+{"op":"submit","view":"edit","form":"set-config",
+ "values":{"key":"myco.theme","value":"dark"}}
+→ {"ok":true,"result":{"message":"set myco.theme",
+    "data":{…},"errors":{},"view":{…optional fresh ViewResult…}}}
+```
+
+- `view` — the view id the form lives in (same namespace as `view`).
+- `form` — optional; the form node's `id` (`NodeBase.id`) when the
+  view carries several forms. Absent = the driver's default/first
+  form.
+- `values` — field `key` → submitted JSON value.
+
+The driver resolves the form node, reads its `submit_op`
+(`"set"`, `"update"`, `"add"`, … — driver-defined), and answers a
+[`SubmitResult`](#): `message` (status line), `errors` (per-field
+validation failures — non-empty means *rejected*, hosts should
+re-render, not navigate), `data` (driver payload), `view` (optional
+updated `ViewResult` to swap in). Drivers without form support
+answer `ok:false` — unknown ops were already protocol errors, so
+`submit` joins the v1 op set additively.
+
+No separate `action` op in v1: buttons/links beyond the single
+submit are deferred — a driver needing them can model them as
+additional forms (each with its own `submit_op`) or `embed` nodes.
 
 ## Renderer plugins
 

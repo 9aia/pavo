@@ -4,7 +4,8 @@
 //! suite. Graduated from `examples/drivers/config` (the Python
 //! prototype); now a first-party Rust driver in the pavo workspace.
 //!
-//! Answers pavo's wire ops (`manifest`/`views`/`view`/`query`/`render`)
+//! Answers pavo's wire ops (`manifest`/`views`/`view`/`query`/`render`/
+//! `submit`)
 //! over `serve`, plus the sibling CLI verbs `manifest` and
 //! `capabilities`. The `query` surface is the product-facing API:
 //!
@@ -29,7 +30,10 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use pavo_protocol::wire::{parse_request, QueryResult, Request, Response, ViewResult};
+use pavo_protocol::wire::{
+    parse_request, QueryResult, Request, Response, SubmitResult, ViewResult,
+};
+use pavo_protocol::ViewNode;
 use serde_json::{json, Map, Value};
 
 use config::{load, Options};
@@ -130,6 +134,7 @@ fn dispatch(req: &Request, opts: &Options) -> Response {
         Request::Views => Response::ok_typed(&view::view_summaries()),
         Request::View { view, params } => view_result(view, params, opts),
         Request::Query { query, params } => query_op(query, params, opts),
+        Request::Submit { view, form, values } => submit_op(view, form.as_deref(), values, opts),
         Request::Render { .. } => {
             Response::err("config driver ships no renderers — built-in rendering applies")
         }
@@ -220,6 +225,87 @@ fn query_data(query: &str, params: &Map<String, Value>, opts: &Options) -> Optio
     }
 }
 
+/// `submit` op — resolve the view's form node (by `form` id, else
+/// the first form), read its `submit_op`, and dispatch. Today the
+/// only action is `"set"` (the `config:edit` form): `values.key` +
+/// `values.value` go through the same write path as `query set`.
+fn submit_op(
+    view_id: &str,
+    form_id: Option<&str>,
+    values: &Map<String, Value>,
+    opts: &Options,
+) -> Response {
+    let Some(spec) = view::manifest().views.into_iter().find(|v| v.id == view_id) else {
+        return Response::err(format!("unknown view: {view_id}"));
+    };
+    let mut forms = Vec::new();
+    collect_forms(&spec.root, &mut forms);
+    let form = match form_id {
+        Some(id) => forms
+            .iter()
+            .find(|f| f.base.id.as_deref() == Some(id))
+            .copied(),
+        None => forms.first().copied(),
+    };
+    let Some(form) = form else {
+        return Response::err(format!("view '{view_id}' has no form node"));
+    };
+    let Some(op) = form.submit_op.as_deref() else {
+        return Response::err(format!("form in '{view_id}' has no submit_op"));
+    };
+    match op {
+        "set" => submit_set(values, opts),
+        other => Response::err(format!("unsupported submit_op: {other}")),
+    }
+}
+
+/// The `"set"` submit action — `values = {"key": <dotted>, "value":
+/// <any>}`. Missing/invalid fields come back as `SubmitResult.errors`
+/// (a rejected submit, not a wire error); write failures are
+/// `ok:false`.
+fn submit_set(values: &Map<String, Value>, opts: &Options) -> Response {
+    let mut errors = Map::new();
+    let key = values.get("key").and_then(Value::as_str);
+    if key.is_none() {
+        errors.insert("key".to_string(), json!("required — dotted config key"));
+    }
+    if !values.contains_key("value") {
+        errors.insert("value".to_string(), json!("required"));
+    }
+    let (Some(key), true) = (key, errors.is_empty()) else {
+        return Response::ok_typed(&SubmitResult {
+            errors,
+            ..SubmitResult::default()
+        });
+    };
+    let value = values.get("value").cloned().unwrap_or(Value::Null);
+    let cfg = load(opts);
+    match config::set(&cfg, key, &value) {
+        Ok(outcome) => Response::ok_typed(&SubmitResult {
+            message: Some(format!("set {}", outcome.key)),
+            data: Some(json!({
+                "key": outcome.key,
+                "value": outcome.value,
+                "path": outcome.path.display().to_string(),
+                "written": true,
+            })),
+            ..SubmitResult::default()
+        }),
+        Err(e) => Response::err(format!("set {key}: {e}")),
+    }
+}
+
+/// Collect every `form` node in a view tree (depth-first).
+fn collect_forms<'a>(node: &'a ViewNode, out: &mut Vec<&'a pavo_protocol::FormNode>) {
+    match node {
+        ViewNode::Form(f) => out.push(f),
+        ViewNode::Panel(n) => n.children.iter().for_each(|c| collect_forms(c, out)),
+        ViewNode::Row(n) => n.children.iter().for_each(|c| collect_forms(c, out)),
+        ViewNode::Column(n) => n.children.iter().for_each(|c| collect_forms(c, out)),
+        _ => {}
+    }
+}
+
 /// `sources` payload — every layer in precedence order, including
 /// pseudo-layers (defaults, env) and error/missing entries. This is
 /// the provenance view: which file gave which keys.
@@ -241,4 +327,115 @@ fn sources_payload(opts: &Options) -> Value {
         })
         .collect();
     Value::Array(rows)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Options pointed at a tempdir — writes land in
+    /// `custom.toml`, nothing touches the real environment.
+    fn test_opts(tmp: &tempfile::TempDir) -> Options {
+        Options {
+            explicit: Some(tmp.path().join("custom.toml")),
+            cwd: tmp.path().to_path_buf(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    fn values(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    /// The `config:edit` form accepts a submit and writes the key.
+    #[test]
+    fn submit_set_writes_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = test_opts(&tmp);
+        let resp = submit_op(
+            "edit",
+            Some("set-config"),
+            &values(&[("key", json!("myco.theme")), ("value", json!("solarized"))]),
+            &opts,
+        );
+        assert!(resp.ok, "{resp:?}");
+        let result: SubmitResult = resp.result_as().unwrap();
+        assert_eq!(result.message.as_deref(), Some("set myco.theme"));
+        // The write landed in the explicit file and reads back.
+        let cfg = config::load(&opts);
+        assert_eq!(
+            config::get(&cfg, "myco.theme"),
+            Some(&Value::from("solarized"))
+        );
+    }
+
+    /// Missing fields → SubmitResult.errors (rejected submit), not
+    /// a wire error.
+    #[test]
+    fn submit_set_missing_fields_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = test_opts(&tmp);
+        let resp = submit_op("edit", None, &Map::new(), &opts);
+        assert!(resp.ok);
+        let result: SubmitResult = resp.result_as().unwrap();
+        assert!(result.errors.contains_key("key"));
+        assert!(result.errors.contains_key("value"));
+    }
+
+    /// Views without forms and unknown views are wire errors.
+    #[test]
+    fn submit_unknown_view_and_formless_view() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = test_opts(&tmp);
+        assert!(!submit_op("nope", None, &Map::new(), &opts).ok);
+        // `show`/`sources` carry no form node.
+        assert!(!submit_op("show", None, &Map::new(), &opts).ok);
+        // `edit` has exactly one form; a wrong id misses it.
+        assert!(!submit_op("edit", Some("ghost"), &Map::new(), &opts).ok);
+    }
+
+    /// End-to-end through the real wire: parse_request → dispatch.
+    #[test]
+    fn submit_op_over_the_wire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = test_opts(&tmp);
+        let req = parse_request(
+            r#"{"op":"submit","view":"edit","form":"set-config","values":{"key":"k","value":1}}"#,
+        )
+        .unwrap();
+        let resp = dispatch(&req, &opts);
+        assert!(resp.ok, "{resp:?}");
+        let result: SubmitResult = resp.result_as().unwrap();
+        assert_eq!(result.message.as_deref(), Some("set k"));
+        // And it reads back through the query surface.
+        let q = query_data("get", &values(&[("key", json!("k"))]), &opts).unwrap();
+        assert_eq!(q["value"], json!(1));
+    }
+
+    /// The edit view's form parses as a ViewNode with the new
+    /// editable/placeholder fields.
+    #[test]
+    fn edit_view_form_is_typed() {
+        let spec = view::manifest()
+            .views
+            .into_iter()
+            .find(|v| v.id == "edit")
+            .unwrap();
+        let mut forms = Vec::new();
+        collect_forms(&spec.root, &mut forms);
+        assert_eq!(forms.len(), 1);
+        let form = forms[0];
+        assert_eq!(form.base.id.as_deref(), Some("set-config"));
+        assert_eq!(form.submit_op.as_deref(), Some("set"));
+        assert!(form.fields.iter().all(|f| f.editable));
+        assert!(form.fields.iter().all(|f| f.required));
+        assert!(form.fields[0].placeholder.is_some());
+    }
 }

@@ -326,6 +326,8 @@ fn typed_nodes_roundtrip() {
             default: Some(json!(0)),
             value: None,
             hint: None,
+            editable: true,
+            placeholder: Some("0".into()),
         }],
         submit_op: Some("save".into()),
         submit_label: None,

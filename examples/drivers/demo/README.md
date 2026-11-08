@@ -30,9 +30,12 @@ Requires `python3` (3.8+; nothing beyond the stdlib).
 | `demo:board`      | `/demo/board`  | counts (kv) + items table + markdown footer    |
 | `demo:deps`       | `/demo/deps`   | crate dependency `graph` — try `--format mermaid` |
 | `demo:timeline`   | `/demo/timeline` | milestone `tree`, expandable                 |
+| `demo:new`        | `/demo/new`    | interactive `form` — `submit_op: "add"`       |
 
 `demo:board` accepts `--param status=open|wip|done|blocked` to filter
-the items table.
+the items table. `demo:new` is the wire `submit` op's reference
+consumer: `pavo submit demo:new --param title=ship it` appends an
+item for the life of the `serve` process.
 
 ## Queries
 

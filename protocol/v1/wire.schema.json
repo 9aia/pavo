@@ -68,6 +68,26 @@
               "description": "Optional format hint (e.g. \"svg\", \"ascii\"); absent for surface-default output."
             }
           }
+        },
+        {
+          "type": "object",
+          "required": ["op", "view"],
+          "properties": {
+            "op": { "const": "submit" },
+            "view": {
+              "type": "string",
+              "description": "View id the form node belongs to (same namespace as the view op)."
+            },
+            "form": {
+              "type": "string",
+              "description": "Optional form-node id (NodeBase.id of the form node) when the view carries several forms; absent submits the default/first form."
+            },
+            "values": {
+              "type": "object",
+              "description": "Submitted field values keyed by FormField.key (string/number/bool per field kind).",
+              "default": {}
+            }
+          }
         }
       ]
     },
@@ -165,6 +185,20 @@
       "properties": {
         "query": { "type": "string" },
         "data": { "description": "Driver/product-defined payload, passed through verbatim." }
+      }
+    },
+    "submitResult": {
+      "type": "object",
+      "description": "Result of a `submit` op — every field optional; a bare {\"message\":\"…\"} is complete. Non-empty `errors` means the driver rejected the submit (validation); `view`, when present, is a fresh ViewResult to re-render. Unknown fields are preserved by forward-compatible consumers.",
+      "properties": {
+        "message": { "type": ["string", "null"], "description": "Human/machine-facing outcome." },
+        "errors": {
+          "type": "object",
+          "description": "Per-field validation errors keyed by FormField.key.",
+          "default": {}
+        },
+        "data": { "description": "Driver-defined result payload, passed through verbatim." },
+        "view": { "$ref": "#/$defs/viewResult", "description": "Optional updated view to swap in for the submitted one." }
       }
     }
   }

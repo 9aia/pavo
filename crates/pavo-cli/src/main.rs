@@ -15,6 +15,10 @@
 //!   [`ViewResult`], `dot`/`mermaid` emit the view's graph nodes.
 //! - `query <driver> <query> [--param k=v …]` — raw `query` op
 //!   passthrough.
+//! - `submit <driver>:<view> [--form <id>] --param k=v …` — the
+//!   `submit` wire op: send a form's field values to its driver and
+//!   print the `SubmitResult` (message/errors/data; `--json` dumps
+//!   the full payload including any updated view).
 //! - `serve [--port N]` — the localhost HTTP bridge for the web host:
 //!   `/api/*` JSON endpoints over the same [`Host`] plus static
 //!   serving of the Nuxt build (`web/.output/public`). First stdout
@@ -105,6 +109,24 @@ enum Command {
         #[arg(long = "param", value_name = "K=V")]
         params: Vec<String>,
         /// JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Submit a form's field values — `pavo submit config:edit
+    /// --param key=myco.theme --param value=dark`.
+    Submit {
+        /// `<driver>:<view>` deep link the form lives in (bare
+        /// `<driver>` = its first view).
+        target: String,
+        /// Form node id when the view carries several forms
+        /// (the `id` of the `form` ViewNode).
+        #[arg(long)]
+        form: Option<String>,
+        /// Field value, `key=value` (repeatable) — the form's field
+        /// keys. Values parse as JSON when possible, else strings.
+        #[arg(long = "param", value_name = "K=V")]
+        params: Vec<String>,
+        /// JSON output — dumps the full SubmitResult.
         #[arg(long)]
         json: bool,
     },
@@ -204,6 +226,12 @@ fn run(cli: Cli) -> Result<u8, Fail> {
             params,
             json,
         }) => cmd_query(&driver, &query, &params, json).map(|_| 0),
+        Some(Command::Submit {
+            target,
+            form,
+            params,
+            json,
+        }) => cmd_submit(&target, form.as_deref(), &params, json).map(|_| 0),
         Some(Command::Serve { port }) => serve::run(port)
             .map(|_| 0)
             .map_err(|e| Fail::err(format!("serve: {e}"))),
@@ -216,7 +244,7 @@ fn run(cli: Cli) -> Result<u8, Fail> {
                     "version": env!("CARGO_PKG_VERSION"),
                     "verbs": [
                         "drivers", "views", "chrome", "view", "query",
-                        "serve", "open", "manifest", "schema"
+                        "submit", "serve", "open", "manifest", "schema"
                     ],
                 })
             );
@@ -264,6 +292,11 @@ fn schema_doc() -> Value {
                 "args": ["<driver>", "<query>", "--param K=V (repeatable)"],
                 "flags": {"--json": "bool"}
             },
+            "submit": {
+                "summary": "submit a form's field values (submit wire op)",
+                "args": ["<driver>:<view>", "--form <id>", "--param K=V (repeatable)"],
+                "flags": {"--json": "bool — dump the full SubmitResult"}
+            },
             "serve": {
                 "summary": "localhost HTTP bridge for the web host (api + static)",
                 "flags": {"--port": "u16 (0 = free port, printed on stdout)"}
@@ -276,7 +309,7 @@ fn schema_doc() -> Value {
             "manifest": {"summary": "print the pavo capability manifest (JSON)"},
             "schema": {"summary": "print this verb schema (JSON)"}
         },
-        "wire_ops": ["manifest", "views", "view", "query", "render"],
+        "wire_ops": ["manifest", "views", "view", "query", "render", "submit"],
         "exit_codes": {"0": "ok", "1": "view/driver error", "2": "usage"}
     })
 }
@@ -643,6 +676,61 @@ fn cmd_query_host(
     Ok(())
 }
 
+fn cmd_submit(target: &str, form: Option<&str>, params: &[String], json: bool) -> Result<(), Fail> {
+    let values = parse_params(params)?;
+    let mut host = Host::discover();
+    cmd_submit_host(&mut host, target, form, values, json)
+}
+
+/// [`cmd_submit`] over an explicit host — split for tests.
+fn cmd_submit_host(
+    host: &mut Host,
+    target: &str,
+    form: Option<&str>,
+    values: Params,
+    json: bool,
+) -> Result<(), Fail> {
+    let result = host.submit(target, form, values)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).map_err(|e| Fail::err(e.to_string()))?
+        );
+    } else {
+        // Text mode: message first, then data.
+        if let Some(message) = &result.message {
+            println!("{message}");
+        }
+        match &result.data {
+            Some(data) => println!(
+                "{}",
+                serde_json::to_string_pretty(data).map_err(|e| Fail::err(e.to_string()))?
+            ),
+            None if result.message.is_none() && result.errors.is_empty() => {
+                println!("(empty result)");
+            }
+            None => {}
+        }
+    }
+    // Per-field validation errors mean the driver *rejected* the
+    // submit (the wire still answered ok:true). Exit 1 in both
+    // modes so CI can gate on it; `--json` callers also get the
+    // field details in the payload on stdout.
+    if !result.errors.is_empty() {
+        let detail = result
+            .errors
+            .iter()
+            .map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or("invalid")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Fail {
+            code: 1,
+            msg: format!("submit rejected — {detail}"),
+        });
+    }
+    Ok(())
+}
+
 /// Parse repeated `--param k=v` args into a [`Params`] map. Values
 /// parse as JSON when possible (`k=42`, `k=true`, `k={…}`), else
 /// become strings. Missing `=` or an empty key is a usage error.
@@ -686,6 +774,7 @@ if [ "$1" = serve ]; then
       *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/demo/board","queries":["items"]}]}' ;;
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{"items":[1,2]}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
+      *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
       *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
     esac
   done
@@ -822,5 +911,21 @@ exit 1
             .unwrap();
         // Bad view ref → error.
         assert!(cmd_view_host(&mut host, "badref", Params::new(), "text").is_err());
+    }
+
+    #[test]
+    fn submit_text_and_json() {
+        let mut host = fixture_host();
+        let mut values = Params::new();
+        values.insert("k".to_string(), json!("v"));
+        cmd_submit_host(&mut host, "demo:board", None, values.clone(), false)
+            .ok()
+            .unwrap();
+        cmd_submit_host(&mut host, "demo:board", Some("f1"), values, true)
+            .ok()
+            .unwrap();
+        // Unknown driver/view → error.
+        assert!(cmd_submit_host(&mut host, "ghost:board", None, Params::new(), false).is_err());
+        assert!(cmd_submit_host(&mut host, "demo:nope", None, Params::new(), false).is_err());
     }
 }

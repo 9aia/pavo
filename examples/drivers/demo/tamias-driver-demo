@@ -11,6 +11,7 @@ Wire surface (ndjson JSON-RPC over `serve`, one JSON object per line):
     {"op":"views"}                         -> [ViewSummary, ...]
     {"op":"view","view":"board"}          -> ViewResult
     {"op":"query","query":"items",...}    -> QueryResult
+    {"op":"submit","view":"new",...}     -> SubmitResult
 
 `tamias-driver-demo manifest` and `tamias-driver-demo capabilities`
 answer the discovery probes pavo runs before spawning `serve`.
@@ -155,6 +156,41 @@ VIEWS = [
         },
     },
     {
+        "id": "new",
+        "title": "New item",
+        "route": "/demo/new",
+        "description": "Add a work item — the demo driver's interactive form (submit wire op).",
+        "queries": [],
+        "root": {
+            "kind": "column",
+            "title": "New item",
+            "children": [
+                {
+                    "kind": "form",
+                    "id": "add-item",
+                    "title": "Add item",
+                    "submit_op": "add",
+                    "submit_label": "Add",
+                    "fields": [
+                        {"key": "title", "label": "Title", "kind": "text",
+                         "required": True, "placeholder": "what needs doing?"},
+                        {"key": "status", "label": "Status", "kind": "select",
+                         "options": ["open", "wip", "done"], "default": "open"},
+                        {"key": "priority", "label": "Priority", "kind": "select",
+                         "options": ["low", "med", "high"], "default": "med"},
+                        {"key": "note", "label": "Note", "kind": "textarea",
+                         "editable": False, "value": "read-only demo field",
+                         "hint": "editable:false renders but never submits"},
+                    ],
+                },
+                {"kind": "markdown", "text":
+                    "Try `pavo submit demo:new --param title=ship it`. "
+                    "The item joins the in-memory board for the life of "
+                    "this `serve` process."},
+            ],
+        },
+    },
+    {
         "id": "timeline",
         "title": "Timeline",
         "route": "/demo/timeline",
@@ -212,6 +248,55 @@ def view_result(view_id, params):
     return None
 
 
+def next_id():
+    nums = [int(i["id"].split("-")[1]) for i in ITEMS if i["id"].startswith("T-")]
+    return "T-%03d" % (max(nums, default=0) + 1)
+
+
+def submit_result(view_id, form_id, values):
+    """The `submit` op — dispatch on the form's submit_op."""
+    spec = next((v for v in VIEWS if v["id"] == view_id), None)
+    if spec is None:
+        return None
+    # Find the target form node (id match, else first form).
+    forms = []
+
+    def walk(node):
+        if node.get("kind") == "form":
+            forms.append(node)
+        for child in node.get("children", []) or []:
+            walk(child)
+
+    walk(spec["root"])
+    form = None
+    if form_id:
+        form = next((f for f in forms if f.get("id") == form_id), None)
+    else:
+        form = forms[0] if forms else None
+    if form is None:
+        return {"ok": False, "error": "no matching form in view"}
+    op = form.get("submit_op")
+    if op == "add":
+        errors = {}
+        title = (values.get("title") or "").strip()
+        if not title:
+            errors["title"] = "required"
+        if errors:
+            return {"ok": True, "result": {"errors": errors}}
+        item = {
+            "id": next_id(),
+            "title": title,
+            "status": values.get("status") or "open",
+            "priority": values.get("priority") or "med",
+        }
+        ITEMS.append(item)
+        return {"ok": True, "result": {
+            "message": "added %s" % item["id"],
+            "data": {"item": item, "total": len(ITEMS)},
+        }}
+    return {"ok": False, "error": "unsupported submit_op: %s" % op}
+
+
 # ---------------------------------------------------------------- wire
 
 def emit(obj):
@@ -242,6 +327,16 @@ def dispatch(obj):
     elif op == "query":
         name = obj.get("query")
         respond_ok({"query": name, "data": query_data(name, obj.get("params") or {})})
+    elif op == "submit":
+        result = submit_result(
+            obj.get("view"), obj.get("form"), obj.get("values") or {}
+        )
+        if result is None:
+            respond_err("unknown view: %s" % obj.get("view"))
+        elif result.get("ok") is False:
+            respond_err(result["error"])
+        else:
+            respond_ok(result["result"])
     else:
         respond_err("unknown op: %s" % op)
 

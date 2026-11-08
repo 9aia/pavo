@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use pavo_protocol::wire::{QueryResult, ViewResult, ViewSummary};
+use pavo_protocol::wire::{QueryResult, SubmitResult, ViewResult, ViewSummary};
 use pavo_protocol::{DriverManifest, RenderModel, Request, Response};
 use serde::de::DeserializeOwned;
 
@@ -196,6 +196,28 @@ impl DriverClient {
             data: data.clone(),
             surface: surface.to_string(),
             format: format.map(str::to_string),
+        })
+    }
+
+    /// `{"op":"submit","view":…,"form":…,"values":…}` →
+    /// [`SubmitResult`] — the form-submission verb. `view` is the
+    /// driver's view id; `form` optionally names the form node's
+    /// `id` when the view has several; `values` maps field keys to
+    /// submitted JSON values.
+    ///
+    /// # Errors
+    /// As [`DriverClient::manifest`]. A driver without form support
+    /// answers `ok:false` → [`PavoError::Driver`].
+    pub fn submit(
+        &mut self,
+        view: &str,
+        form: Option<&str>,
+        values: Params,
+    ) -> Result<SubmitResult, PavoError> {
+        self.request(&Request::Submit {
+            view: view.to_string(),
+            form: form.map(str::to_string),
+            values,
         })
     }
 
@@ -421,6 +443,7 @@ while IFS= read -r line; do
     *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/fx/board","queries":[]}]}' ;;
     *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/fx/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}},"data":{"items":[1]}}}' ;;
     *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2,3]}}' ;;
+    *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
     *'"op":"boom"'*) printf '%s\n' '{"ok":false,"error":"driver says no"}' ;;
     *'"op":"slow"'*) sleep 30 ;;
   esac
@@ -442,6 +465,8 @@ exit 0
         assert_eq!(v.data["items"], serde_json::json!([1]));
         let q = client.query("items", Params::new()).unwrap();
         assert_eq!(q.data, serde_json::json!([1, 2, 3]));
+        let s = client.submit("board", None, Params::new()).unwrap();
+        assert_eq!(s.message.as_deref(), Some("saved"));
     }
 
     #[test]

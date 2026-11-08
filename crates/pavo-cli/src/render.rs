@@ -594,6 +594,12 @@ fn form_text(v: &Value, depth: usize, out: &mut String) {
             if f.get("required").and_then(Value::as_bool) == Some(true) {
                 out.push_str(" (required)");
             }
+            // `editable:false` (or absent on very old drivers —
+            // treated editable per protocol default) marks fields a
+            // submit won't pick up; surfaces render them read-only.
+            if f.get("editable").and_then(Value::as_bool) == Some(false) {
+                out.push_str(" (read-only)");
+            }
             if let Some(default) = f.get("default") {
                 out.push_str(&format!(" default={}", cell_str(default)));
             }
@@ -606,6 +612,9 @@ fn form_text(v: &Value, depth: usize, out: &mut String) {
             }
             if let Some(hint) = f.get("hint").and_then(Value::as_str) {
                 out.push_str(&format!(" — {hint}"));
+            }
+            if let Some(ph) = f.get("placeholder").and_then(Value::as_str) {
+                out.push_str(&format!(" placeholder=\"{ph}\""));
             }
             out.push('\n');
         }
