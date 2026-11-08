@@ -364,17 +364,19 @@ pub struct MarkdownNode {
 /// `component` (a registered renderer or web component name) and
 /// hands it `props`. Drivers needing custom visuals (live graphs,
 /// timelines, WASM) use this rather than extending the IR.
+///
+/// Component props live in [`NodeBase::props`] — the flattened shared
+/// field *is* the `"props"` wire key. (An earlier draft gave this
+/// node a second `props` field; serde `flatten` made the two collide
+/// on one JSON key and silently swapped values on round-trip.)
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EmbedNode {
-    /// Shared node fields.
+    /// Shared node fields — `base.props` carries the component props.
     #[serde(flatten)]
     pub base: NodeBase,
     /// Component/renderer name — resolved against the host's
     /// renderer registry (and, on web, registered web components).
     pub component: String,
-    /// Props passed verbatim to the component.
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    pub props: Map<String, Value>,
 }
 
 /// Convenience: look up a node's shared fields without matching.

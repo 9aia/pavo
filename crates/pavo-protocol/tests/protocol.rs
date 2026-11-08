@@ -343,9 +343,11 @@ fn typed_nodes_roundtrip() {
         text: "# hi".into(),
     });
     roundtrip(&EmbedNode {
-        base: NodeBase::default(),
+        base: NodeBase {
+            props: Map::from_iter([("k".to_string(), json!(1))]),
+            ..NodeBase::default()
+        },
         component: "viz".into(),
-        props: Map::from_iter([("k".to_string(), json!(1))]),
     });
 }
 
