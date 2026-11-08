@@ -58,9 +58,16 @@ fn coverage(extra: &[String]) -> i32 {
         eprintln!("cargo-llvm-cov not installed — `cargo install cargo-llvm-cov`");
         return 1;
     }
+    // `--no-cfg-coverage`: don't set `cfg(coverage)`, so the
+    // `#![cfg_attr(coverage, feature(coverage_attribute))]` crate attrs
+    // stay inert and stable rustc can instrument (nothing uses
+    // `#[coverage(off)]`). LLVM_COV/LLVM_PROFDATA may need to point at
+    // a system llvm when rustup's llvm-tools-preview is absent.
     let mut args: Vec<&str> = vec![
+        "cargo",
         "llvm-cov",
         "--workspace",
+        "--no-cfg-coverage",
         "--html",
         "--output-dir",
         "target/llvm-cov/html",
