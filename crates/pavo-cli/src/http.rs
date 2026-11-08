@@ -350,18 +350,21 @@ pub fn query_get<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a st
         .map(|(_, v)| v.as_str())
 }
 
-/// Collect `param.<key>=<value>` pairs into a map. Values parse as
-/// JSON when possible (`k=42`, `k=true`, `k={…}`), else strings —
-/// same rule as the CLI's `--param`.
+/// Parse one param value: JSON when possible (`42`, `true`, `{…}`),
+/// else a string — same rule as the CLI's `--param`.
+#[must_use]
+pub fn param_json(v: &str) -> serde_json::Value {
+    serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.to_string()))
+}
+
+/// Collect `param.<key>=<value>` pairs into a map.
 #[must_use]
 pub fn collect_params(pairs: &[(String, String)]) -> BTreeMap<String, serde_json::Value> {
     let mut out = BTreeMap::new();
     for (k, v) in pairs {
         if let Some(key) = k.strip_prefix("param.") {
             if !key.is_empty() {
-                let value = serde_json::from_str(v)
-                    .unwrap_or_else(|_| serde_json::Value::String(v.clone()));
-                out.insert(key.to_string(), value);
+                out.insert(key.to_string(), param_json(v));
             }
         }
     }

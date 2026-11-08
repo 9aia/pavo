@@ -1,21 +1,23 @@
 <script setup lang="ts">
-// Deep-link view page: `/view/<driver>:<view>` (the colon may be
-// percent-encoded). Extra `?param.<key>=<value>` query params are
-// forwarded to the driver's view op, same rule as the CLI's
-// `--param k=v`.
+// Deep-link view page: `/view/<driver>:<view>` plus optional params —
+// path segments (`/view/myco:item/id=T-001`), bare query keys
+// (`?id=T-001`), or the legacy `?param.id=T-001` form. See
+// `app/utils/view-link.ts` for the grammar and precedence; everything
+// is forwarded to the driver's view op as `param.<k>=<v>`, same rule
+// as the CLI's `--param k=v`.
+import { parseViewLink } from '~/utils/view-link'
+
 const route = useRoute()
 
-const ref = computed(() => String(route.params.ref))
+const link = computed(() => parseViewLink(route.params.ref, route.query))
+const ref = computed(() => link.value.ref)
 
-// Forward `param.*` query args verbatim; everything else is ignored.
+// Normalize every param source into the bridge's `param.<k>=<v>`
+// wire form, in precedence order (path < bare query < `param.*`).
 const paramQs = computed(() => {
-  const parts: string[] = []
-  for (const [k, v] of Object.entries(route.query)) {
-    if (!k.startsWith('param.')) continue
-    for (const val of Array.isArray(v) ? v : [v]) {
-      parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(val))}`)
-    }
-  }
+  const parts = link.value.params.map(
+    ([k, v]) => `${encodeURIComponent(`param.${k}`)}=${encodeURIComponent(v)}`,
+  )
   return parts.length ? `&${parts.join('&')}` : ''
 })
 
@@ -49,7 +51,7 @@ const apiError = computed(() => {
     <p><NuxtLink to="/">← dashboard</NuxtLink></p>
     <div v-if="pending" class="muted">loading {{ ref }}…</div>
     <div v-else-if="apiError" class="error">
-      <h1>{{ ref }}</h1>
+      <h1>{{ ref || '(no view ref)' }}</h1>
       <p>{{ apiError }}</p>
       <p class="muted">unknown driver or view — check `pavo drivers` / `pavo views`.</p>
     </div>

@@ -23,6 +23,9 @@
 //!   → RenderModel — routes to the claiming driver's `render` op
 //! - `GET /*` → static files from the Nuxt output (`web/.output/public`,
 //!   `web/dist`, or `$PAVO_WEB_DIR`), else a built-in landing page.
+//!   `/view/<ref>` deep links take params as path `k=v` segments
+//!   (`/view/demo:board/id=T-1`) or `param.*`/bare query keys — the
+//!   Nuxt page speaks the same grammar (see `web/app/utils/view-link.ts`).
 //!
 //! All `/api/*` responses use the `{"ok":…,"result"/"error"}` envelope
 //! with `Access-Control-Allow-Origin: *` — this is a localhost dev
@@ -123,7 +126,7 @@ fn route(req: &Request, host: &Arc<Host>, web_root: Option<&Path>) -> (Response,
         if req.method != "GET" && !head_only {
             return (api_error(405, "method not allowed", false), true);
         }
-        let resp = static_response(&path, web_root);
+        let resp = static_response(&path, web_root, &pairs);
         let resp = if head_only {
             Response {
                 body: Vec::new(),
@@ -441,7 +444,7 @@ fn resolve_static(root: &Path, path: &str) -> Option<PathBuf> {
 
 /// `GET /*` handler: static file if a web root exists, else the
 /// built-in landing page (and a minimal `/view/<ref>` page).
-fn static_response(path: &str, web_root: Option<&Path>) -> Response {
+fn static_response(path: &str, web_root: Option<&Path>, pairs: &[(String, String)]) -> Response {
     if let Some(root) = web_root {
         if let Some(file) = resolve_static(root, path) {
             let body = std::fs::read(&file).unwrap_or_default();
@@ -472,8 +475,8 @@ fn static_response(path: &str, web_root: Option<&Path>) -> Response {
     match path {
         "/" => landing_page(),
         p if p.starts_with("/view/") => {
-            let reference = http::percent_decode(p.trim_start_matches("/view/"));
-            view_page_stub(&reference)
+            let rest = p.trim_start_matches("/view/");
+            view_page_stub(rest, pairs)
         }
         _ => Response::raw(
             404,
@@ -572,13 +575,50 @@ fn landing_page() -> Response {
     html_page("pavo", &body)
 }
 
+/// Split a `/view/` path remainder into (ref, params) — the first
+/// `/`-separated segment is the `driver:view` ref, each later segment
+/// is `key=value` (a bare `key` means an empty value). Query keys are
+/// params too: bare `?k=v` first, then `param.*` on top, so query
+/// wins over path and `param.*` wins over bare on collision — the
+/// same grammar the Nuxt page normalizes into `param.<k>=<v>`.
+fn parse_view_path(rest: &str, pairs: &[(String, String)]) -> (String, Params) {
+    let mut segments = rest.split('/');
+    let reference = segments.next().unwrap_or("").to_string();
+    let mut params = Params::new();
+    for seg in segments {
+        if seg.is_empty() {
+            continue;
+        }
+        let (k, v) = seg.split_once('=').unwrap_or((seg, ""));
+        if !k.is_empty() {
+            params.insert(k.to_string(), http::param_json(v));
+        }
+    }
+    // Bare query keys (`?k=v`) — everything not in the `param.`
+    // namespace.
+    for (k, v) in pairs {
+        if !k.is_empty() && !k.starts_with("param.") {
+            params.insert(k.clone(), http::param_json(v));
+        }
+    }
+    // `param.*` last → highest precedence.
+    for (k, v) in http::collect_params(pairs) {
+        params.insert(k, v);
+    }
+    (reference, params)
+}
+
 /// Minimal pre-build view page: fetches nothing — renders the
 /// ViewResult JSON inline so the bridge is debuggable without Nuxt.
-fn view_page_stub(reference: &str) -> Response {
+///
+/// `rest` is the percent-decoded path after `/view/`; see
+/// [`parse_view_path`] for the deep-link grammar (same as the Nuxt
+/// page: path `k=v` segments + `param.*`/bare query keys).
+fn view_page_stub(rest: &str, pairs: &[(String, String)]) -> Response {
     // Discover a fresh host (same reasoning as landing_page).
     let host = Host::discover();
-    let params = Params::new();
-    let body_inner = match host.resolve_view(reference, params) {
+    let (reference, params) = parse_view_path(rest, pairs);
+    let body_inner = match host.resolve_view(&reference, params) {
         Ok(resolved) => format!(
             "<p><a href=\"/\">← all views</a></p><h1>{}</h1><pre>{}</pre>",
             html_escape(&resolved.namespaced),
@@ -586,11 +626,11 @@ fn view_page_stub(reference: &str) -> Response {
         ),
         Err(e) => format!(
             "<p><a href=\"/\">← all views</a></p><h1>{}</h1><p><b>error:</b> {}</p>",
-            html_escape(reference),
+            html_escape(&reference),
             html_escape(&e.to_string()),
         ),
     };
-    html_page(reference, &body_inner)
+    html_page(&reference, &body_inner)
 }
 
 #[cfg(test)]
@@ -683,6 +723,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_view_path_splits_ref_and_merges_params() {
+        // Ref only.
+        let (r, p) = parse_view_path("demo:board", &[]);
+        assert_eq!(r, "demo:board");
+        assert!(p.is_empty());
+
+        // Path `k=v` segments; bare key → empty value; `=` inside a
+        // value is kept (split at the first '='); empty keys dropped.
+        let pairs = parse_query_for_test("");
+        let (r, p) = parse_view_path("demo:board/id=T-001/flag/=x", &pairs);
+        assert_eq!(r, "demo:board");
+        assert_eq!(p["id"], serde_json::json!("T-001"));
+        assert_eq!(p["flag"], serde_json::json!(""));
+        assert!(!p.contains_key(""));
+
+        // JSON-ish values parse like --param.
+        let (_, p) = parse_view_path("d:v/n=42", &pairs);
+        assert_eq!(p["n"], serde_json::json!(42));
+
+        // Precedence: path < bare query < param.* query.
+        let pairs = parse_query_for_test("id=query&status=open&param.id=legacy");
+        let (_, p) = parse_view_path("d:v/id=path", &pairs);
+        assert_eq!(p["id"], serde_json::json!("legacy"));
+        assert_eq!(p["status"], serde_json::json!("open"));
+    }
+
+    #[test]
     fn api_fail_maps_error_kinds_to_status() {
         let cases = [
             (PavoError::BadViewRef("x".into()), 400),
@@ -764,22 +831,22 @@ mod tests {
         std::fs::write(root.join("index.html"), "IDX").unwrap();
 
         // Real file wins over fallback.
-        let resp = static_response("/index.html", Some(root));
+        let resp = static_response("/index.html", Some(root), &[]);
         assert_eq!(resp.status, 200);
         assert_eq!(body_string(&resp), "IDX");
 
         // Extensionless path → 200.html (preferred over index.html).
-        let resp = static_response("/view/demo:board", Some(root));
+        let resp = static_response("/view/demo:board", Some(root), &[]);
         assert_eq!(resp.status, 200);
         assert_eq!(body_string(&resp), "SPA-200");
 
         // Path with an extension misses → 404.
-        let resp = static_response("/missing.js", Some(root));
+        let resp = static_response("/missing.js", Some(root), &[]);
         assert_eq!(resp.status, 404);
 
         // Without 200.html the fallback chain reaches index.html.
         std::fs::remove_file(root.join("200.html")).unwrap();
-        let resp = static_response("/dashboard", Some(root));
+        let resp = static_response("/dashboard", Some(root), &[]);
         assert_eq!(body_string(&resp), "IDX");
     }
 

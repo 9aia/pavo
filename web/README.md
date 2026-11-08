@@ -5,6 +5,35 @@ client-side data islands) rendered against the `pavo serve` localhost
 bridge. Deep links (`/view/<driver>:<view>`) are stable URLs agents
 and humans can drop into PRs, issues, and handoffs.
 
+### Deep-link params
+
+Views take params (`--param k=v` on the CLI). In URLs they can be
+carried three ways — all normalize to the same `param.<k>=<v>` pairs
+the bridge API already understands:
+
+```
+/view/myco:item/id=T-001/verbose        path segments: one k=v each
+/view/myco:item?id=T-001&verbose        bare query keys (no prefix)
+/view/myco:item?param.id=T-001          legacy param.* form (still works)
+```
+
+Grammar details (parsed by `app/utils/view-link.ts`; the no-build
+`/view/` stub in `pavo serve` speaks the same rules):
+
+- The **first** path segment after `/view/` is the `<driver>:<view>`
+  ref (the colon may be percent-encoded). Every later segment is one
+  param: `key=value`, split at the **first** `=` (values may contain
+  `=`); a bare `key` means an empty-string value; empty keys are
+  dropped. So `/view/myco:item/T-001` sets param `T-001` to `""` —
+  write `/view/myco:item/id=T-001` for a real param.
+- Query keys are params too: bare `?k=v`, plus the legacy
+  `?param.k=v` (prefix stripped).
+- Precedence, lowest → highest: **path segments < bare query keys <
+  `param.*` keys** — the bridge merges last-wins, so later sources
+  override earlier ones on a key collision.
+- Values parse as JSON when possible (`n=42`, `ok=true`, `j={…}`),
+  else strings — identical to `--param` / `/api/view?param.*`.
+
 ## Architecture
 
 ```
@@ -97,6 +126,6 @@ Re-check on Nuxt upgrades.
 v1: dashboard + view deep links + all ViewNode kinds (graph as a
 client-only SVG island). Not yet: interactive forms (read-only
 field list), `embed` component registry, view params UI (params can
-still be passed as `?param.<key>=<value>` query args), markdown
+still be passed in the URL — see "Deep-link params" above), markdown
 rendering (pre-wrap text), driver-contributed `routes` pages (they
 link out but only views render natively).

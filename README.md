@@ -33,7 +33,9 @@ Install a driver → get visualization everywhere. There is no
 - **Web** (`web/`, Nuxt 4 SSR shell + islands) — `pavo serve` is the
   localhost bridge: `/api/*` JSON over the same `Host` plus static
   serving of the Nuxt build. Dashboard, deep links
-  (`/view/myco:item/T-001`), all ViewNode kinds; `graph` renders in a
+  (`/view/myco:item/id=T-001` — path `k=v` segments, bare `?k=v`
+  query keys, or legacy `?param.k=v`; see `web/README.md`), all
+  ViewNode kinds; `graph` renders in a
   client-only SVG island.
 
 Real product drivers ship from their own repos — `tamias-driver-kuda`
