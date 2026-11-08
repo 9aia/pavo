@@ -1,0 +1,22 @@
+/target
+coverage/
+*.profraw
+.env
+
+# worktrees (orphan branches — created by repo tooling)
+project/
+docs/
+
+.kuda/index.sqlite
+.kuda/meta.json
+
+# web scaffold build output
+web/node_modules/
+web/.nuxt/
+web/.output/
+web/dist/
+
+# fuzzing artifacts
+fuzz/target
+fuzz/artifacts
+fuzz/corpus

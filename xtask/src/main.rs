@@ -1,0 +1,103 @@
+#![cfg_attr(coverage, feature(coverage_attribute))]
+//! xtask — repo chores. `cargo xtask <verb>` via the alias in
+//! `.cargo/config.toml`.
+//!
+//! - `check`    — `cargo fmt --check` + `cargo clippy -D warnings`
+//! - `test`     — `cargo nextest run` when installed, else `cargo test`
+//! - `coverage` — `cargo llvm-cov` (HTML → target/llvm-cov/html);
+//!   extra args pass through, e.g. `--fail-under-lines 97`
+//! - `install`  — release-install `pavo` into ~/.cargo/bin
+
+use std::process::{Command, ExitStatus};
+
+fn run(args: &[&str]) -> ExitStatus {
+    let empty: &[&str] = &[];
+    let (prog, rest) = args.split_first().unwrap_or((&"true", empty));
+    Command::new(prog).args(rest).status().unwrap_or_else(|e| {
+        eprintln!("xtask: failed to spawn {prog}: {e}");
+        std::process::exit(1)
+    })
+}
+
+fn have_cargo_sub(sub: &str) -> bool {
+    Command::new("cargo")
+        .args([sub, "--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn check() -> i32 {
+    let ok = run(&["cargo", "fmt", "--all", "--", "--check"]).success()
+        && run(&[
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .success();
+    i32::from(!ok)
+}
+
+fn test() -> i32 {
+    let status = if have_cargo_sub("nextest") {
+        run(&["cargo", "nextest", "run", "--workspace"])
+    } else {
+        run(&["cargo", "test", "--workspace"])
+    };
+    status.code().unwrap_or(1)
+}
+
+fn coverage(extra: &[String]) -> i32 {
+    if !have_cargo_sub("llvm-cov") {
+        eprintln!("cargo-llvm-cov not installed — `cargo install cargo-llvm-cov`");
+        return 1;
+    }
+    let mut args: Vec<&str> = vec![
+        "llvm-cov",
+        "--workspace",
+        "--html",
+        "--output-dir",
+        "target/llvm-cov/html",
+    ];
+    let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+    args.extend(extra_refs);
+    run(&args).code().unwrap_or(1)
+}
+
+fn install() -> i32 {
+    run(&[
+        "cargo",
+        "install",
+        "--path",
+        "crates/pavo-cli",
+        "--locked",
+        "--force",
+    ])
+    .code()
+    .unwrap_or(1)
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let cmd = args.next().unwrap_or_default();
+    let rest: Vec<String> = args.collect();
+    let code = match cmd.as_str() {
+        "check" => check(),
+        "test" => test(),
+        "coverage" => coverage(&rest),
+        "install" => install(),
+        other => {
+            eprintln!(
+                "usage: cargo xtask <check|test|coverage|install>\n  unknown verb: {other:?}"
+            );
+            2
+        }
+    };
+    std::process::exit(code);
+}

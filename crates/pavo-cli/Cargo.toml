@@ -1,0 +1,26 @@
+[package]
+name = "pavo"
+description = "pavo — visualization host: discover tamias drivers, render their views (CLI/TUI/web)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+authors.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[[bin]]
+name = "pavo"
+path = "src/main.rs"
+
+[dependencies]
+pavo-protocol.workspace = true
+pavo-core.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
