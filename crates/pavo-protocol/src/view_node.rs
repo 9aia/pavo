@@ -181,8 +181,10 @@ pub struct TreeNode {
     pub base: NodeBase,
     /// Top-level items; each may nest `children` recursively.
     /// When `base.query` is set, the bound result supplies `items`
-    /// in this same shape.
-    #[serde(default)]
+    /// in this same shape. Omitted when empty (like
+    /// [`TableNode::rows`]) so an empty inline list can't shadow
+    /// query-bound data on the typed round-trip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<TreeItem>,
     /// When true the renderer shows expand/collapse affordances.
     #[serde(default)]
