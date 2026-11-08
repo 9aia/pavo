@@ -20,10 +20,15 @@
 //! fields and variant spellings never change meaning.
 
 pub mod manifest;
+pub mod render_model;
 pub mod view_node;
 pub mod wire;
 
-pub use manifest::{Contributes, Contribution, DriverManifest, QueryBinding, ViewSpec};
+pub use manifest::{
+    CliSurface, Contributes, Contribution, DriverManifest, QueryBinding, RendererDecl,
+    RendererSurfaces, ViewSpec, WebSurface,
+};
+pub use render_model::RenderModel;
 pub use view_node::{
     Align, ColumnNode, EmbedNode, FormField, FormFieldKind, FormNode, GraphEdge, GraphNode,
     GraphNodeItem, KvNode, KvPair, MarkdownNode, NodeBase, PanelNode, RowNode, TableColumn,

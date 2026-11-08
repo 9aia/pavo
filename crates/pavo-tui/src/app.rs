@@ -20,11 +20,13 @@ use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton};
 use pavo_core::{Chrome, ResolvedView, RouteEntry, RouteKind, ViewEntry};
+use pavo_protocol::RenderModel;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
+use std::collections::HashMap;
 
 use crate::model::{self, Model, RowStyle, Selection};
 use crate::worker::{Cmd, DriverRow, Ev, Worker};
@@ -88,6 +90,10 @@ pub struct App {
     routes: Vec<RouteEntry>,
     tabs: Vec<Tab>,
     current: Option<Canvas>,
+    /// Renderer-plugin outputs for the current view, keyed by node
+    /// tree path — filled by `Ev::View`, consumed by
+    /// `model::build_view_with_plugins`.
+    plugin_renders: HashMap<String, RenderModel>,
     detail: Option<Selection>,
     detail_scroll: usize,
     /// Position within `model.selectables`.
@@ -131,6 +137,7 @@ impl App {
             routes: Vec::new(),
             tabs: Vec::new(),
             current: None,
+            plugin_renders: HashMap::new(),
             detail: None,
             detail_scroll: 0,
             sel_pos: 0,
@@ -194,8 +201,13 @@ impl App {
                     }
                 }
             }
-            Ev::View { target, result } => {
+            Ev::View {
+                target,
+                result,
+                renders,
+            } => {
                 self.loading = None;
+                self.plugin_renders = renders;
                 match result {
                     Ok(rv) => {
                         self.last_target = rv.namespaced.clone();
@@ -370,10 +382,11 @@ impl App {
 
     fn model_for_input(&self) -> Option<Model> {
         match &self.current {
-            Some(Canvas::View(rv)) => Some(model::build_view(
+            Some(Canvas::View(rv)) => Some(model::build_view_with_plugins(
                 &rv.result.view.root,
                 &rv.result.data,
                 self.canvas_w,
+                &self.plugin_renders,
             )),
             Some(Canvas::Dashboard) => Some(model::build_dashboard(
                 &self.views,

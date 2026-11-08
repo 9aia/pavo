@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use pavo_protocol::wire::{QueryResult, ViewResult, ViewSummary};
-use pavo_protocol::DriverManifest;
+use pavo_protocol::{DriverManifest, RenderModel};
 use serde_json::Value;
 
 use crate::cache::TtlCache;
@@ -37,6 +37,7 @@ use crate::client::{ClientConfig, DriverClient};
 use crate::discovery::{self, DiscoveryOptions, DriverInfo};
 use crate::error::PavoError;
 use crate::merge::{merge_chrome, Chrome};
+use crate::renderers::{plugin_nodes, RendererRegistry};
 use crate::Params;
 
 /// Default view-result cache TTL.
@@ -366,6 +367,113 @@ impl Host {
         self.client(driver)?.views()
     }
 
+    /// The merged renderer-plugin registry — every `renderers`
+    /// declaration across all discovered drivers' manifests, resolved
+    /// to kind → driver bindings (see [`crate::renderers`] for the
+    /// conflict policy). Fetches lazy manifests as needed; drivers
+    /// that can't produce one contribute no renderers.
+    #[must_use]
+    pub fn renderers(&mut self) -> RendererRegistry {
+        let kinds: Vec<String> = self.drivers.iter().map(|d| d.kind.clone()).collect();
+        let mut pairs: Vec<(String, DriverManifest)> = Vec::new();
+        for kind in kinds {
+            if let Ok(m) = self.manifest(&kind) {
+                pairs.push((kind, m));
+            }
+        }
+        RendererRegistry::from_manifests(pairs.iter().map(|(k, m)| (k.as_str(), m)))
+    }
+
+    /// `{"op":"render"}` against an explicit driver — the low-level
+    /// renderer-plugin call. Prefer [`Host::render_by_kind`], which
+    /// resolves the claiming driver from the registry.
+    ///
+    /// # Errors
+    /// [`PavoError::UnknownDriver`] / client errors.
+    pub fn render_node(
+        &mut self,
+        driver: &str,
+        kind: &str,
+        node: &Value,
+        data: &Params,
+        surface: &str,
+        format: Option<&str>,
+    ) -> Result<RenderModel, PavoError> {
+        self.client(driver)?
+            .render(kind, node, data, surface, format)
+    }
+
+    /// Route one node to whichever driver claims `kind` on `surface`
+    /// — the registry lookup + `render` op in one call. Used by
+    /// `pavo serve`'s `/api/render`.
+    ///
+    /// # Errors
+    /// [`PavoError::UnknownDriver`] when no renderer claims the kind
+    /// for that surface; client errors propagate.
+    pub fn render_by_kind(
+        &mut self,
+        kind: &str,
+        node: &Value,
+        data: &Params,
+        surface: &str,
+        format: Option<&str>,
+    ) -> Result<RenderModel, PavoError> {
+        let registry = self.renderers();
+        let binding =
+            registry
+                .for_kind(kind, surface, format)
+                .ok_or_else(|| PavoError::UnknownView {
+                    driver: "<renderers>".to_string(),
+                    view: format!("{kind} on {surface}"),
+                })?;
+        let driver = binding.driver.clone();
+        self.render_node(&driver, kind, node, data, surface, format)
+    }
+
+    /// Render every plugin-claimed node in a resolved view for
+    /// `surface` — one `render` op per node, keyed by the node's
+    /// [`crate::renderers::PluginNode::path`]. Nodes whose plugin
+    /// call fails are skipped (the caller falls back to built-in
+    /// rendering for that node — a broken plugin degrades one node,
+    /// never the whole view).
+    ///
+    /// `format` is the surface's format hint (CLI `--format`); pass
+    /// `None` for the surface default.
+    #[must_use]
+    pub fn render_view_plugins(
+        &mut self,
+        resolved: &ResolvedView,
+        surface: &str,
+        format: Option<&str>,
+    ) -> std::collections::HashMap<String, RenderModel> {
+        let registry = self.renderers();
+        let nodes = plugin_nodes(&resolved.result.view.root, &registry, surface, format);
+        let mut out = std::collections::HashMap::new();
+        // Group by driver so each client's requests stay sequential —
+        // DriverClient is &mut and one-in-flight anyway.
+        let mut by_driver: std::collections::BTreeMap<String, Vec<_>> =
+            std::collections::BTreeMap::new();
+        for n in nodes {
+            by_driver
+                .entry(n.binding.driver.clone())
+                .or_default()
+                .push(n);
+        }
+        for (driver, group) in by_driver {
+            let Ok(client) = self.client(&driver) else {
+                continue;
+            };
+            for n in group {
+                if let Ok(model) =
+                    client.render(&n.kind, &n.node, &resolved.result.data, surface, format)
+                {
+                    out.insert(n.path, model);
+                }
+            }
+        }
+        out
+    }
+
     /// Drop a cached view result — call after mutations that should
     /// refresh the next `resolve_view`.
     pub fn invalidate_view(&self, driver: &str, view: &str, params: &Params) {
@@ -548,6 +656,88 @@ exit 1
             host.manifest("ghost"),
             Err(PavoError::UnknownDriver(_))
         ));
+    }
+
+    /// View driver `dv` with one `graph` node — the plugin target.
+    const DV: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"dv","title":"Dv","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[{"id":"g","title":"G","route":"/dv/g","root":{"kind":"graph","nodes":[{"id":"a","label":"A"}],"edges":[]}}]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"g","title":"G","route":"/dv/g","root":{"kind":"graph","nodes":[{"id":"a","label":"A"}],"edges":[]}},"data":{}}}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"g","title":"G","route":"/dv/g"}]}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    /// Renderer plugin `vz` — claims `graph` on cli+svg; serve
+    /// answers `render` with an svg RenderModel.
+    const VZ: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"vz","title":"Vz","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[],"renderers":[{"id":"graph","kinds":["graph"],"surfaces":{"cli":{"formats":["svg"]},"tui":true,"web":{"island":true}}}]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"render"'*) printf '%s\n' '{"ok":true,"result":{"type":"svg","markup":"<svg>VZ</svg>"}}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[]}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    #[test]
+    fn renderer_plugins_route_render_ops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        write_driver(&bin, "tamias-driver-dv", DV);
+        write_driver(&bin, "tamias-driver-vz", VZ);
+        let mut host = Host::discover_with(opts(&bin, tmp.path()));
+
+        // Registry sees the plugin claim (renderer-only driver).
+        let reg = host.renderers();
+        assert_eq!(reg.len(), 1);
+        assert!(reg.handles("graph", "cli", Some("svg")));
+        assert!(!reg.handles("graph", "cli", Some("ascii")));
+        assert!(reg.handles("graph", "tui", None));
+
+        // render_by_kind routes to vz.
+        let node = serde_json::json!({"kind":"graph","nodes":[]});
+        let model = host
+            .render_by_kind("graph", &node, &Params::new(), "cli", Some("svg"))
+            .unwrap();
+        assert_eq!(
+            model,
+            RenderModel::Svg {
+                markup: "<svg>VZ</svg>".into()
+            }
+        );
+        // Unclaimed kind+surface → error.
+        assert!(host
+            .render_by_kind("table", &node, &Params::new(), "cli", Some("svg"))
+            .is_err());
+
+        // render_view_plugins finds the root graph node (path "").
+        let resolved = host.resolve_view("dv:g", Params::new()).unwrap();
+        let renders = host.render_view_plugins(&resolved, "cli", Some("svg"));
+        assert_eq!(renders.len(), 1);
+        assert!(matches!(renders[""], RenderModel::Svg { .. }));
+        // cli+ascii isn't claimed → empty map → built-in fallback.
+        assert!(host
+            .render_view_plugins(&resolved, "cli", Some("ascii"))
+            .is_empty());
+        // tui IS claimed but vz answers svg anyway (fixture ignores
+        // surface) — still routed.
+        assert_eq!(host.render_view_plugins(&resolved, "tui", None).len(), 1);
     }
 
     #[test]

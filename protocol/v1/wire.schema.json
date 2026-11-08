@@ -40,6 +40,82 @@
             },
             "params": { "type": "object" }
           }
+        },
+        {
+          "type": "object",
+          "required": ["op", "kind", "node", "data", "surface"],
+          "properties": {
+            "op": { "const": "render" },
+            "kind": {
+              "type": "string",
+              "description": "The node's kind being rendered (e.g. \"graph\")."
+            },
+            "node": {
+              "type": "object",
+              "description": "The ViewNode serialized verbatim — unknown/future fields survive to the renderer plugin."
+            },
+            "data": {
+              "type": "object",
+              "description": "The view's data map (query bindings resolved by the host)."
+            },
+            "surface": {
+              "type": "string",
+              "enum": ["cli", "tui", "web"],
+              "description": "Which surface is asking — renderers may answer different models per surface."
+            },
+            "format": {
+              "type": "string",
+              "description": "Optional format hint (e.g. \"svg\", \"ascii\"); absent for surface-default output."
+            }
+          }
+        }
+      ]
+    },
+    "renderModel": {
+      "description": "Canonical render output of a `render` op — internally tagged on \"type\". Small on purpose: rows/table, svg island, text lines, or a named placeholder component. No HTML. Unknown `type` values degrade to placeholder on every surface.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "headers"],
+          "properties": {
+            "type": { "const": "rows" },
+            "headers": { "type": "array", "items": { "type": "string" } },
+            "aligns": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["left", "center", "right"] },
+              "default": []
+            },
+            "rows": {
+              "type": "array",
+              "items": { "type": "array", "items": { "type": "string" } },
+              "default": []
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "markup"],
+          "properties": {
+            "type": { "const": "svg" },
+            "markup": { "type": "string", "description": "Self-contained <svg>…</svg> fragment." }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "lines"],
+          "properties": {
+            "type": { "const": "text" },
+            "lines": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "component"],
+          "properties": {
+            "type": { "const": "placeholder" },
+            "component": { "type": "string" },
+            "props": { "type": "object", "default": {} }
+          }
         }
       ]
     },

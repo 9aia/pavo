@@ -317,6 +317,7 @@ pub struct FixtureDriverBuilder {
     view_errors: BTreeMap<String, String>,
     failure: Failure,
     transcript: Option<Transcript>,
+    renderers: Vec<pavo_protocol::RendererDecl>,
 }
 
 impl FixtureDriverBuilder {
@@ -332,6 +333,7 @@ impl FixtureDriverBuilder {
             view_errors: BTreeMap::new(),
             failure: Failure::default(),
             transcript: None,
+            renderers: Vec::new(),
         }
     }
 
@@ -379,6 +381,16 @@ impl FixtureDriverBuilder {
         self
     }
 
+    /// Declare renderer plugins in the generated manifest — the
+    /// manifest `renderers` list. The `render` op itself isn't
+    /// canned; pair this with [`Self::transcript`] for render-op
+    /// fixtures.
+    #[must_use]
+    pub fn renderers(mut self, decls: Vec<pavo_protocol::RendererDecl>) -> Self {
+        self.renderers = decls;
+        self
+    }
+
     /// Replace the failure-mode configuration.
     #[must_use]
     pub fn failure(mut self, failure: Failure) -> Self {
@@ -417,6 +429,7 @@ impl FixtureDriverBuilder {
             capabilities: vec!["pavo".to_string()],
             contributes: Default::default(),
             views: self.views.clone(),
+            renderers: self.renderers.clone(),
         });
 
         let mut config = Map::new();

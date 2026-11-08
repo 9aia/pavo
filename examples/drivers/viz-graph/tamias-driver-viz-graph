@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""tamias-driver-viz-graph — the reference renderer-plugin driver.
+
+Declares zero data views of its own; instead its manifest carries a
+`renderers` declaration claiming the `graph` view-kind for every
+surface. When a view (from ANY driver) contains a `graph` node, pavo
+routes it here via the `render` wire op and embeds the returned
+RenderModel:
+
+    {"op":"render","kind":"graph","node":{…},"data":{…},
+     "surface":"cli|tui|web","format":"svg|ascii|…"}
+
+Surface mapping implemented here:
+
+    cli  --format svg   -> {"type":"svg", markup}
+    cli  --format ascii -> {"type":"text", lines}   (edge list)
+    cli  (text/plain)   -> {"type":"text", lines}   (node table)
+    tui                 -> {"type":"rows", …}       (node table)
+    web                 -> {"type":"svg", markup}   (island)
+
+Graph payload resolution: the node's `query` field names a binding in
+the view's `data` map (`{"nodes":[{id,label,kind}],"edges":[{from,to,
+label}]} `); absent that, `node.nodes`/`node.edges` are used directly.
+
+Layout: deterministic — nodes evenly spaced on an ellipse ordered by
+id, high-degree nodes pushed slightly outward. Good for ~50 nodes.
+
+Python 3 stdlib only.
+"""
+
+import json
+import math
+import sys
+
+NAME = "viz-graph"
+RENDERER_ID = "graph"
+
+MANIFEST = {
+    "name": NAME,
+    "title": "Graph viz",
+    "icon": "🕸",
+    "version": "0.1.0",
+    "verbs": ["manifest", "serve"],
+    "capabilities": ["pavo"],
+    "contributes": {},
+    "views": [],
+    "renderers": [
+        {
+            "id": RENDERER_ID,
+            "kinds": ["graph"],
+            "priority": 50,
+            "entry": "graph",
+            "surfaces": {
+                "cli": {"formats": ["svg", "ascii"]},
+                "tui": True,
+                "web": {"component": "viz-graph", "island": True},
+            },
+        }
+    ],
+}
+
+
+# ---------------------------------------------------------------- payload
+
+def graph_payload(node, data):
+    """Resolve the graph document: node.query → data binding, else
+    inline node.nodes/node.edges."""
+    q = node.get("query")
+    payload = None
+    if q and isinstance(data, dict):
+        payload = data.get(q)
+    if payload is None:
+        payload = node
+    nodes = payload.get("nodes") or []
+    edges = payload.get("edges") or []
+    return nodes, edges
+
+
+def node_label(n):
+    return str(n.get("label") or n.get("id") or "?")
+
+
+# ---------------------------------------------------------------- layout
+
+def layout(nodes, edges, width=960, height=640, margin=70):
+    """Deterministic circle layout: ids sorted, evenly spaced on an
+    ellipse; high-degree nodes get a slightly larger radius. No force
+    simulation — stable output for ~50 nodes."""
+    items = sorted(nodes, key=lambda n: str(n.get("id", "")))
+    n = len(items)
+    if n == 0:
+        return {}
+    degree = {node.get("id"): 0 for node in items}
+    for e in edges:
+        for end in (e.get("from"), e.get("to")):
+            if end in degree:
+                degree[end] += 1
+    cx, cy = width / 2, height / 2
+    rx = max(width / 2 - margin, 40)
+    ry = max(height / 2 - margin, 40)
+    pos = {}
+    for i, node in enumerate(items):
+        ang = 2 * math.pi * i / n - math.pi / 2
+        # Hubs sit a touch further out so edges fan instead of piling
+        # onto the ring.
+        boost = 1.0 + min(degree.get(node.get("id"), 0), 8) * 0.015
+        pos[node.get("id")] = (
+            cx + rx * boost * math.cos(ang),
+            cy + ry * boost * math.sin(ang),
+        )
+    return {node.get("id"): (*pos[node.get("id")], node) for node in items}
+
+
+def svg_graph(node, data):
+    nodes, edges = graph_payload(node, data)
+    width, height = 960, 640
+    pos = layout(nodes, edges, width, height)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'font-family="ui-monospace,monospace" font-size="12">',
+        '<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
+        '<path d="M0,0 L10,5 L0,10 z" fill="#888"/></marker></defs>',
+        f'<rect width="{width}" height="{height}" fill="#0d1117" rx="8"/>',
+    ]
+    for e in edges:
+        a, b = pos.get(e.get("from")), pos.get(e.get("to"))
+        if not a or not b:
+            continue
+        label = e.get("label")
+        parts.append(
+            f'<line x1="{a[0]:.1f}" y1="{a[1]:.1f}" x2="{b[0]:.1f}" y2="{b[1]:.1f}" '
+            'stroke="#58a6ff" stroke-width="1.2" marker-end="url(#arr)"/>'
+        )
+        if label:
+            mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+            parts.append(
+                f'<text x="{mx:.1f}" y="{my - 4:.1f}" fill="#8b949e" font-size="10" '
+                f'text-anchor="middle">{_esc(label)}</text>'
+            )
+    for nid, (x, y, nd) in sorted(pos.items(), key=lambda kv: str(kv[0])):
+        label = node_label(nd)
+        kind = nd.get("kind", "node")
+        color = {"crate": "#bc8cff", "external": "#79c0ff"}.get(kind, "#f0883e")
+        r = 7 if kind == "crate" else 5
+        parts.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r}" fill="{color}" '
+            f'stroke="#0d1117" stroke-width="2"/>'
+        )
+        parts.append(
+            f'<text x="{x:.1f}" y="{y + r + 13:.1f}" fill="#c9d1d9" font-size="11" '
+            f'text-anchor="middle">{_esc(label)}</text>'
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _esc(s):
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+# ---------------------------------------------------------------- models
+
+def text_graph(node, data):
+    """Edge-list + node roster — the ascii/plain-text degradation."""
+    nodes, edges = graph_payload(node, data)
+    lines = []
+    title = node.get("title")
+    if title:
+        lines.append(str(title))
+        lines.append("-" * len(str(title)))
+    for nd in sorted(nodes, key=lambda n: str(n.get("id", ""))):
+        kind = nd.get("kind")
+        suffix = f"  ({kind})" if kind else ""
+        lines.append(f"• {node_label(nd)}{suffix}")
+    if edges:
+        lines.append("")
+        lines.append("edges:")
+        for e in edges:
+            label = e.get("label")
+            arrow = f"{e.get('from')} → {e.get('to')}"
+            lines.append(f"  {arrow}" + (f"  ({label})" if label else ""))
+    return {"type": "text", "lines": lines}
+
+
+def rows_graph(node, data):
+    """Node table — the TUI surface model."""
+    nodes, _edges = graph_payload(node, data)
+    rows = [
+        [str(nd.get("id", "")), node_label(nd), str(nd.get("kind", ""))]
+        for nd in sorted(nodes, key=lambda n: str(n.get("id", "")))
+    ]
+    return {
+        "type": "rows",
+        "headers": ["id", "label", "kind"],
+        "aligns": ["left", "left", "left"],
+        "rows": rows,
+    }
+
+
+def render(req):
+    kind = req.get("kind", "")
+    if kind != "graph":
+        return {"ok": False, "error": "viz-graph only renders kind=graph"}
+    node = req.get("node") or {}
+    data = req.get("data") or {}
+    surface = req.get("surface", "cli")
+    fmt = req.get("format")
+
+    if fmt == "svg" or surface == "web":
+        model = {"type": "svg", "markup": svg_graph(node, data)}
+    elif surface == "tui":
+        model = rows_graph(node, data)
+    elif fmt == "ascii" or surface == "cli":
+        model = text_graph(node, data)
+    else:
+        model = text_graph(node, data)
+    return {"ok": True, "result": model}
+
+
+# ---------------------------------------------------------------- wire
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def respond_ok(result):
+    emit({"ok": True, "result": result})
+
+
+def respond_err(msg):
+    emit({"ok": False, "error": str(msg)})
+
+
+def dispatch(obj):
+    op = obj.get("op")
+    if op == "manifest":
+        respond_ok(MANIFEST)
+    elif op == "views":
+        respond_ok([])
+    elif op == "view":
+        respond_err("viz-graph declares no views (renderer-only)")
+    elif op == "query":
+        respond_err("viz-graph declares no queries")
+    elif op == "render":
+        try:
+            out = render(obj)
+        except Exception as e:  # never kill the host over one node
+            respond_err("render failed: %s" % e)
+        else:
+            if out.get("ok"):
+                respond_ok(out["result"])
+            else:
+                respond_err(out.get("error", "render failed"))
+    else:
+        respond_err("unknown op: %s" % op)
+
+
+def serve():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            respond_err("invalid JSON request")
+            continue
+        if not isinstance(obj, dict):
+            respond_err("request must be a JSON object")
+            continue
+        dispatch(obj)
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        sys.stderr.write(
+            "usage: tamias-driver-viz-graph manifest|capabilities|serve\n"
+        )
+        return 1
+    verb = args[0]
+    if verb == "manifest":
+        sys.stdout.write(json.dumps(MANIFEST, indent=2) + "\n")
+        return 0
+    if verb == "capabilities":
+        sys.stdout.write(json.dumps({
+            "capabilities": MANIFEST["capabilities"],
+            "verbs": MANIFEST["verbs"],
+        }) + "\n")
+        return 0
+    if verb == "serve":
+        return serve()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

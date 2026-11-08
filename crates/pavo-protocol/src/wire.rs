@@ -15,6 +15,14 @@
 //! | `views`   | —                                   | `Vec<ViewSummary>`|
 //! | `view`    | `view`, `params?`                   | [`ViewResult`]    |
 //! | `query`   | `query`, `params?`                  | [`QueryResult`]   |
+//! | `render`  | `kind`, `node`, `data`, `surface`,  | [`RenderModel`]   |
+//! |           | `format?`                           |                   |
+//!
+//! `render` is the view-kind renderer-plugin verb: a driver whose
+//! manifest declares `renderers` answers it with a canonical
+//! [`crate::render_model::RenderModel`] for one node on one surface.
+//! Drivers that declare no renderers may ignore it (hosts only call
+//! it for kinds the manifest claims).
 //!
 //! Thin drivers may proxy a product's existing `serve` for `query`
 //! payloads; `manifest`/`views`/`view` are always answered by the
@@ -57,6 +65,30 @@ pub enum Request {
         /// Params merged into the binding's static params.
         #[serde(default, skip_serializing_if = "Map::is_empty")]
         params: Map<String, Value>,
+    },
+    /// `{"op":"render","kind":"graph","node":{…},"data":{…},
+    /// "surface":"cli","format":"svg"}` → [`RenderModel`] — the
+    /// renderer-plugin verb. `node` is the raw ViewNode JSON (the
+    /// host passes it untyped so unknown/future fields survive);
+    /// `data` is the view's query-binding map verbatim; `surface` is
+    /// `"cli"`, `"tui"`, or `"web"` (open string — hosts may add
+    /// surfaces); `format` is the surface's format hint (`"svg"`,
+    /// `"ascii"`, …) when one applies.
+    Render {
+        /// The node's `kind` — also the renderer claim key.
+        kind: String,
+        /// The node as raw JSON (a ViewNode object, `{"kind":…}`).
+        #[serde(default)]
+        node: Value,
+        /// The view's bound query data — the same map `view` results
+        /// carry, so the plugin can resolve `node.query` itself.
+        #[serde(default)]
+        data: Map<String, Value>,
+        /// Target surface — `"cli"`, `"tui"`, `"web"`.
+        surface: String,
+        /// Optional format hint (CLI `--format` value, etc.).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
     },
 }
 
@@ -209,7 +241,7 @@ pub fn parse_request(line: &str) -> Result<Request, WireError> {
             op: "<missing>".to_string(),
         })?;
     match op {
-        "manifest" | "views" | "view" | "query" => Ok(serde_json::from_value(value)?),
+        "manifest" | "views" | "view" | "query" | "render" => Ok(serde_json::from_value(value)?),
         other => Err(WireError::UnknownOp {
             op: other.to_string(),
         }),

@@ -38,6 +38,7 @@ pub mod error;
 pub mod host;
 pub mod merge;
 pub mod paths;
+pub mod renderers;
 pub mod viewnode;
 
 pub use cache::TtlCache;
@@ -47,6 +48,7 @@ pub use error::PavoError;
 pub use host::{Host, ResolvedView, RouteEntry, RouteKind, ViewEntry};
 pub use merge::{merge_chrome, Chrome, SlotEntry};
 pub use paths::{drivers_dir, tamias_home};
+pub use renderers::{plugin_nodes, PluginNode, RendererBinding, RendererRegistry};
 pub use viewnode::{
     children, collect_queries, find_nodes, kind_of, kv_fallback_json, node_kind_json,
     to_kv_fallback, walk,

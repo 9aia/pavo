@@ -6,12 +6,59 @@
 // `NodeBase` fields are flattened onto it). `data` is the view's
 // query-binding map; a node's `query` field names the binding whose
 // payload feeds it.
+import type { RendererEntry } from '~/composables/renderers'
+
 const props = defineProps<{
   node: Record<string, any>
   data: Record<string, any>
 }>()
 
 const kind = computed(() => String(props.node?.kind ?? ''))
+
+// ---- renderer plugins -------------------------------------------------
+// A driver may claim this node's kind via its manifest `renderers`
+// (e.g. viz-graph claims "graph"). Claimed nodes route through
+// `GET /api/render` → RenderModel; unclaimed/failing nodes keep the
+// built-in interpretation below.
+const registry = ref<RendererEntry[]>([])
+rendererRegistry().then((r) => {
+  registry.value = r
+})
+
+const pluginRenderer = computed(() => webRendererFor(registry.value, kind.value))
+
+const renderUrl = computed(() => {
+  const r = pluginRenderer.value
+  if (!r) return null
+  const qs = new URLSearchParams({
+    kind: kind.value,
+    node: JSON.stringify(props.node ?? {}),
+    data: JSON.stringify(props.data ?? {}),
+    surface: 'web',
+  })
+  return `/api/render?${qs.toString()}`
+})
+
+// RenderModel wire shape: {ok, result: {type: rows|svg|text|placeholder, …}}
+const { data: pluginResponse } = await useFetch(renderUrl, {
+  server: false,
+  watch: [renderUrl],
+  immediate: false,
+  ignoreResponseError: true,
+})
+
+const pluginModel = computed<any>(() => {
+  const d = pluginResponse.value as any
+  return d?.ok ? d.result : null
+})
+// Plugin path is active only when a renderer claims the kind AND the
+// render op answered — otherwise built-in rendering takes over.
+const pluginActive = computed(() => !!pluginRenderer.value && !!pluginModel.value)
+
+// RenderModel → template helpers.
+const pluginRows = computed<any[]>(() => pluginModel.value?.rows ?? [])
+const pluginHeaders = computed<string[]>(() => pluginModel.value?.headers ?? [])
+const pluginTextLines = computed<string[]>(() => pluginModel.value?.lines ?? [])
 
 // The payload bound to this node via `node.query`, if any.
 const bound = computed(() => {
@@ -145,6 +192,38 @@ function fmt(v: any): string {
     <h3 v-if="node.title" class="vtitle">{{ node.title }}</h3>
     <p v-if="node.description" class="muted">{{ node.description }}</p>
 
+    <!-- renderer-plugin output: a driver claimed this kind and
+         answered /api/render with a RenderModel. svg embeds verbatim
+         (plugin owns its layout); rows/text/placeholder map to native
+         elements. Falls through to built-in rendering on any failure. -->
+    <template v-if="pluginActive">
+      <div
+        v-if="pluginModel.type === 'svg'"
+        class="plugin-svg"
+        v-html="pluginModel.markup"
+      />
+      <div v-else-if="pluginModel.type === 'rows'" class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th v-for="(h, i) in pluginHeaders" :key="i">{{ h }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, ri) in pluginRows" :key="ri">
+              <td v-for="(cell, ci) in row" :key="ci">{{ cell }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <pre v-else-if="pluginModel.type === 'text'" class="plugin-text">{{ pluginTextLines.join('\n') }}</pre>
+      <div v-else class="embed">
+        <strong>component:</strong> <code>{{ pluginModel.component }}</code>
+        <pre v-if="pluginModel.props && Object.keys(pluginModel.props).length">{{ JSON.stringify(pluginModel.props, null, 2) }}</pre>
+      </div>
+    </template>
+
+    <template v-else>
     <!-- layout containers -->
     <div v-if="kind === 'panel'" class="panel">
       <ViewNode
@@ -267,6 +346,7 @@ function fmt(v: any): string {
       <p class="muted">unknown node kind <code>{{ kind || '(missing)' }}</code> — degraded view:</p>
       <pre>{{ JSON.stringify(node, null, 2) }}</pre>
     </div>
+    </template>
   </section>
 </template>
 
@@ -277,6 +357,14 @@ function fmt(v: any): string {
 .vtitle {
   margin: 0.25rem 0;
   font-size: 1rem;
+}
+.plugin-svg :deep(svg) {
+  max-width: 100%;
+  height: auto;
+}
+.plugin-text {
+  font-family: ui-monospace, monospace;
+  white-space: pre-wrap;
 }
 .muted {
   opacity: 0.6;

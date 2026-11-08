@@ -13,6 +13,8 @@ use std::thread;
 
 use pavo_core::discovery::DriverInfo;
 use pavo_core::{host::ViewEntry, Chrome, Host, Params, ResolvedView, RouteEntry};
+use pavo_protocol::RenderModel;
+use std::collections::HashMap;
 
 /// One discovered driver, flattened for the rail.
 #[derive(Clone, Debug)]
@@ -58,6 +60,11 @@ pub enum Ev {
         target: String,
         /// Resolve outcome (boxed — `ResolvedView` is large).
         result: Result<Box<ResolvedView>, String>,
+        /// Renderer-plugin outputs for this view, keyed by node tree
+        /// path (`""` = root, `"0.2"` = child indices) — empty when no
+        /// driver claims kinds on the `tui` surface or every plugin
+        /// call failed (built-in rendering covers those nodes).
+        renders: HashMap<String, RenderModel>,
     },
     /// A [`Cmd::Reload`] finished.
     Reloaded {
@@ -93,11 +100,23 @@ pub fn spawn() -> Worker {
                     if refresh {
                         host.clear_cache();
                     }
-                    let result = host
+                    let resolved = host
                         .resolve_view(&target, Params::new())
-                        .map(Box::new)
                         .map_err(|e| e.to_string());
-                    let _ = ev_tx.send(Ev::View { target, result });
+                    // Plugin renders are a second round-trip set —
+                    // only for views that resolved; failures inside
+                    // degrade per-node (built-in rendering).
+                    let renders = resolved
+                        .as_ref()
+                        .ok()
+                        .map(|rv| host.render_view_plugins(rv, "tui", None))
+                        .unwrap_or_default();
+                    let result = resolved.map(Box::new);
+                    let _ = ev_tx.send(Ev::View {
+                        target,
+                        result,
+                        renders,
+                    });
                 }
                 Cmd::Reload => {
                     let views = host.list_views();

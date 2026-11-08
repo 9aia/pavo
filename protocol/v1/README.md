@@ -29,9 +29,11 @@ Design context: `project/project/proposals/proposal-0003-*` and
 ## The three contracts
 
 1. **Driver manifest** — `{name, title, icon?, version, verbs[],
-   capabilities[], contributes, views[]}`. Discoverable without
-   spawning: pavo lists routes and chrome contributions straight
-   from the manifest.
+   capabilities[], contributes, views[], renderers[]}`.
+   Discoverable without spawning: pavo lists routes and chrome
+   contributions straight from the manifest. `renderers[]` declares
+   view-kind renderer plugins (below) — a driver may declare
+   renderers with zero views.
 2. **ViewNode IR** — internally-tagged `"kind"` nodes:
    `panel`, `table`, `tree`, `graph`, `form`, `kv`, `markdown`,
    `embed`, `row`, `column`. Every kind flattens the shared
@@ -39,7 +41,67 @@ Design context: `project/project/proposals/proposal-0003-*` and
    `props`) to the top level. `embed` is the escape hatch for rich
    renderers.
 3. **Wire ops** — one JSON object per line:
-   requests `{"op":"manifest|views|view|query", …}`, responses
-   `{"ok":true,"result":…}` / `{"ok":false,"error":"…"}`. Same
-   convention as `tamias-serve`, `myco serve`, `cuora serve`,
+   requests `{"op":"manifest|views|view|query|render", …}`,
+   responses `{"ok":true,"result":…}` / `{"ok":false,"error":"…"}`.
+   Same convention as `tamias-serve`, `myco serve`, `cuora serve`,
    `sepia serve`.
+
+## Renderer plugins
+
+View-kind renderers are themselves tamias drivers — there is no
+separate plugin ecosystem. A driver whose manifest carries
+`renderers[]` claims ViewNode kinds on one or more surfaces:
+
+```json
+"renderers": [{
+  "id": "graph",
+  "kinds": ["graph"],          // or ["*"] for a catch-all
+  "priority": 50,              // lower wins conflicts (default 100)
+  "entry": "graph",            // optional tooling hint
+  "surfaces": {
+    "cli": { "formats": ["svg", "ascii"] },  // empty = all formats
+    "tui": true,
+    "web": { "component": "viz-graph", "island": true }
+  }
+}]
+```
+
+Claim resolution is deterministic: explicit kinds beat `"*"`,
+lower `priority` wins, ties break by driver name then renderer id —
+the same policy chrome contributions use.
+
+For every node whose kind is claimed on the asking surface, the
+host sends the driver:
+
+```
+{"op":"render","kind":"graph","node":{…ViewNode verbatim…},
+ "data":{…view data map…},"surface":"cli|tui|web","format":"…"?}
+```
+
+and expects a **RenderModel** back — the canonical intermediate
+output (`wire.schema.json` `renderModel`):
+
+| variant       | CLI            | TUI          | web              |
+|---------------|----------------|--------------|------------------|
+| `rows`        | aligned table  | table rows   | `<table>`        |
+| `svg`         | raw markup     | `[svg]` hint | `v-html` island  |
+| `text`        | lines          | lines        | `<pre>`          |
+| `placeholder` | `[component]`  | box + detail | named component  |
+
+Rules:
+
+- **Built-ins are not reserved.** A plugin may claim `graph` (or any
+  kind) and override built-in rendering on the surfaces it declares.
+  `graph` is the reference migration; `table`/`list` plugins are
+  future work.
+- **Fallback is mandatory.** When no plugin claims a kind+surface, or
+  the `render` op errors/times out, hosts use the built-in
+  interpretation (unknown kinds still degrade to KV). Plugin failure
+  must never break a view.
+- **`node` is verbatim.** Unknown/future ViewNode fields reach the
+  plugin untouched — forward compatibility applies to renderers too.
+- **`web.component`** is a v2 hint for dynamic-imported rich
+  components; v1 renders every RenderModel generically.
+- **No HTML in RenderModel.** Self-contained markup is `svg` only.
+
+Reference implementation: `examples/drivers/viz-graph/`.

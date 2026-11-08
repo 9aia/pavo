@@ -37,23 +37,60 @@ fi
 exit 1
 "#;
 
+/// Renderer-plugin driver `viz`: declares a `graph` renderer for cli
+/// formats `svg`/`ascii` (+tui/web) and answers `render` with canned
+/// RenderModels. Zero views — renderer-only.
+const VIZ: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"viz","title":"Viz Plugin","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[],"renderers":[{"id":"graph","kinds":["graph"],"priority":50,"surfaces":{"cli":{"formats":["svg","ascii"]},"tui":true,"web":{"component":"viz-graph","island":true}}}]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"render"'*'"format":"svg"'*)
+        printf '%s\n' '{"ok":true,"result":{"type":"svg","markup":"<svg>PLUGIN-SVG</svg>"}}';;
+      *'"op":"render"'*'"format":"ascii"'*)
+        printf '%s\n' '{"ok":true,"result":{"type":"text","lines":["PLUGIN-ASCII","a -> b"]}}';;
+      *'"op":"render"'*)
+        printf '%s\n' '{"ok":true,"result":{"type":"rows","headers":["id","label"],"rows":[["a","Alpha"]]}}';;
+      *'"op":"views"'*)
+        printf '%s\n' '{"ok":true,"result":[]}';;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
 struct Fixture {
     _tmp: tempfile::TempDir,
     bin: std::path::PathBuf,
+}
+
+fn write_driver(bin: &std::path::Path, name: &str, script: &str) {
+    let driver = bin.join(name);
+    std::fs::write(&driver, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 fn fixture() -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let driver = bin.join("tamias-driver-demo");
-    std::fs::write(&driver, DEMO).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    write_driver(&bin, "tamias-driver-demo", DEMO);
     Fixture { _tmp: tmp, bin }
+}
+
+/// Same fixture plus the `viz` renderer plugin claiming `graph`.
+fn fixture_with_plugin() -> Fixture {
+    let fx = fixture();
+    write_driver(&fx.bin, "tamias-driver-viz", VIZ);
+    fx
 }
 
 /// Run `pavo <args>` with PATH=<fixture bin> and TAMIAS_HOME=<empty>.
@@ -179,6 +216,67 @@ fn view_dot_and_mermaid_graphs() {
     assert!(out.starts_with("graph TD"), "{out}");
     assert!(out.contains("-->"), "{out}");
     assert!(out.contains("-->|uses|"), "{out}");
+}
+
+#[test]
+fn view_plugin_format_delegates_to_renderer() {
+    let fx = fixture_with_plugin();
+    // --format svg is claimed by viz → plugin SVG markup verbatim.
+    let o = pavo(&fx, &["view", "demo:deps", "--format", "svg"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("<svg>PLUGIN-SVG</svg>"),
+        "{}",
+        stdout(&o)
+    );
+
+    // --format ascii → plugin text model lines.
+    let o = pavo(&fx, &["view", "demo:deps", "--format", "ascii"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("PLUGIN-ASCII"), "{out}");
+    assert!(out.contains("a -> b"), "{out}");
+
+    // Built-in formats stay built-in even with the plugin installed.
+    let o = pavo(&fx, &["view", "demo:deps", "--format", "dot"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("digraph"), "{}", stdout(&o));
+
+    // Plain text: plugin's cli.formats doesn't claim "text" → built-in.
+    let o = pavo(&fx, &["view", "demo:deps"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(!stdout(&o).contains("PLUGIN"), "{}", stdout(&o));
+}
+
+#[test]
+fn view_plugin_text_substitution_and_unknown_format() {
+    let fx = fixture_with_plugin();
+    // A plugin claiming "text" would substitute — ours doesn't, so
+    // text stays built-in (covered above). An unclaimed format errors
+    // helpfully instead of silently rendering.
+    let o = pavo(&fx, &["view", "demo:deps", "--format", "bogus"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("no renderer plugin handles --format 'bogus'"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn drivers_lists_renderer_count() {
+    let fx = fixture_with_plugin();
+    let o = pavo(&fx, &["drivers"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("viz"), "{out}");
+    assert!(out.contains("renderers:1"), "{out}");
+
+    // viz declares zero views — still discovered as a driver.
+    let o = pavo(&fx, &["views", "--driver", "viz", "--json"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 0);
 }
 
 #[test]

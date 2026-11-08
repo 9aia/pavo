@@ -10,7 +10,11 @@ Products ship **tamias drivers**: executables named
 `manifest` and `serve` beside the install verbs, emitting declarative
 **ViewNode IR** JSON trees and view models over the org's ndjson
 JSON-RPC convention. Pavo's renderers — CLI, TUI, web — interpret
-those trees natively.
+those trees natively, and **renderer plugins** let drivers claim view
+kinds outright: a manifest `renderers[]` declaration plus the `render`
+wire op returning a canonical `RenderModel` (rows / svg / text /
+placeholder). Built-in rendering remains the fallback for every
+unclaimed kind and surface — see `protocol/v1/README.md`.
 
 Install a driver → get visualization everywhere. There is no
 `<product> ui` per product; pavo is the single entry point.
@@ -45,7 +49,7 @@ speaks. JSON Schemas mirroring it live in `protocol/v1/`.
 
 ## Examples
 
-`examples/drivers/` ships three reference `tamias-driver-*`
+`examples/drivers/` ships four reference `tamias-driver-*`
 executables (Python 3, stdlib only — they run anywhere python3 does):
 
 | Driver | Directory | Shows |
@@ -53,21 +57,25 @@ executables (Python 3, stdlib only — they run anywhere python3 does):
 | `tamias-driver-demo` | `examples/drivers/demo/` | board (table+kv+markdown), deps `graph`, timeline `tree`; navbar+dashboard+statusbar |
 | `tamias-driver-config` | `examples/drivers/config/` | `config:show` — resolved TOML/JSON config as KV + sources; `get`/`set` queries |
 | `tamias-driver-myco` | `examples/drivers/myco/` | thin proxy: translates pavo ops onto `myco serve`'s JSON-RPC wire; degrades when myco is absent |
+| `tamias-driver-viz-graph` | `examples/drivers/viz-graph/` | renderer plugin — claims `graph` on cli/tui/web via `render` (svg/ascii/rows); zero views |
 
 Put them on `PATH` (or symlink into `$TAMIAS_HOME/drivers/`) and pavo
 discovers them like any installed driver:
 
 ```bash
-export PATH="$PWD/examples/drivers/config:$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PATH"
+export PATH="$PWD/examples/drivers/config:$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PATH"
 pavo drivers
-pavo view demo:deps --format mermaid
+pavo view demo:deps --format mermaid   # built-in (plugin doesn't claim mermaid)
+pavo view demo:deps --format svg       # viz-graph plugin SVG
+pavo view demo:deps --format ascii     # viz-graph plugin edge list
 ```
 
 ```
 $ pavo drivers
-config  Config  v0.1.0  views:1  contributes: statusbar:1
-demo  Demo  v0.1.0  views:3  contributes: navbar:2 dashboard:1 statusbar:1
-myco  Myco  v0.1.0  views:3  contributes: navbar:1
+config  Config  v0.1.0  views:1  renderers:0  contributes: statusbar:1
+demo  Demo  v0.1.0  views:3  renderers:0  contributes: navbar:2 dashboard:1 statusbar:1
+myco  Myco  v0.1.0  views:3  renderers:0  contributes: navbar:1
+viz-graph  Graph viz  v0.1.0  views:0  renderers:1
 
 $ pavo view demo:deps --format mermaid
 graph TD
@@ -108,7 +116,9 @@ cd web && npm run build         # → .output/public (auto-detected)
 
 `pavo serve` binds `127.0.0.1` (`--port 0` picks a free port and
 prints it), exposes `GET /api/{health,drivers,views,chrome,view,raw,
-query}` as `{"ok":…}` envelopes, and serves `web/.output/public` (or
+query,renderers,render}` as `{"ok":…}` envelopes (`/api/renderers`
+lists renderer-plugin claims; `/api/render` proxies a `render` op —
+the web surface's plugin path), and serves `web/.output/public` (or
 `web/dist`, or `$PAVO_WEB_DIR`) — falling back to a built-in
 landing page when no build exists. See `web/README.md` for the full
 workflow and env vars.

@@ -152,6 +152,7 @@ mod tests {
             capabilities: vec!["pavo".to_string()],
             contributes,
             views: vec![],
+            renderers: vec![],
         }
     }
 

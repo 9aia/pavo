@@ -19,8 +19,10 @@
 //! chrome pseudo-views (contribution listing, error/info panes) that
 //! aren't driver views at all.
 
+use std::collections::HashMap;
+
 use pavo_core::{kv_fallback_json, node_kind_json, Chrome, ViewEntry};
-use pavo_protocol::{KvNode, TreeItem, ViewNode};
+use pavo_protocol::{KvNode, RenderModel, TreeItem, ViewNode};
 use serde_json::{Map, Value};
 
 /// Visual weight of a canvas row.
@@ -77,14 +79,32 @@ pub struct Model {
 
 /// Build the canvas model for a resolved view. `width` is the canvas
 /// width in columns — tables size their columns to fit (truncating
-/// cells with `…` when they can't).
+/// cells with `…` when they can't). Convenience wrapper — no plugin
+/// renders; the app goes through [`build_view_with_plugins`].
 #[must_use]
+#[allow(dead_code)]
 pub fn build_view(root: &ViewNode, data: &Map<String, Value>, width: usize) -> Model {
+    build_view_with_plugins(root, data, width, &HashMap::new())
+}
+
+/// [`build_view`] with renderer-plugin substitution: nodes whose tree
+/// path (child indices joined by `.`, root = `""`) has a
+/// [`RenderModel`] in `renders` — produced by a driver `render` op for
+/// surface `"tui"` — emit the plugin's output instead of the built-in
+/// interpretation. Paths come from
+/// [`pavo_core::renderers::plugin_nodes`].
+#[must_use]
+pub fn build_view_with_plugins(
+    root: &ViewNode,
+    data: &Map<String, Value>,
+    width: usize,
+    renders: &HashMap<String, RenderModel>,
+) -> Model {
     // ViewNode → JSON can't fail for a well-formed node; on the
     // impossible error we render an empty doc rather than panic.
     let value = serde_json::to_value(root).unwrap_or(Value::Null);
     let mut b = Builder::default();
-    node_json(&value, data, 0, width, &mut b);
+    node_json_path(&value, data, 0, width, String::new(), renders, &mut b);
     b.finish()
 }
 
@@ -273,16 +293,36 @@ fn section(
 
 // ---------- node dispatch (mirrors pavo-cli render.rs) ----------
 
-fn node_json(v: &Value, data: &Map<String, Value>, depth: usize, width: usize, b: &mut Builder) {
+/// The node walker with a tree `path` (plugin-render lookup key) and
+/// the plugin `renders` map — a claimed node emits its
+/// [`RenderModel`] instead of the built-in dispatch.
+fn node_json_path(
+    v: &Value,
+    data: &Map<String, Value>,
+    depth: usize,
+    width: usize,
+    path: String,
+    renders: &HashMap<String, RenderModel>,
+    b: &mut Builder,
+) {
     let ind = "  ".repeat(depth);
+    if let Some(model) = renders.get(&path) {
+        render_model_rows(model, depth, width, b);
+        return;
+    }
     match node_kind_json(v).unwrap_or("") {
         "panel" | "row" | "column" => {
             if let Some(title) = scalar_str(v.get("title")) {
                 b.row(&format!("{ind}{title}"), RowStyle::Title);
             }
             if let Some(children) = v.get("children").and_then(Value::as_array) {
-                for child in children {
-                    node_json(child, data, depth + 1, width, b);
+                for (i, child) in children.iter().enumerate() {
+                    let child_path = if path.is_empty() {
+                        i.to_string()
+                    } else {
+                        format!("{path}.{i}")
+                    };
+                    node_json_path(child, data, depth + 1, width, child_path, renders, b);
                 }
             }
         }
@@ -889,6 +929,161 @@ fn embed_json(v: &Value, depth: usize, b: &mut Builder) {
     b.sel_row(&text, RowStyle::Dim, format!("embed: {component}"), fields);
 }
 
+// ---------- renderer-plugin RenderModel → rows ----------
+
+/// Draw a plugin's [`RenderModel`] on the canvas — the TUI mapping:
+/// `rows` → aligned selectable table, `text` → plain lines, `svg` →
+/// a dim placeholder (the TUI can't embed markup), `placeholder` →
+/// a selectable component row.
+fn render_model_rows(model: &RenderModel, depth: usize, width: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    match model {
+        RenderModel::Text { lines } => {
+            for line in lines {
+                b.row(&format!("{ind}{line}"), RowStyle::Normal);
+            }
+        }
+        RenderModel::Rows {
+            headers,
+            aligns,
+            rows,
+        } => {
+            plugin_rows(headers, aligns, rows, depth, width, b);
+        }
+        RenderModel::Svg { markup } => {
+            b.row(
+                &format!("{ind}[svg: {} bytes — see web/cli]", markup.len()),
+                RowStyle::Dim,
+            );
+        }
+        RenderModel::Placeholder { component, props } => {
+            let mut text = format!("{ind}[component: {component}]");
+            if !props.is_empty() {
+                text.push_str(&format!(
+                    " {}",
+                    serde_json::to_string(props).unwrap_or_default()
+                ));
+            }
+            let fields = vec![
+                ("component".to_string(), component.clone()),
+                ("props".to_string(), pretty(&Value::Object(props.clone()))),
+            ];
+            b.sel_row(
+                &text,
+                RowStyle::Dim,
+                format!("component: {component}"),
+                fields,
+            );
+        }
+    }
+}
+
+/// `RenderModel::Rows` → canvas rows: header + separator + one
+/// selectable row per body row (detail = column → cell).
+fn plugin_rows(
+    headers: &[String],
+    aligns: &[pavo_protocol::Align],
+    rows: &[Vec<String>],
+    depth: usize,
+    width: usize,
+    b: &mut Builder,
+) {
+    let ind = "  ".repeat(depth);
+    let ncols = headers
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    if ncols == 0 {
+        b.row(&format!("{ind}(empty)"), RowStyle::Dim);
+        return;
+    }
+    let align_at = |i: usize| -> &str {
+        aligns
+            .get(i)
+            .map(|a| match a {
+                pavo_protocol::Align::Left => "left",
+                pavo_protocol::Align::Center => "center",
+                pavo_protocol::Align::Right => "right",
+            })
+            .unwrap_or("left")
+    };
+    // Same width-fitting policy as table_json: shrink widest until fit.
+    let avail = width.saturating_sub(depth * 2).max(ncols * 4);
+    let sep = 2usize;
+    let mut widths: Vec<usize> = (0..ncols)
+        .map(|i| headers.get(i).map_or(0, |h| h.chars().count()))
+        .collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.chars().count());
+            }
+        }
+    }
+    loop {
+        let total: usize = widths.iter().sum::<usize>() + sep * (widths.len() - 1);
+        if total <= avail {
+            break;
+        }
+        let Some((idx, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| **w > 3)
+            .max_by_key(|(_, w)| *w)
+        else {
+            break;
+        };
+        widths[idx] -= 1;
+    }
+    let emit = |cells: &[String], style: RowStyle, sel: Option<Selection>, b: &mut Builder| {
+        let parts: Vec<String> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| fit(cell, widths[i], align_at(i)))
+            .collect();
+        let text = format!("{ind}{}", parts.join(&" ".repeat(sep)));
+        match sel {
+            Some(sel) => {
+                let idx = b.selections.len();
+                b.selections.push(sel);
+                b.rows.push(Row {
+                    text,
+                    style,
+                    sel: Some(idx),
+                });
+            }
+            None => b.row(&text, style),
+        }
+    };
+    let header_cells: Vec<String> = (0..ncols)
+        .map(|i| headers.get(i).cloned().unwrap_or_default())
+        .collect();
+    emit(&header_cells, RowStyle::Header, None, b);
+    let sep_cells: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    emit(&sep_cells, RowStyle::Dim, None, b);
+    for row in rows {
+        let cells: Vec<String> = (0..ncols)
+            .map(|i| row.get(i).cloned().unwrap_or_default())
+            .collect();
+        let fields: Vec<(String, String)> = (0..ncols)
+            .map(|i| {
+                (
+                    headers.get(i).cloned().unwrap_or_else(|| format!("col{i}")),
+                    cells[i].clone(),
+                )
+            })
+            .collect();
+        emit(
+            &cells,
+            RowStyle::Normal,
+            Some(Selection {
+                title: "plugin row".to_string(),
+                fields,
+            }),
+            b,
+        );
+    }
+}
+
 // ---------- shared helpers ----------
 
 /// Stringify a JSON cell for terminal output: strings raw,
@@ -1211,6 +1406,81 @@ mod tests {
         assert!(texts(&m).iter().any(|l| l.contains("err: nope")));
         let l = build_loading("demo:board");
         assert!(texts(&l).iter().any(|l| l.contains("loading demo:board")));
+    }
+
+    #[test]
+    fn plugin_render_models_substitute_by_path() {
+        // column[ kv, graph ] → graph at path "1".
+        let node = root(json!({
+            "kind": "column", "title": "Mixed",
+            "children": [
+                {"kind": "kv", "query": "counts", "pairs": []},
+                {"kind": "graph", "query": "deps"}
+            ]
+        }));
+        let mut renders = HashMap::new();
+        renders.insert(
+            "1".to_string(),
+            RenderModel::Rows {
+                headers: vec!["id".into(), "label".into()],
+                aligns: vec![],
+                rows: vec![vec!["a".into(), "Alpha".into()]],
+            },
+        );
+        let m = build_view_with_plugins(&node, &data(), 80, &renders);
+        let t = texts(&m);
+        // kv still built-in; graph node replaced by plugin rows.
+        assert!(t.iter().any(|l| l.contains("open: 1")), "{t:?}");
+        assert!(
+            t.iter().any(|l| l.contains("id") && l.contains("label")),
+            "{t:?}"
+        );
+        assert!(
+            t.iter().any(|l| l.contains("a") && l.contains("Alpha")),
+            "{t:?}"
+        );
+        // plugin body rows are selectable
+        assert!(m
+            .rows
+            .iter()
+            .any(|r| r.sel.is_some() && r.text.contains("Alpha")));
+
+        // Other RenderModel variants map to their TUI degradations.
+        let mut renders2 = HashMap::new();
+        renders2.insert(
+            "1".to_string(),
+            RenderModel::Svg {
+                markup: "<svg/>".into(),
+            },
+        );
+        let m2 = build_view_with_plugins(&node, &data(), 80, &renders2);
+        assert!(
+            texts(&m2).iter().any(|l| l.contains("[svg:")),
+            "{:?}",
+            texts(&m2)
+        );
+
+        let mut renders3 = HashMap::new();
+        renders3.insert("1".to_string(), RenderModel::text(["hello", "world"]));
+        let m3 = build_view_with_plugins(&node, &data(), 80, &renders3);
+        let t3 = texts(&m3);
+        assert!(t3.iter().any(|l| l.trim() == "hello"), "{t3:?}");
+        assert!(t3.iter().any(|l| l.trim() == "world"), "{t3:?}");
+
+        let mut renders4 = HashMap::new();
+        renders4.insert(
+            "1".to_string(),
+            RenderModel::Placeholder {
+                component: "viz-gantt".into(),
+                props: Default::default(),
+            },
+        );
+        let m4 = build_view_with_plugins(&node, &data(), 80, &renders4);
+        assert!(
+            texts(&m4).iter().any(|l| l.contains("viz-gantt")),
+            "{:?}",
+            texts(&m4)
+        );
     }
 
     #[test]

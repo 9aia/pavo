@@ -39,6 +39,12 @@
       "type": "array",
       "items": { "$ref": "#/$defs/viewSpec" },
       "default": []
+    },
+    "renderers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rendererDecl" },
+      "default": [],
+      "description": "View-kind renderer declarations — the driver doubles as a renderer plugin. A driver may declare renderers with zero views (renderer-only). See protocol/v1/README.md#renderer-plugins."
     }
   },
   "$defs": {
@@ -94,6 +100,65 @@
           "default": []
         },
         "root": { "$ref": "view-node.schema.json" }
+      }
+    },
+    "rendererDecl": {
+      "type": "object",
+      "required": ["id", "kinds", "surfaces"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Renderer id, unique within the driver — namespaced as <driver>:<id> in listings."
+        },
+        "kinds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "ViewNode kinds this renderer claims (e.g. [\"graph\"]), or [\"*\"] for a catch-all. Explicit kinds beat \"*\"; lowest priority wins conflicts; ties break by driver name then renderer id."
+        },
+        "surfaces": { "$ref": "#/$defs/rendererSurfaces" },
+        "priority": {
+          "type": "integer",
+          "default": 100,
+          "description": "Conflict-resolution priority — lower wins (mirrors chrome contribution policy)."
+        },
+        "entry": {
+          "type": "string",
+          "description": "Optional hint naming the renderer entry point (documentation/tooling only — routing is by kinds+surfaces)."
+        }
+      }
+    },
+    "rendererSurfaces": {
+      "type": "object",
+      "description": "Which surfaces this renderer supports. Absent surface = unsupported there.",
+      "properties": {
+        "cli": { "$ref": "#/$defs/cliSurface" },
+        "tui": { "type": "boolean", "default": false },
+        "web": { "$ref": "#/$defs/webSurface" }
+      }
+    },
+    "cliSurface": {
+      "type": "object",
+      "properties": {
+        "formats": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "CLI --format values this renderer handles (e.g. [\"svg\",\"ascii\"]). Empty = wildcard: claims every format including text. Built-in formats text/json/dot/mermaid stay available as fallback when unclaimed."
+        }
+      }
+    },
+    "webSurface": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "type": "string",
+          "description": "v2 hint — dynamic-import/placeholder component name; v1 renders the RenderModel generically."
+        },
+        "island": {
+          "type": "boolean",
+          "default": false,
+          "description": "Renderer emits self-contained markup (e.g. svg) safe to embed as a web island."
+        }
       }
     },
     "queryBinding": {

@@ -16,6 +16,9 @@
 //! - `GET /api/view?ref=<driver>:<view>` (+ `param.<k>=<v>`) → ViewResult
 //! - `GET /api/raw?ref=…` → same as `/api/view`
 //! - `GET /api/query?driver=<d>&query=<q>` (+ `param.<k>=<v>`) → QueryResult
+//! - `GET /api/renderers` → the renderer-plugin registry (kind claims)
+//! - `GET /api/render?kind=<k>&node=<json>&data=<json>&surface=<s>[&format=<f>]`
+//!   → RenderModel — routes to the claiming driver's `render` op
 //! - `GET /*` → static files from the Nuxt output (`web/.output/public`,
 //!   `web/dist`, or `$PAVO_WEB_DIR`), else a built-in landing page.
 //!
@@ -162,6 +165,8 @@ fn api_route(path: &str, pairs: &[(String, String)], host: &Arc<Mutex<Host>>) ->
         "chrome" => api_chrome(host),
         "view" | "raw" => api_view(host, pairs),
         "query" => api_query(host, pairs),
+        "renderers" => api_renderers(host),
+        "render" => api_render(host, pairs),
         _ => Err(ApiFail::new(404, format!("unknown endpoint '{endpoint}'"))),
     };
 
@@ -308,6 +313,50 @@ fn api_query(host: &mut Host, pairs: &[(String, String)]) -> Result<Value, ApiFa
     let params: Params = http::collect_params(pairs).into_iter().collect();
     let result = host.query(driver, query, params)?;
     serde_json::to_value(&result).map_err(|e| ApiFail::new(500, e.to_string()))
+}
+
+/// The renderer-plugin registry — every `renderers` declaration,
+/// resolved to driver bindings (sorted by namespaced id).
+fn api_renderers(host: &mut Host) -> Result<Value, ApiFail> {
+    let registry = host.renderers();
+    let rows: Vec<Value> = registry
+        .entries()
+        .iter()
+        .map(|b| {
+            json!({
+                "id": b.id,
+                "driver": b.driver,
+                "driver_title": b.driver_title,
+                "kinds": b.decl.kinds,
+                "surfaces": b.decl.surfaces,
+                "priority": b.decl.priority,
+                "entry": b.decl.entry,
+            })
+        })
+        .collect();
+    Ok(json!(rows))
+}
+
+/// `GET /api/render` — route one node to its claiming renderer
+/// driver. `node`/`data` are URL-encoded JSON (`data` defaults to
+/// `{}`); `surface` is required (`cli`/`tui`/`web`); `format` is the
+/// optional format hint.
+fn api_render(host: &mut Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
+    let kind =
+        http::query_get(pairs, "kind").ok_or_else(|| ApiFail::new(400, "missing 'kind' param"))?;
+    let surface = http::query_get(pairs, "surface")
+        .ok_or_else(|| ApiFail::new(400, "missing 'surface' param"))?;
+    let node_raw = http::query_get(pairs, "node").unwrap_or("{}");
+    let node: Value = serde_json::from_str(node_raw)
+        .map_err(|e| ApiFail::new(400, format!("'node' isn't valid JSON: {e}")))?;
+    let data: Params = match http::query_get(pairs, "data") {
+        Some(raw) => serde_json::from_str(raw)
+            .map_err(|e| ApiFail::new(400, format!("'data' isn't a JSON object: {e}")))?,
+        None => Params::new(),
+    };
+    let format = http::query_get(pairs, "format");
+    let model = host.render_by_kind(kind, &node, &data, surface, format)?;
+    serde_json::to_value(&model).map_err(|e| ApiFail::new(500, e.to_string()))
 }
 
 // ---------- static files + built-in fallback ----------

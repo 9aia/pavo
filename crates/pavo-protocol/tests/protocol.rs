@@ -473,3 +473,108 @@ fn result_types_roundtrip() {
         data: json!({"rows": []}),
     });
 }
+
+// ---------- renderer plugins ----------
+
+#[test]
+fn manifest_renderers_roundtrip() {
+    // A renderer-plugin driver: zero views, one `renderers` claim.
+    let m: DriverManifest = serde_json::from_str(
+        r#"{
+          "name": "viz-graph", "title": "Graph viz", "version": "0.1.0",
+          "verbs": ["manifest", "serve"], "capabilities": ["pavo"],
+          "contributes": {}, "views": [],
+          "renderers": [{
+            "id": "graph", "kinds": ["graph"], "priority": 50,
+            "entry": "graph",
+            "surfaces": {
+              "cli": { "formats": ["svg", "ascii"] },
+              "tui": true,
+              "web": { "component": "viz-graph", "island": true }
+            }
+          }]
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(m.renderers.len(), 1);
+    let r = &m.renderers[0];
+    assert_eq!(r.id, "graph");
+    assert_eq!(r.kinds, vec!["graph".to_string()]);
+    assert_eq!(r.priority, 50);
+    assert!(r.surfaces.tui);
+    assert!(r.surfaces.web.as_ref().unwrap().island);
+    roundtrip(&m);
+
+    // Minimal decl: kinds+surfaces required; priority/entry default.
+    let m2: DriverManifest = serde_json::from_str(
+        r#"{ "name": "x", "title": "X", "version": "0",
+             "renderers": [{ "id": "any", "kinds": ["*"],
+                             "surfaces": { "tui": true } }] }"#,
+    )
+    .unwrap();
+    let r2 = &m2.renderers[0];
+    assert_eq!(r2.priority, 100);
+    assert!(r2.entry.is_none());
+    assert!(r2.surfaces.cli.is_none());
+    assert!(r2.surfaces.web.is_none());
+    roundtrip(&m2);
+
+    // No renderers key → empty vec (old manifests unaffected).
+    let m3: DriverManifest =
+        serde_json::from_str(r#"{ "name": "y", "title": "Y", "version": "0" }"#).unwrap();
+    assert!(m3.renderers.is_empty());
+}
+
+#[test]
+fn render_request_roundtrips_and_parses() {
+    let req = Request::Render {
+        kind: "graph".into(),
+        node: json!({"kind": "graph", "nodes": [], "edges": [],
+                     "future_field": {"kept": true}}),
+        data: Map::from_iter([("deps".to_string(), json!({"nodes": []}))]),
+        surface: "cli".into(),
+        format: Some("svg".into()),
+    };
+    roundtrip(&req);
+    let line = serde_json::to_string(&req).unwrap();
+    assert!(line.contains(r#""op":"render""#), "{line}");
+    assert!(line.contains(r#""surface":"cli""#), "{line}");
+    assert!(line.contains(r#""format":"svg""#), "{line}");
+    // format omitted → absent (skip_serializing_if).
+    let req2 = Request::Render {
+        kind: "graph".into(),
+        node: json!({}),
+        data: Map::new(),
+        surface: "tui".into(),
+        format: None,
+    };
+    let line2 = serde_json::to_string(&req2).unwrap();
+    assert!(!line2.contains("format"), "{line2}");
+    assert!(matches!(
+        parse_request(&line).unwrap(),
+        Request::Render { .. }
+    ));
+}
+
+#[test]
+fn render_model_wire_shapes() {
+    use pavo_protocol::RenderModel;
+    // Tagged union shapes match wire.schema.json renderModel.
+    let cases = [
+        (RenderModel::text(["a"]), r#"{"type":"text","lines":["a"]}"#),
+        (
+            RenderModel::rows(vec!["h".into()], vec![vec!["c".into()]]),
+            r#"{"type":"rows","headers":["h"],"rows":[["c"]]}"#,
+        ),
+        (
+            RenderModel::Svg {
+                markup: "<svg/>".into(),
+            },
+            r#"{"type":"svg","markup":"<svg/>"}"#,
+        ),
+    ];
+    for (model, expected) in cases {
+        assert_eq!(serde_json::to_string(&model).unwrap(), expected);
+        roundtrip(&model);
+    }
+}

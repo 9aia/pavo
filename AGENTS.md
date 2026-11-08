@@ -7,9 +7,12 @@ Rust + TypeScript monorepo: `crates/` (Rust workspace), `web/` (Nuxt),
 drivers** — executables named `tamias-driver-<type>` on `PATH` or in
 `<tamias-home>/drivers/` (`$TAMIAS_HOME` or
 `~/.local/share/tamias/drivers`) — and renders the declarative
-ViewNode IR they emit on three surfaces: CLI, TUI, web. No plugin
-system: drivers ARE tamias packages; the verb set just extends
-(`manifest`, `serve`).
+ViewNode IR they emit on three surfaces: CLI, TUI, web. Drivers are
+the only plugin mechanism — and they can also be **renderer plugins**:
+a manifest `renderers[]` declaration claims view *kinds* and answers
+the `render` wire op with a canonical `RenderModel` (see
+`protocol/v1/README.md` → Renderer plugins). Built-in rendering stays
+as the fallback for every unclaimed kind/surface.
 
 <!-- myco:agent-awareness -->
 
@@ -117,8 +120,10 @@ check`. Scaffold stage — hooks not yet installed.
   `protocol/v1/*.schema.json` — change Rust types, schemas, and
   this doc together.
 - **ViewNode IR is declarative.** Drivers emit trees + view models;
-  renderers interpret. Never ship renderer code inside a driver —
-  `embed` is the escape hatch for rich components.
+  hosts interpret — or hand the node to a renderer plugin (a driver
+  declaring `renderers[]` + answering `render` with a `RenderModel`).
+  `embed` remains the escape hatch for rich components no model
+  covers.
 - **`--json` everywhere** on the CLI; exit codes CI-meaningful.
 - Agents never hand-edit `project/` when a `myco` verb exists.
 - `.agents/skills/` is the canonical skill location; `skills-lock.json`

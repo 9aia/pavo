@@ -37,7 +37,7 @@ mod http;
 mod render;
 mod serve;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use pavo_core::{Host, Params, PavoError};
 use serde_json::{json, Map, Value};
 use std::process::ExitCode;
@@ -84,9 +84,11 @@ enum Command {
         /// when possible, else strings.
         #[arg(long = "param", value_name = "K=V")]
         params: Vec<String>,
-        /// Output format.
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
+        /// Output format — `text` (default), `json`, `dot`, `mermaid`,
+        /// or any format a renderer plugin claims (e.g. `svg`,
+        /// `ascii`; see a driver's manifest `renderers`).
+        #[arg(long, default_value = "text")]
+        format: String,
     },
     /// Raw `query` op passthrough against a driver's serve.
     Query {
@@ -114,18 +116,9 @@ enum Command {
     Schema,
 }
 
-/// `view --format` values.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Format {
-    /// Human-readable tree summary.
-    Text,
-    /// Raw ViewResult JSON (view spec + bound data).
-    Json,
-    /// Graphviz DOT — one digraph per graph node.
-    Dot,
-    /// Mermaid — all graph nodes merged into one `graph TD`.
-    Mermaid,
-}
+/// The built-in `view --format` values. Anything else is offered to
+/// renderer plugins (manifest `renderers[].surfaces.cli.formats`).
+const BUILTIN_FORMATS: [&str; 4] = ["text", "json", "dot", "mermaid"];
 
 /// A CLI failure: exit code + human message (stderr).
 struct Fail {
@@ -190,7 +183,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
             target,
             params,
             format,
-        }) => cmd_view(&target, &params, format),
+        }) => cmd_view(&target, &params, &format),
         Some(Command::Query {
             driver,
             query,
@@ -249,7 +242,7 @@ fn schema_doc() -> Value {
             "view": {
                 "summary": "resolve + render a <driver>:<view> deep link",
                 "args": ["<driver>:<view>", "--param K=V (repeatable)"],
-                "flags": {"--format": "text|json|dot|mermaid"}
+                "flags": {"--format": "text|json|dot|mermaid|<plugin format>"}
             },
             "query": {
                 "summary": "raw query-op passthrough",
@@ -263,7 +256,7 @@ fn schema_doc() -> Value {
             "manifest": {"summary": "print the pavo capability manifest (JSON)"},
             "schema": {"summary": "print this verb schema (JSON)"}
         },
-        "wire_ops": ["manifest", "views", "view", "query"],
+        "wire_ops": ["manifest", "views", "view", "query", "render"],
         "exit_codes": {"0": "ok", "1": "view/driver error", "2": "usage"}
     })
 }
@@ -281,6 +274,7 @@ fn cmd_drivers(json: bool) -> Result<(), Fail> {
                 "title": m.title,
                 "version": m.version,
                 "views": m.views.len(),
+                "renderers": m.renderers.len(),
                 "contributes": contrib_counts(&m.contributes),
             })),
             Err(e) => rows.push(json!({
@@ -316,11 +310,12 @@ fn cmd_drivers(json: bool) -> Result<(), Fail> {
             .collect::<Vec<_>>()
             .join(" ");
         println!(
-            "{}  {}  v{}  views:{}  {}",
+            "{}  {}  v{}  views:{}  renderers:{}  {}",
             row["driver"].as_str().unwrap_or("?"),
             row["title"].as_str().unwrap_or("?"),
             row["version"].as_str().unwrap_or("?"),
             row["views"].as_u64().unwrap_or(0),
+            row["renderers"].as_u64().unwrap_or(0),
             if contrib.is_empty() {
                 "contributes: —".to_string()
             } else {
@@ -463,34 +458,59 @@ fn cmd_chrome(json: bool) -> Result<(), Fail> {
     Ok(())
 }
 
-fn cmd_view(target: &str, params: &[String], format: Format) -> Result<(), Fail> {
+fn cmd_view(target: &str, params: &[String], format: &str) -> Result<(), Fail> {
     let params = parse_params(params)?;
     let mut host = Host::discover();
     let resolved = host.resolve_view(target, params)?;
     match format {
-        Format::Json => {
+        "json" => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&resolved.result)
                     .map_err(|e| Fail::err(e.to_string()))?
             );
         }
-        Format::Text => {
+        "text" => {
+            // Renderer plugins that claim `text` (or wildcard cli
+            // formats) substitute their RenderModel per node; the
+            // rest render built-in.
+            let renders = host.render_view_plugins(&resolved, "cli", Some("text"));
             print!(
                 "{}",
-                render::render_text(&resolved.result.view.root, &resolved.result.data)
+                render::render_text_plugins(
+                    &resolved.result.view.root,
+                    &resolved.result.data,
+                    &renders
+                )
             );
         }
-        Format::Dot => {
-            match render::render_dot(&resolved.result.view.root, &resolved.result.data) {
+        "dot" => match render::render_dot(&resolved.result.view.root, &resolved.result.data) {
+            Ok(out) => print!("{out}"),
+            Err(e) => return Err(Fail::err(format!("{target}: {e}"))),
+        },
+        "mermaid" => {
+            match render::render_mermaid(&resolved.result.view.root, &resolved.result.data) {
                 Ok(out) => print!("{out}"),
                 Err(e) => return Err(Fail::err(format!("{target}: {e}"))),
             }
         }
-        Format::Mermaid => {
-            match render::render_mermaid(&resolved.result.view.root, &resolved.result.data) {
-                Ok(out) => print!("{out}"),
-                Err(e) => return Err(Fail::err(format!("{target}: {e}"))),
+        other => {
+            // Plugin format: route every claimed node through its
+            // driver's `render` op and concatenate the models.
+            let renders = host.render_view_plugins(&resolved, "cli", Some(other));
+            if renders.is_empty() {
+                return Err(Fail::err(format!(
+                    "{target}: no renderer plugin handles --format '{other}' \
+                     (built-ins: {})",
+                    BUILTIN_FORMATS.join(", ")
+                )));
+            }
+            // Deterministic order: sort by path ("" root first, then
+            // tree order).
+            let mut keyed: Vec<(&String, &pavo_protocol::RenderModel)> = renders.iter().collect();
+            keyed.sort_by(|a, b| a.0.cmp(b.0));
+            for (_, model) in keyed {
+                print!("{}", render::render_model_cli(model));
             }
         }
     }

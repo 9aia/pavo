@@ -37,7 +37,7 @@ use std::thread;
 use std::time::Duration;
 
 use pavo_protocol::wire::{QueryResult, ViewResult, ViewSummary};
-use pavo_protocol::{DriverManifest, Request, Response};
+use pavo_protocol::{DriverManifest, RenderModel, Request, Response};
 use serde::de::DeserializeOwned;
 
 use crate::error::PavoError;
@@ -171,6 +171,31 @@ impl DriverClient {
         self.request(&Request::Query {
             query: query.to_string(),
             params,
+        })
+    }
+
+    /// `{"op":"render","kind":…,"node":…,"data":…,"surface":…,
+    /// "format":…}` → a [`RenderModel`] — the renderer-plugin verb.
+    /// Only meaningful for drivers whose manifest declares
+    /// `renderers`; hosts route by kind via
+    /// [`crate::host::Host::render_by_kind`].
+    ///
+    /// # Errors
+    /// As [`DriverClient::manifest`].
+    pub fn render(
+        &mut self,
+        kind: &str,
+        node: &serde_json::Value,
+        data: &Params,
+        surface: &str,
+        format: Option<&str>,
+    ) -> Result<RenderModel, PavoError> {
+        self.request(&Request::Render {
+            kind: kind.to_string(),
+            node: node.clone(),
+            data: data.clone(),
+            surface: surface.to_string(),
+            format: format.map(str::to_string),
         })
     }
 

@@ -110,6 +110,7 @@ fn non_pavo_manifest_is_detected() {
             capabilities: vec![],
             contributes: Default::default(),
             views: vec![],
+            renderers: vec![],
         })
         .build()
         .unwrap();

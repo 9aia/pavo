@@ -26,19 +26,141 @@
 
 use std::collections::HashMap;
 
-use pavo_protocol::{KvNode, TreeItem, ViewNode};
+use pavo_protocol::{KvNode, RenderModel, TreeItem, ViewNode};
 use serde_json::{Map, Value};
 
 use pavo_core::{kv_fallback_json, node_kind_json};
 
 /// Render the view tree + bound data as indented plain text.
+/// Convenience wrapper — no plugin renders. Used by tests; the CLI
+/// verb goes through [`render_text_plugins`].
 #[must_use]
+#[allow(dead_code)]
 pub fn render_text(root: &ViewNode, data: &Map<String, Value>) -> String {
+    render_text_plugins(root, data, &HashMap::new())
+}
+
+/// [`render_text`] with renderer-plugin substitution: nodes whose tree
+/// path (child indices joined by `.`, root = `""`) has a
+/// [`RenderModel`] in `renders` emit the plugin's output instead of
+/// the built-in interpretation. Paths come from
+/// [`pavo_core::renderers::plugin_nodes`].
+#[must_use]
+pub fn render_text_plugins(
+    root: &ViewNode,
+    data: &Map<String, Value>,
+    renders: &HashMap<String, RenderModel>,
+) -> String {
     // ViewNode → JSON can't fail for a well-formed node; on the
     // impossible error we render an empty doc rather than panic.
     let value = serde_json::to_value(root).unwrap_or(Value::Null);
     let mut out = String::new();
-    node_text(&value, data, 0, &mut out);
+    node_text_path(&value, data, 0, String::new(), renders, &mut out);
+    out
+}
+
+/// Render one [`RenderModel`] as terminal text — the CLI mapping for
+/// plugin output (`--format` values the plugin claims). `Svg` markup
+/// prints verbatim (that IS the requested format); other models use
+/// the text-substitution mapping.
+#[must_use]
+pub fn render_model_cli(model: &RenderModel) -> String {
+    match model {
+        RenderModel::Svg { markup } => format!("{markup}\n"),
+        other => {
+            let mut out = String::new();
+            render_model_text(other, "", &mut out);
+            out
+        }
+    }
+}
+
+/// Emit a [`RenderModel`] as indented plain text (shared by the
+/// `--format text` substitution path and [`render_model_cli`]).
+fn render_model_text(model: &RenderModel, ind: &str, out: &mut String) {
+    match model {
+        RenderModel::Text { lines } => {
+            for line in lines {
+                out.push_str(&format!("{ind}{line}\n"));
+            }
+        }
+        RenderModel::Rows {
+            headers,
+            aligns,
+            rows,
+        } => {
+            out.push_str(&rows_text(headers, aligns, rows, ind));
+        }
+        RenderModel::Svg { markup } => {
+            out.push_str(&format!("{ind}[svg: {} bytes]\n", markup.len()));
+        }
+        RenderModel::Placeholder { component, props } => {
+            out.push_str(&format!("{ind}[component: {component}]"));
+            if !props.is_empty() {
+                out.push_str(&format!(
+                    " {}",
+                    serde_json::to_string(props).unwrap_or_default()
+                ));
+            }
+            out.push('\n');
+        }
+    }
+}
+
+/// Aligned plain-text table for a [`RenderModel::Rows`] — same visual
+/// language as `table_text` (two-space gutters, `-` separator).
+fn rows_text(
+    headers: &[String],
+    aligns: &[pavo_protocol::Align],
+    rows: &[Vec<String>],
+    ind: &str,
+) -> String {
+    let mut out = String::new();
+    if headers.is_empty() && rows.is_empty() {
+        out.push_str(&format!("{ind}(empty)\n"));
+        return out;
+    }
+    let ncols = headers
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    let align_at = |i: usize| -> &str {
+        aligns
+            .get(i)
+            .map(|a| match a {
+                pavo_protocol::Align::Left => "left",
+                pavo_protocol::Align::Center => "center",
+                pavo_protocol::Align::Right => "right",
+            })
+            .unwrap_or("left")
+    };
+    let mut widths: Vec<usize> = (0..ncols)
+        .map(|i| headers.get(i).map_or(0, |h| h.chars().count()))
+        .collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.chars().count());
+            }
+        }
+    }
+    let header_cells: Vec<String> = (0..ncols)
+        .map(|i| {
+            let h = headers.get(i).cloned().unwrap_or_default();
+            pad(&h, widths[i], align_at(i))
+        })
+        .collect();
+    out.push_str(&format!("{ind}{}\n", header_cells.join("  ")));
+    let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    out.push_str(&format!("{ind}{}\n", sep.join("  ")));
+    for row in rows {
+        let line: Vec<String> = (0..ncols)
+            .map(|i| {
+                let cell = row.get(i).cloned().unwrap_or_default();
+                pad(&cell, widths[i], align_at(i))
+            })
+            .collect();
+        out.push_str(&format!("{ind}{}\n", line.join("  ")));
+    }
     out
 }
 
@@ -162,16 +284,35 @@ pub fn render_mermaid(root: &ViewNode, data: &Map<String, Value>) -> Result<Stri
 
 // ---------- text rendering ----------
 
-fn node_text(v: &Value, data: &Map<String, Value>, depth: usize, out: &mut String) {
+/// [`node_text`] with a tree `path` (plugin-render lookup key) and
+/// the plugin `renders` map — a claimed node emits its
+/// [`RenderModel`] instead of the built-in dispatch.
+fn node_text_path(
+    v: &Value,
+    data: &Map<String, Value>,
+    depth: usize,
+    path: String,
+    renders: &HashMap<String, RenderModel>,
+    out: &mut String,
+) {
     let ind = "  ".repeat(depth);
+    if let Some(model) = renders.get(&path) {
+        render_model_text(model, &ind, out);
+        return;
+    }
     match node_kind_json(v).unwrap_or("") {
         "panel" | "row" | "column" => {
             if let Some(title) = scalar_str(v.get("title")) {
                 out.push_str(&format!("{ind}{title}\n"));
             }
             if let Some(children) = v.get("children").and_then(Value::as_array) {
-                for child in children {
-                    node_text(child, data, depth + 1, out);
+                for (i, child) in children.iter().enumerate() {
+                    let child_path = if path.is_empty() {
+                        i.to_string()
+                    } else {
+                        format!("{path}.{i}")
+                    };
+                    node_text_path(child, data, depth + 1, child_path, renders, out);
                 }
             }
         }

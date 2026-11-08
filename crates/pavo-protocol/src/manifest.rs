@@ -56,6 +56,98 @@ pub struct DriverManifest {
     /// declarative [`ViewNode`] tree plus the queries that feed it.
     #[serde(default)]
     pub views: Vec<ViewSpec>,
+    /// View-kind renderer plugins this driver ships — each declares
+    /// the node `kinds` it renders and which `surfaces` it supports.
+    /// See [`RendererDecl`]. A driver may declare renderers with zero
+    /// views (pure renderer plugin) or alongside views.
+    #[serde(default)]
+    pub renderers: Vec<RendererDecl>,
+}
+
+/// One view-kind renderer a driver ships — the manifest half of the
+/// renderer-plugin contract (the wire half is the `render` op).
+///
+/// A renderer claims node `kinds` (ViewNode `kind` strings, or `"*"`
+/// for any kind the host doesn't build in). When a surface meets a
+/// node of a claimed kind, the host routes it to this driver's
+/// `render` op instead of its built-in interpretation; the driver
+/// answers with a [`crate::render_model::RenderModel`].
+///
+/// Wire shape:
+///
+/// ```json
+/// { "id": "graph", "kinds": ["graph"],
+///   "surfaces": { "cli": {"formats": ["svg", "ascii"]},
+///                 "tui": true,
+///                 "web": {"island": true} },
+///   "priority": 100 }
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RendererDecl {
+    /// Renderer id — namespaced `<driver>:<id>` by convention; stable
+    /// for diagnostics and `/api/renderers` listings.
+    pub id: String,
+    /// Node kinds this renderer handles — ViewNode `kind` strings
+    /// (`"graph"`, `"timeline"`, …) or `"*"` for a catch-all. Explicit
+    /// kinds always beat `"*"` claims; among competing claims the
+    /// lowest [`RendererDecl::priority`] wins (ties: driver kind asc,
+    /// then renderer id asc — the chrome-merge ordering policy).
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// Per-surface support. Absent surface = unsupported there.
+    #[serde(default)]
+    pub surfaces: RendererSurfaces,
+    /// Ordering hint within a kind — lower wins. Defaults to `100`
+    /// (same convention as [`Contribution::priority`]).
+    #[serde(default = "default_priority")]
+    pub priority: i32,
+    /// Optional entry-point hint — a component/module name the host
+    /// may prefer over `serve`-wire rendering (reserved; hosts
+    /// currently always use the wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+}
+
+/// Which surfaces a [`RendererDecl`] supports and how.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RendererSurfaces {
+    /// CLI support — `formats` lists the `pavo view --format` values
+    /// the renderer claims beyond the built-ins (`text`/`json`/`dot`/
+    /// `mermaid`). An empty list is a wildcard: the renderer handles
+    /// every format it is asked for, including `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<CliSurface>,
+    /// TUI support — `true` renders plugin nodes on the ratatui host.
+    #[serde(default)]
+    pub tui: bool,
+    /// Web support — `component` names a web component/island the
+    /// host may mount; `island` marks the renderer as needing
+    /// client-side execution (SSR-incompatible output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web: Option<WebSurface>,
+}
+
+/// CLI surface declaration for a [`RendererDecl`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CliSurface {
+    /// `--format` values this renderer claims. Empty = wildcard.
+    #[serde(default)]
+    pub formats: Vec<String>,
+}
+
+/// Web surface declaration for a [`RendererDecl`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WebSurface {
+    /// Optional component/island name — hint for hosts that resolve
+    /// `placeholder` models or `embed` nodes; the `render` op remains
+    /// the canonical path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    /// `true` when the renderer's output requires client-side
+    /// execution (canvas, wasm, interactive svg) — hosts should treat
+    /// the node as an island.
+    #[serde(default)]
+    pub island: bool,
 }
 
 /// Contribution slots — the named places in pavo's chrome where
