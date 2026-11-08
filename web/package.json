@@ -1,0 +1,15 @@
+{
+  "name": "pavo-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Nuxt SSR host + serve bridge for the pavo viz host (scaffold — see README.md)",
+  "scripts": {
+    "dev": "nuxi dev",
+    "build": "nuxi build",
+    "generate": "nuxi generate"
+  },
+  "devDependencies": {
+    "nuxt": "^3.0.0",
+    "typescript": "^5.0.0"
+  }
+}

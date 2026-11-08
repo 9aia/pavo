@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://9aia.com/pavo/protocol/v1/wire.schema.json",
+  "title": "pavo v1 wire ops",
+  "description": "ndjson JSON-RPC request/response envelope and op payloads. Mirrors crates/pavo-protocol/src/wire.rs. Same convention as tamias-serve / myco serve / cuora serve / sepia serve. Additive-only within v1.",
+  "defs": {
+    "request": {
+      "description": "One request per line: {\"op\":\"…\", …}.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["op"],
+          "properties": { "op": { "const": "manifest" } }
+        },
+        {
+          "type": "object",
+          "required": ["op"],
+          "properties": { "op": { "const": "views" } }
+        },
+        {
+          "type": "object",
+          "required": ["op", "view"],
+          "properties": {
+            "op": { "const": "view" },
+            "view": { "type": "string", "description": "View id from the driver's manifest." },
+            "params": {
+              "type": "object",
+              "description": "Caller-supplied params merged into each query binding."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["op", "query"],
+          "properties": {
+            "op": { "const": "query" },
+            "query": {
+              "type": "string",
+              "description": "Query binding name, or a raw product op for thin drivers."
+            },
+            "params": { "type": "object" }
+          }
+        }
+      ]
+    },
+    "response": {
+      "type": "object",
+      "required": ["ok"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "result": {
+          "description": "Result payload when ok is true (absent otherwise)."
+        },
+        "error": {
+          "type": "string",
+          "description": "Error string when ok is false (absent otherwise)."
+        }
+      }
+    },
+    "viewSummary": {
+      "type": "object",
+      "required": ["id", "title", "route"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "route": { "type": "string" },
+        "description": { "type": ["string", "null"] },
+        "queries": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        }
+      }
+    },
+    "viewResult": {
+      "type": "object",
+      "required": ["view"],
+      "properties": {
+        "view": { "$ref": "driver-manifest.schema.json#/$defs/viewSpec" },
+        "data": {
+          "type": "object",
+          "description": "Query results keyed by binding name; failures appear as {\"error\": \"…\"} payloads."
+        }
+      }
+    },
+    "queryResult": {
+      "type": "object",
+      "required": ["query", "data"],
+      "properties": {
+        "query": { "type": "string" },
+        "data": { "description": "Driver/product-defined payload, passed through verbatim." }
+      }
+    }
+  }
+}

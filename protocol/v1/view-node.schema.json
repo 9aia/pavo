@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://9aia.com/pavo/protocol/v1/view-node.schema.json",
+  "title": "pavo v1 ViewNode IR",
+  "description": "One node of a declarative view tree — internally tagged on \"kind\". Mirrors crates/pavo-protocol/src/view_node.rs. Renderers must degrade unknown kinds to generic KV. Additive-only within v1.",
+  "oneOf": [
+    { "$ref": "#/$defs/panel" },
+    { "$ref": "#/$defs/table" },
+    { "$ref": "#/$defs/tree" },
+    { "$ref": "#/$defs/graph" },
+    { "$ref": "#/$defs/form" },
+    { "$ref": "#/$defs/kv" },
+    { "$ref": "#/$defs/markdown" },
+    { "$ref": "#/$defs/embed" },
+    { "$ref": "#/$defs/row" },
+    { "$ref": "#/$defs/column" }
+  ],
+  "$defs": {
+    "nodeBase": {
+      "type": "object",
+      "description": "Fields every kind shares, flattened to the top level.",
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
+        "query": {
+          "type": ["string", "null"],
+          "description": "Binding name referencing a QueryBinding in the enclosing ViewSpec."
+        },
+        "description": { "type": ["string", "null"] },
+        "props": {
+          "type": "object",
+          "description": "Renderer hints — kind-specific knobs; renderers ignore unknown keys."
+        }
+      }
+    },
+    "panel": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "panel" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#" },
+          "default": []
+        }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "row": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "row" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#" },
+          "default": []
+        },
+        "gap": { "type": ["integer", "null"] }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "column": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "column" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#" },
+          "default": []
+        },
+        "gap": { "type": ["integer", "null"] }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "table": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "table" },
+        "columns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/tableColumn" },
+          "default": []
+        },
+        "rows": {
+          "type": "array",
+          "items": { "type": "array" },
+          "description": "Inline rows aligned to columns; cell values are arbitrary JSON."
+        },
+        "sortable": { "type": "boolean", "default": false }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "tableColumn": {
+      "type": "object",
+      "required": ["key", "title"],
+      "properties": {
+        "key": { "type": "string" },
+        "title": { "type": "string" },
+        "align": { "enum": ["left", "center", "right", null] },
+        "width": { "type": ["integer", "null"] }
+      }
+    },
+    "tree": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "tree" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/treeItem" },
+          "default": []
+        },
+        "expandable": { "type": "boolean", "default": false }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "treeItem": {
+      "type": "object",
+      "required": ["label"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "label": { "type": "string" },
+        "detail": { "type": ["string", "null"] },
+        "icon": { "type": ["string", "null"] },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/treeItem" }
+        },
+        "props": { "type": "object" }
+      }
+    },
+    "graph": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "graph" },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/graphNodeItem" },
+          "default": []
+        },
+        "edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/graphEdge" },
+          "default": []
+        },
+        "layout": {
+          "type": ["string", "null"],
+          "description": "Layout hint — \"dot\", \"mermaid\", \"layered\", …; unknown values ignored."
+        }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "graphNodeItem": {
+      "type": "object",
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "kind": { "type": ["string", "null"] },
+        "props": { "type": "object" }
+      }
+    },
+    "graphEdge": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "label": { "type": ["string", "null"] }
+      }
+    },
+    "form": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "form" },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/formField" },
+          "default": []
+        },
+        "submit_op": { "type": ["string", "null"] },
+        "submit_label": { "type": ["string", "null"] }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "formField": {
+      "type": "object",
+      "required": ["key", "label"],
+      "properties": {
+        "key": { "type": "string" },
+        "label": { "type": "string" },
+        "kind": { "enum": ["text", "textarea", "number", "bool", "select"], "default": "text" },
+        "required": { "type": "boolean", "default": false },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "default": {},
+        "value": {},
+        "hint": { "type": ["string", "null"] }
+      }
+    },
+    "kv": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "kv" },
+        "pairs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/kvPair" },
+          "default": []
+        }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "kvPair": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string" },
+        "value": {},
+        "kind": { "type": ["string", "null"] }
+      }
+    },
+    "markdown": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "markdown" },
+        "text": { "type": "string", "default": "" }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    },
+    "embed": {
+      "type": "object",
+      "required": ["kind", "component"],
+      "properties": {
+        "kind": { "const": "embed" },
+        "component": {
+          "type": "string",
+          "description": "Renderer/component name resolved against the host's renderer registry."
+        },
+        "props": { "type": "object" }
+      },
+      "allOf": [ { "$ref": "#/$defs/nodeBase" } ]
+    }
+  }
+}
