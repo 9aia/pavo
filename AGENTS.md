@@ -60,6 +60,7 @@ as the fallback for every unclaimed kind/surface.
 
 ```
 crates/    pavo-protocol · pavo-core · pavo-cli · pavo-tui · pavo-testkit
+           pavo-driver-config (first-party tamias-driver-config)
 web/       Nuxt SSR host + serve bridge (stdio↔ws) — scaffold stage
 protocol/  driver capability spec · ViewNode IR · wire ops (versioned)
 xtask      check / test / coverage / install (myco anatomy)
@@ -72,6 +73,7 @@ xtask      check / test / coverage / install (myco anatomy)
 | `pavo-cli` | the `pavo` binary — hub verbs, `--json` everywhere; protocol conformance harness |
 | `pavo-tui` | ratatui host — chrome slots + ViewNode renderer |
 | `pavo-testkit` | recorded driver sessions → conformance for all surfaces |
+| `pavo-driver-config` | `tamias-driver-config` — the common config API driver (layered TOML/JSON, `get`/`set`/`resolve`/`sources` queries) |
 
 `protocol/v1/*.schema.json` are hand-maintained mirrors of
 `pavo-protocol`; `protocol/v1/README.md` states the versioning
@@ -100,7 +102,7 @@ Neighbors own theirs:
 cargo xtask check          # fmt + clippy -D warnings
 cargo xtask test           # whole suite (nextest if present)
 cargo xtask coverage       # llvm-cov report (HTML → target/llvm-cov/html)
-cargo xtask install        # release-install pavo → ~/.cargo/bin
+cargo xtask install        # release-install pavo + tamias-driver-config → ~/.cargo/bin
 ./scripts/smoke-examples.sh  # run examples/drivers/* end-to-end via pavo
 ```
 

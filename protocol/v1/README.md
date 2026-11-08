@@ -105,3 +105,23 @@ Rules:
 - **No HTML in RenderModel.** Self-contained markup is `svg` only.
 
 Reference implementation: `examples/drivers/viz-graph/`.
+
+## The config API (driver-level convention)
+
+`tamias-driver-config` (`crates/pavo-driver-config`) is the suite's
+**common config API** — not part of the v1 wire contract itself, but a
+convention layered on the `query` op. Drivers that need product or
+host config spawn it over `serve` and issue:
+
+- `query get`    `{key: "myco.theme"}` → `{key, value, found}`
+- `query set`    `{key, value}` → writes the project-level file
+- `query resolve` → the full merged config tree
+- `query sources` → every contributing layer (provenance)
+
+Keys are **namespaced dotted paths** (`myco.theme`, `kuda.index`) —
+callers never read config files directly. Layers, low→high:
+built-in defaults < `~/.config/pavo/` (global) < `pavo.toml`/
+`pavo.json` in cwd ancestors (project, nearest wins) <
+`--config`/`$PAVO_CONFIG` < `PAVO_CONFIG_*` env overrides. TOML +
+JSON only (no YAML dep in the workspace tree). Full contract:
+`crates/pavo-driver-config/README.md`.

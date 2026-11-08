@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/pavo-cli",
     "crates/pavo-core",
+    "crates/pavo-driver-config",
     "crates/pavo-protocol",
     "crates/pavo-testkit",
     "crates/pavo-tui",
@@ -36,6 +37,7 @@ tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"
 crossterm = "0.29"
+toml_edit = "0.25"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

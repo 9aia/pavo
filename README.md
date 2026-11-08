@@ -47,6 +47,7 @@ serve pavo views.)
 
 ```
 crates/    pavo-protocol · pavo-core · pavo-cli · pavo-tui · pavo-testkit
+           pavo-driver-config (first-party tamias-driver-config)
 web/       Nuxt 4 app — dashboard + ViewNode renderer; `npm run dev`
            (proxied to the bridge) or `npm run build` → static export
 protocol/  driver capability spec · contribution slots · ViewNode IR ·
@@ -60,21 +61,26 @@ speaks. JSON Schemas mirroring it live in `protocol/v1/`.
 
 ## Examples
 
-`examples/drivers/` ships four reference `tamias-driver-*`
-executables (Python 3, stdlib only — they run anywhere python3 does):
+`examples/drivers/` ships three reference `tamias-driver-*`
+executables (Python 3, stdlib only — they run anywhere python3 does),
+plus one **first-party Rust driver** in the workspace:
 
-| Driver | Directory | Shows |
+| Driver | Location | Shows |
 | --- | --- | --- |
+| `tamias-driver-config` | `crates/pavo-driver-config` | the common config API — `config:show`/`config:sources` views, `get`/`set`/`resolve` queries over layered TOML/JSON config; statusbar contribution |
 | `tamias-driver-demo` | `examples/drivers/demo/` | board (table+kv+markdown), deps `graph`, timeline `tree`; navbar+dashboard+statusbar |
-| `tamias-driver-config` | `examples/drivers/config/` | `config:show` — resolved TOML/JSON config as KV + sources; `get`/`set` queries |
 | `tamias-driver-myco` | `examples/drivers/myco/` | thin proxy: translates pavo ops onto `myco serve`'s JSON-RPC wire; degrades when myco is absent |
 | `tamias-driver-viz-graph` | `examples/drivers/viz-graph/` | renderer plugin — claims `graph` on cli/tui/web via `render` (svg/ascii/rows); zero views |
 
 Put them on `PATH` (or symlink into `$TAMIAS_HOME/drivers/`) and pavo
-discovers them like any installed driver:
+discovers them like any installed driver. The config driver installs
+with the workspace — `cargo xtask install` (or
+`cargo install --path crates/pavo-driver-config`) puts
+`tamias-driver-config` on `PATH`:
 
 ```bash
-export PATH="$PWD/examples/drivers/config:$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PATH"
+cargo xtask install   # pavo + tamias-driver-config → ~/.cargo/bin
+export PATH="$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PATH"
 pavo drivers
 pavo view demo:deps --format mermaid   # built-in (plugin doesn't claim mermaid)
 pavo view demo:deps --format svg       # viz-graph plugin SVG
@@ -83,7 +89,7 @@ pavo view demo:deps --format ascii     # viz-graph plugin edge list
 
 ```
 $ pavo drivers
-config  Config  v0.1.0  views:1  renderers:0  contributes: statusbar:1
+config  Config  v0.1.0  views:2  renderers:0  contributes: statusbar:1
 demo  Demo  v0.1.0  views:3  renderers:0  contributes: navbar:2 dashboard:1 statusbar:1
 myco  Myco  v0.1.0  views:3  renderers:0  contributes: navbar:1
 viz-graph  Graph viz  v0.1.0  views:0  renderers:1
@@ -140,6 +146,6 @@ workflow and env vars.
 ## Status
 
 `pavo-protocol`, `pavo-core`, `pavo-cli` (incl. `serve`),
-`pavo-testkit`, `pavo-tui`, `web/`, and the example drivers are
-implemented and tested (`cargo xtask check` / `cargo xtask test`,
+`pavo-testkit`, `pavo-tui`, `pavo-driver-config`, `web/`, and the
+example drivers are implemented and tested (`cargo xtask check` / `cargo xtask test`,
 `cd web && npm run build`).

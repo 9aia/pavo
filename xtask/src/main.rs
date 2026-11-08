@@ -6,7 +6,8 @@
 //! - `test`     — `cargo nextest run` when installed, else `cargo test`
 //! - `coverage` — `cargo llvm-cov` (HTML → target/llvm-cov/html);
 //!   extra args pass through, e.g. `--fail-under-lines 97`
-//! - `install`  — release-install `pavo` into ~/.cargo/bin
+//! - `install`  — release-install `pavo` + `tamias-driver-config`
+//!   into ~/.cargo/bin
 
 use std::process::{Command, ExitStatus};
 
@@ -88,7 +89,9 @@ fn coverage_command(extra: &[String]) -> Vec<String> {
 }
 
 fn install() -> i32 {
-    run(&[
+    // The host plus the first-party drivers — both land as binaries
+    // on PATH (~/.cargo/bin), which is also the driver-discovery path.
+    let ok = run(&[
         "cargo",
         "install",
         "--path",
@@ -96,8 +99,17 @@ fn install() -> i32 {
         "--locked",
         "--force",
     ])
-    .code()
-    .unwrap_or(1)
+    .success()
+        && run(&[
+            "cargo",
+            "install",
+            "--path",
+            "crates/pavo-driver-config",
+            "--locked",
+            "--force",
+        ])
+        .success();
+    i32::from(!ok)
 }
 
 /// Verb dispatch — split from `main` so the unknown-verb path is

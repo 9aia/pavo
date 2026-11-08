@@ -1,0 +1,29 @@
+[package]
+name = "pavo-driver-config"
+description = "tamias-driver-config — the common config API driver for the 9aia suite (pavo view driver)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+authors.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[[bin]]
+name = "tamias-driver-config"
+path = "src/main.rs"
+
+[dependencies]
+pavo-protocol.workspace = true
+serde_json.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+pavo-testkit = { path = "../pavo-testkit" }
+tempfile.workspace = true
+
+[lints]
+workspace = true
