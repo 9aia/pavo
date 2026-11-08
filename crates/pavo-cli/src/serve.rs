@@ -390,13 +390,16 @@ fn static_response(path: &str, web_root: Option<&Path>) -> Response {
             return Response::raw(200, mime_for(&file), body, false);
         }
         // SPA-ish fallback: page-like paths (no extension) get the
-        // root index.html when present — covers Nuxt apps whose
-        // dynamic routes weren't prerendered.
+        // Nuxt SPA shell — `200.html` when the static export emitted
+        // one (its payload isn't pinned to a prerendered route, unlike
+        // `index.html`), else `index.html`.
         let last = path.rsplit('/').next().unwrap_or("");
         if !last.contains('.') {
-            if let Some(index) = resolve_static(root, "/index.html") {
-                let body = std::fs::read(&index).unwrap_or_default();
-                return Response::raw(200, mime_for(&index), body, false);
+            for fallback in ["/200.html", "/index.html"] {
+                if let Some(file) = resolve_static(root, fallback) {
+                    let body = std::fs::read(&file).unwrap_or_default();
+                    return Response::raw(200, mime_for(&file), body, false);
+                }
             }
         }
         return Response::raw(
