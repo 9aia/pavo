@@ -342,6 +342,11 @@ fn spawn_tui(target: Option<&str>) -> Result<u8, Fail> {
 
 fn cmd_drivers(json: bool) -> Result<(), Fail> {
     let mut host = Host::discover();
+    cmd_drivers_host(&mut host, json)
+}
+
+/// [`cmd_drivers`] over an explicit host — split for tests.
+fn cmd_drivers_host(host: &mut Host, json: bool) -> Result<(), Fail> {
     let kinds: Vec<String> = host.drivers().iter().map(|d| d.kind.clone()).collect();
     let mut rows = Vec::new();
     for kind in kinds {
@@ -426,6 +431,11 @@ pub(crate) fn contrib_counts(c: &pavo_protocol::Contributes) -> Value {
 
 fn cmd_views(driver: Option<&str>, json: bool) -> Result<(), Fail> {
     let mut host = Host::discover();
+    cmd_views_host(&mut host, driver, json)
+}
+
+/// [`cmd_views`] over an explicit host — split for tests.
+fn cmd_views_host(host: &mut Host, driver: Option<&str>, json: bool) -> Result<(), Fail> {
     let mut views = host.list_views();
     if let Some(d) = driver {
         views.retain(|v| v.driver == d);
@@ -467,6 +477,11 @@ fn cmd_views(driver: Option<&str>, json: bool) -> Result<(), Fail> {
 
 fn cmd_chrome(json: bool) -> Result<(), Fail> {
     let mut host = Host::discover();
+    cmd_chrome_host(&mut host, json)
+}
+
+/// [`cmd_chrome`] over an explicit host — split for tests.
+fn cmd_chrome_host(host: &mut Host, json: bool) -> Result<(), Fail> {
     let chrome = host.chrome();
     if json {
         let slot = |entries: &[pavo_core::SlotEntry]| -> Vec<Value> {
@@ -538,6 +553,11 @@ fn cmd_chrome(json: bool) -> Result<(), Fail> {
 fn cmd_view(target: &str, params: &[String], format: &str) -> Result<(), Fail> {
     let params = parse_params(params)?;
     let mut host = Host::discover();
+    cmd_view_host(&mut host, target, params, format)
+}
+
+/// [`cmd_view`] over an explicit host — split for tests.
+fn cmd_view_host(host: &mut Host, target: &str, params: Params, format: &str) -> Result<(), Fail> {
     let resolved = host.resolve_view(target, params)?;
     match format {
         "json" => {
@@ -597,6 +617,17 @@ fn cmd_view(target: &str, params: &[String], format: &str) -> Result<(), Fail> {
 fn cmd_query(driver: &str, query: &str, params: &[String], json: bool) -> Result<(), Fail> {
     let params = parse_params(params)?;
     let mut host = Host::discover();
+    cmd_query_host(&mut host, driver, query, params, json)
+}
+
+/// [`cmd_query`] over an explicit host — split for tests.
+fn cmd_query_host(
+    host: &mut Host,
+    driver: &str,
+    query: &str,
+    params: Params,
+    json: bool,
+) -> Result<(), Fail> {
     let result = host.query(driver, query, params)?;
     if json {
         println!(
@@ -630,4 +661,166 @@ fn parse_params(args: &[String]) -> Result<Params, Fail> {
         params.insert(key.to_string(), value);
     }
     Ok(params)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    //! Unit tests for the CLI's pure helpers and the verb bodies
+    //! over an injected fixture host (same sh-driver trick as the
+    //! serve tests — no real tamias drivers needed).
+
+    use super::*;
+    use pavo_core::discovery::DriverInfo;
+
+    /// Minimal sh fixture driver (`demo`) answering manifest + serve.
+    const DEMO_DRIVER: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}],"contributes":{"navbar":[{"id":"nav","title":"Nav","route":"/demo/board"}],"extra":{"sidebar":[{"id":"side","title":"Side","route":"/x"}]}}}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/demo/board","queries":["items"]}]}' ;;
+      *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{"items":[1,2]}}}' ;;
+      *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
+      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    /// Host over the fixture driver (manifest lazy via `serve`).
+    fn fixture_host() -> Host {
+        let tmp = tempfile::tempdir().ok().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).ok().unwrap();
+        let driver = bin.join("tamias-driver-demo");
+        std::fs::write(&driver, DEMO_DRIVER).ok().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o755))
+                .ok()
+                .unwrap();
+        }
+        std::mem::forget(tmp); // keep the tempdir alive for the test
+        Host::from_drivers(vec![DriverInfo {
+            kind: "demo".to_string(),
+            path: driver,
+            manifest: None,
+        }])
+    }
+
+    fn empty_host() -> Host {
+        Host::from_drivers(Vec::new())
+    }
+
+    #[test]
+    fn parse_params_covers_all_forms() {
+        let args: Vec<String> = vec![
+            "a=1".into(),
+            "b=true".into(),
+            "c={\"x\":2}".into(),
+            "d=hello world".into(),
+            "e=".into(),
+        ];
+        let p = parse_params(&args).ok().unwrap();
+        assert_eq!(p["a"], json!(1));
+        assert_eq!(p["b"], json!(true));
+        assert_eq!(p["c"], json!({"x": 2}));
+        assert_eq!(p["d"], json!("hello world"));
+        assert_eq!(p["e"], json!(""));
+
+        assert!(parse_params(&["noequals".to_string()]).is_err());
+        assert!(parse_params(&["=v".to_string()]).is_err());
+        assert!(parse_params(&[]).ok().unwrap().is_empty());
+    }
+
+    #[test]
+    fn contrib_counts_and_schema_doc() {
+        let c = pavo_protocol::Contributes::default();
+        let v = contrib_counts(&c);
+        assert_eq!(v["navbar"], json!(0));
+        assert!(v["extra"].is_object());
+
+        let doc = schema_doc();
+        assert!(doc["verbs"]["view"].is_object());
+        assert!(doc["exit_codes"].is_object());
+    }
+
+    #[test]
+    fn tui_candidates_ends_with_path_fallback() {
+        let c = tui_candidates();
+        assert!(!c.is_empty());
+        assert_eq!(c.last().unwrap().to_str().unwrap(), "pavo-tui");
+    }
+
+    #[test]
+    fn run_dispatch_self_description_verbs() {
+        // No-command → version line; manifest/schema print JSON.
+        // (These don't touch the host.)
+        let cli = Cli::parse_from(["pavo"]);
+        assert!(run(cli).is_ok());
+        let cli = Cli::parse_from(["pavo", "manifest"]);
+        assert!(run(cli).is_ok());
+        let cli = Cli::parse_from(["pavo", "schema"]);
+        assert!(run(cli).is_ok());
+    }
+
+    #[test]
+    fn drivers_views_chrome_text_and_json() {
+        let mut host = fixture_host();
+        cmd_drivers_host(&mut host, false).ok().unwrap();
+        cmd_drivers_host(&mut host, true).ok().unwrap();
+        cmd_views_host(&mut host, None, false).ok().unwrap();
+        cmd_views_host(&mut host, None, true).ok().unwrap();
+        cmd_views_host(&mut host, Some("demo"), false).ok().unwrap();
+        cmd_views_host(&mut host, Some("ghost"), true).ok().unwrap();
+        cmd_chrome_host(&mut host, false).ok().unwrap();
+        cmd_chrome_host(&mut host, true).ok().unwrap();
+    }
+
+    #[test]
+    fn empty_host_prints_empty_states() {
+        let mut host = empty_host();
+        cmd_drivers_host(&mut host, false).ok().unwrap();
+        cmd_drivers_host(&mut host, true).ok().unwrap();
+        cmd_views_host(&mut host, None, false).ok().unwrap();
+        cmd_chrome_host(&mut host, false).ok().unwrap();
+        // Errors propagate as Fail.
+        assert!(cmd_views_host(&mut host, Some("x"), false).is_ok()); // empty → "no views"
+        assert!(cmd_view_host(&mut host, "ghost:v", Params::new(), "text").is_err());
+        assert!(cmd_query_host(&mut host, "ghost", "q", Params::new(), false).is_err());
+    }
+
+    #[test]
+    fn view_and_query_formats() {
+        let mut host = fixture_host();
+        for fmt in ["text", "json"] {
+            cmd_view_host(&mut host, "demo:board", Params::new(), fmt)
+                .ok()
+                .unwrap();
+        }
+        // dot/mermaid on a graph-less tree → error.
+        assert!(cmd_view_host(&mut host, "demo:board", Params::new(), "dot").is_err());
+        assert!(cmd_view_host(&mut host, "demo:board", Params::new(), "mermaid").is_err());
+        // Unknown plugin format → error naming builtins.
+        let err = cmd_view_host(&mut host, "demo:board", Params::new(), "bogus")
+            .err()
+            .unwrap();
+        assert!(err.msg.contains("no renderer plugin"), "{}", err.msg);
+        cmd_query_host(&mut host, "demo", "items", Params::new(), false)
+            .ok()
+            .unwrap();
+        cmd_query_host(&mut host, "demo", "items", Params::new(), true)
+            .ok()
+            .unwrap();
+        // Bad view ref → error.
+        assert!(cmd_view_host(&mut host, "badref", Params::new(), "text").is_err());
+    }
 }

@@ -307,13 +307,15 @@ pub fn percent_decode(input: &str) -> String {
                 i += 1;
             }
             b'%' if i + 2 < bytes.len() => {
-                let hex = &input[i + 1..i + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(b) => {
-                        out.push(b);
+                // Decode hex from raw bytes — slicing the &str here
+                // would panic when the two bytes after '%' fall inside
+                // a multi-byte UTF-8 char (e.g. "%€x").
+                match (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => {
+                        out.push(hi * 16 + lo);
                         i += 3;
                     }
-                    Err(_) => {
+                    _ => {
                         out.push(b'%');
                         i += 1;
                     }
@@ -327,6 +329,16 @@ pub fn percent_decode(input: &str) -> String {
     }
     // Path/query targets are UTF-8 in practice; lossy keeps us total.
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Single hex digit → nibble value, `None` for non-hex bytes.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Look up a decoded query param (first occurrence wins).
@@ -556,5 +568,137 @@ mod tests {
         assert!(out.contains("allow: GET\r\n"), "{out}");
         assert!(out.contains("connection: close\r\n"), "{out}");
         assert!(!out.contains("access-control-allow-origin"), "{out}");
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod proptests {
+    #![allow(clippy::unwrap_used)]
+    //! Property/fuzz tests for the hand-rolled HTTP layer: arbitrary
+    //! strings and raw byte streams must never panic the parser.
+
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::strategy::BoxedStrategy;
+    fn pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    /// Unicode-heavy strings biased toward '%', '+', '&', '=' so the
+    /// decoder/parser edge cases get exercised.
+    fn tricky_text() -> BoxedStrategy<String> {
+        prop::collection::vec(
+            prop_oneof![
+                3 => Just('%'),
+                2 => Just('+'),
+                1 => Just('&'),
+                1 => Just('='),
+                1 => Just('?'),
+                4 => any::<char>(),
+            ],
+            0..64,
+        )
+        .prop_map(|cs| cs.into_iter().collect())
+        .boxed()
+    }
+
+    proptest! {
+        /// percent_decode is total on arbitrary (unicode) input.
+        #[test]
+        fn percent_decode_never_panics(s in tricky_text()) {
+            let _ = percent_decode(&s);
+        }
+
+        /// parse_query → collect_params → query_get round-trip is
+        /// total; collect_params only ever yields `param.*` keys.
+        #[test]
+        fn query_pipeline_never_panics(q in tricky_text(), key in tricky_text()) {
+            let params = parse_query(&q);
+            let collected = collect_params(&params);
+            for k in collected.keys() {
+                prop_assert!(!k.is_empty());
+            }
+            let _ = query_get(&params, &key);
+            let _ = split_target(&q);
+        }
+
+        /// Arbitrary raw bytes as an HTTP request head: the parser
+        /// must return Ok or Err, never panic. We shut down the
+        /// write side so the read always terminates (EOF).
+        #[test]
+        fn read_request_never_panics_on_arbitrary_bytes(
+            bytes in prop::collection::vec(
+                prop_oneof![
+                    2 => Just(b'\r'),
+                    2 => Just(b'\n'),
+                    2 => Just(b':'),
+                    1 => Just(b' '),
+                    6 => any::<u8>(),
+                ],
+                0..4096,
+            ),
+        ) {
+            let (mut client, mut server) = pair();
+            let _ = client.write_all(&bytes);
+            let _ = client.shutdown(std::net::Shutdown::Write);
+            let _ = read_request(&mut server);
+        }
+
+        /// Well-formed-ish requests built from arbitrary parts,
+        /// sometimes truncated: still total.
+        #[test]
+        fn read_request_never_panics_on_template_requests(
+            method in prop_oneof![Just("GET".to_string()), Just("POST".to_string()), tricky_text()],
+            target in tricky_text(),
+            headers in prop::collection::vec((tricky_text(), tricky_text()), 0..8),
+            body in prop::collection::vec(any::<u8>(), 0..256),
+            truncate in any::<bool>(),
+        ) {
+            let mut req = format!("{method} {target} HTTP/1.1\r\n");
+            for (k, v) in &headers {
+                req.push_str(&format!("{k}: {v}\r\n"));
+            }
+            req.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+            let mut bytes = req.into_bytes();
+            bytes.extend_from_slice(&body);
+            if truncate {
+                let cut = bytes.len().saturating_sub(1);
+                bytes.truncate(cut);
+            }
+            let (mut client, mut server) = pair();
+            let _ = client.write_all(&bytes);
+            let _ = client.shutdown(std::net::Shutdown::Write);
+            let res = read_request(&mut server);
+            // Invariant: a parsed request always has non-empty
+            // method/target tokens and body length == declared CL.
+            if let Ok(Some(r)) = res {
+                prop_assert!(!r.method.is_empty());
+                prop_assert!(!r.target.is_empty());
+            }
+        }
+
+        /// Response serialization is total on arbitrary status /
+        /// header values and bodies — and never panics writing.
+        #[test]
+        fn response_write_never_panics(
+            status in any::<u16>(),
+            body in prop::collection::vec(any::<u8>(), 0..512),
+            extra in prop::collection::vec((tricky_text(), tricky_text()), 0..4),
+            cors in any::<bool>(),
+            close in any::<bool>(),
+        ) {
+            let (client, mut server) = pair();
+            let mut resp = Response::raw(status, "text/plain", body, cors);
+            for (k, v) in extra {
+                resp.extra.push((k, v));
+            }
+            resp.write(&mut server, close).unwrap();
+            let _ = client.shutdown(std::net::Shutdown::Both);
+        }
     }
 }

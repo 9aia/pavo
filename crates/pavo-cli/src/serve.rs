@@ -51,7 +51,16 @@ pub fn run(port: u16) -> io::Result<()> {
 
     let host = Arc::new(Mutex::new(Host::discover()));
     let web_root = find_web_root();
+    serve(listener, host, web_root)
+}
 
+/// The accept loop, split from [`run`] so tests can bind their own
+/// listener (and learn the port) without parsing stdout.
+fn serve(
+    listener: TcpListener,
+    host: Arc<Mutex<Host>>,
+    web_root: Option<PathBuf>,
+) -> io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
@@ -948,5 +957,158 @@ exit 1
         let (resp, _) = route(&req("HEAD", "/missing.png"), &host, None);
         assert_eq!(resp.status, 404);
         assert!(resp.body.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod socket_tests {
+    #![allow(clippy::unwrap_used)]
+    //! Real-socket tests: `handle_connection` and the `serve` accept
+    //! loop over localhost TCP — keep-alive, malformed heads, static
+    //! fallback and API routing end to end.
+
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    /// Connect to `port`, send `bytes`, shutdown write, read the
+    /// whole reply (server closes or we hit EOF).
+    fn roundtrip(port: u16, bytes: &[u8]) -> String {
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        c.write_all(bytes).unwrap();
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    /// Read one HTTP response (head + content-length body) from an
+    /// open keep-alive connection.
+    fn read_http_response(c: &mut TcpStream) -> String {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        let head_end;
+        loop {
+            let n = c.read(&mut buf).unwrap();
+            assert!(n > 0, "connection closed mid-response");
+            out.extend_from_slice(&buf[..n]);
+            if let Some(p) = find_bytes(&out, b"\r\n\r\n") {
+                head_end = p + 4;
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&out[..head_end]).into_owned();
+        let len: usize = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse().ok())
+            })
+            .unwrap_or(0);
+        while out.len() < head_end + len {
+            let n = c.read(&mut buf).unwrap();
+            assert!(n > 0, "connection closed mid-body");
+            out.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&out[..head_end + len]).into_owned()
+    }
+
+    fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Spawn `serve` on an ephemeral port; returns the port. The
+    /// accept loop runs forever — the thread leaks until test exit,
+    /// which is fine.
+    fn serve_port(host: Arc<Mutex<Host>>) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let _ = serve(listener, host, None);
+        });
+        port
+    }
+
+    #[test]
+    fn handle_connection_keepalive_and_errors() {
+        // Direct handle_connection over a socketpair-ish TCP pair.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let host = Arc::new(Mutex::new(Host::discover()));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let (mut server, _) = listener.accept().unwrap();
+            let _ = handle_connection(&mut server, &host, None);
+            let _ = tx.send(());
+        });
+
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+
+        // Two keep-alive requests on one connection.
+        c.write_all(b"GET /api/health HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        let first = read_http_response(&mut c);
+        assert!(first.starts_with("HTTP/1.1 200"), "{first}");
+        assert!(first.contains("\"ok\":true"), "{first}");
+
+        c.write_all(b"GET /api/health HTTP/1.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let second = read_http_response(&mut c);
+        assert!(second.contains("connection: close"), "{second}");
+        // Server returned after close → channel fires.
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // Malformed head → 400 + close.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let host = Arc::new(Mutex::new(Host::discover()));
+        std::thread::spawn(move || {
+            let (mut server, _) = listener.accept().unwrap();
+            let _ = handle_connection(&mut server, &host, None);
+        });
+        let out = roundtrip(port, b"garbage\r\n\r\n");
+        assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+
+        // Bare EOF → clean return.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let host = Arc::new(Mutex::new(Host::discover()));
+        let (tx2, rx2) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let (mut server, _) = listener.accept().unwrap();
+            let _ = handle_connection(&mut server, &host, None);
+            let _ = tx2.send(());
+        });
+        drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
+        rx2.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+
+    #[test]
+    fn serve_accept_loop_routes_api_and_static() {
+        // fixture_host is defined in the sibling tests module —
+        // rebuild a minimal empty host here to keep modules decoupled.
+        let host = Arc::new(Mutex::new(Host::discover()));
+        let port = serve_port(host);
+
+        let out = roundtrip(port, b"GET /api/health HTTP/1.1\r\n\r\n");
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        assert!(out.contains("\"ok\":true"), "{out}");
+
+        // Static fallback: no web root → landing page.
+        let out = roundtrip(port, b"GET / HTTP/1.1\r\n\r\n");
+        assert!(out.contains("<h1>pavo</h1>"), "{out}");
+
+        // Unknown api endpoint → 404 envelope.
+        let out = roundtrip(port, b"GET /api/nope HTTP/1.1\r\n\r\n");
+        assert!(out.starts_with("HTTP/1.1 404"), "{out}");
+
+        // LF-only terminator also parses.
+        let out = roundtrip(port, b"GET /api/health HTTP/1.1\n\n");
+        assert!(out.contains("\"ok\":true"), "{out}");
     }
 }

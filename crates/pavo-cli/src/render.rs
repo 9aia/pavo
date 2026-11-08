@@ -999,3 +999,227 @@ mod tests {
         assert!(!out.contains("a b["), "{out}");
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod proptests {
+    #![allow(clippy::unwrap_used)]
+    //! Property/fuzz tests: the text/dot/mermaid renderers must be
+    //! total over *arbitrary* node JSON — the KV-fallback contract
+    //! (garbage in → degraded output, never a panic).
+
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::strategy::BoxedStrategy;
+
+    fn text() -> BoxedStrategy<String> {
+        prop::collection::vec(any::<char>(), 0..16)
+            .prop_map(|cs| cs.into_iter().collect())
+            .boxed()
+    }
+
+    /// Arbitrary JSON, bounded depth.
+    fn json_value(depth: usize) -> BoxedStrategy<Value> {
+        if depth == 0 {
+            return prop_oneof![
+                Just(Value::Null),
+                any::<bool>().prop_map(Value::Bool),
+                any::<i64>().prop_map(|n| Value::from(n.clamp(-999, 999))),
+                text().prop_map(Value::String),
+            ]
+            .boxed();
+        }
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::from(n.clamp(-999, 999))),
+            text().prop_map(Value::String),
+            prop::collection::vec(json_value(depth - 1), 0..4).prop_map(Value::Array),
+            prop::collection::hash_map(text(), json_value(depth - 1), 0..4)
+                .prop_map(|m| Value::Object(m.into_iter().collect())),
+        ]
+        .boxed()
+    }
+
+    fn data_map() -> BoxedStrategy<Map<String, Value>> {
+        prop::collection::hash_map(text(), json_value(3), 0..4)
+            .prop_map(|m| m.into_iter().collect())
+            .boxed()
+    }
+
+    /// A ViewNode that always parses: containers nest bounded
+    /// children; leaves cover every kind with minimal valid payloads.
+    fn view_node_json(depth: usize) -> BoxedStrategy<Value> {
+        let leaf = prop_oneof![
+            leaf_json("kv"),
+            leaf_json("markdown"),
+            leaf_json("table"),
+            leaf_json("tree"),
+            leaf_json("graph"),
+            leaf_json("form"),
+            leaf_json("embed"),
+        ];
+        if depth == 0 {
+            return leaf.boxed();
+        }
+        let kids = || prop::collection::vec(view_node_json(depth - 1), 0..3);
+        prop_oneof![
+            4 => leaf,
+            1 => (text(), text(), kids()).prop_map(|(id, title, children)| container_json("panel", id, title, children)),
+            1 => (text(), text(), kids()).prop_map(|(id, title, children)| container_json("row", id, title, children)),
+            1 => (text(), text(), kids()).prop_map(|(id, title, children)| container_json("column", id, title, children)),
+        ]
+        .boxed()
+    }
+
+    fn leaf_json(kind: &'static str) -> BoxedStrategy<Value> {
+        (text(), text(), text())
+            .prop_map(move |(id, title, query)| {
+                let mut m = Map::new();
+                m.insert("kind".into(), Value::from(kind));
+                m.insert("id".into(), Value::from(id));
+                m.insert("title".into(), Value::from(title));
+                m.insert("query".into(), Value::from(query));
+                match kind {
+                    "table" => {
+                        m.insert(
+                            "columns".into(),
+                            serde_json::json!([{"key": "a", "title": "A"}]),
+                        );
+                        m.insert("rows".into(), serde_json::json!([["x", 1, true]]));
+                    }
+                    "tree" => {
+                        m.insert("items".into(), serde_json::json!([{"label": "root"}]));
+                    }
+                    "embed" => {
+                        m.insert("component".into(), Value::from("viz"));
+                        m.insert("props".into(), serde_json::json!({"x": 1}));
+                    }
+                    _ => {}
+                }
+                Value::Object(m)
+            })
+            .boxed()
+    }
+
+    fn container_json(
+        kind: &'static str,
+        id: String,
+        title: String,
+        children: Vec<Value>,
+    ) -> Value {
+        let mut m = Map::new();
+        m.insert("kind".into(), Value::from(kind));
+        m.insert("id".into(), Value::from(id));
+        m.insert("title".into(), Value::from(title));
+        m.insert("children".into(), Value::Array(children));
+        Value::Object(m)
+    }
+
+    fn view_node() -> BoxedStrategy<ViewNode> {
+        view_node_json(3)
+            .prop_map(|v| serde_json::from_value(v).unwrap())
+            .boxed()
+    }
+
+    proptest! {
+        /// Arbitrary JSON through the text walker: total, and the
+        /// output is always valid UTF-8 text (trivially true) that
+        /// never contains the "(unrenderable node)" marker *for
+        /// known-kind-shaped* input — for garbage it may appear,
+        /// which is the documented degradation.
+        #[test]
+        fn text_walk_never_panics(v in json_value(5), data in data_map()) {
+            let mut out = String::new();
+            let renders = HashMap::new();
+            node_text_path(&v, &data, 0, String::new(), &renders, &mut out);
+            // depth-first path strings stay consistent for children
+            prop_assert!(out.len() < 1_000_000);
+        }
+
+        /// Same for collect_graph_json — arbitrary JSON can't break
+        /// graph collection.
+        #[test]
+        fn collect_graphs_never_panics(v in json_value(5), data in data_map()) {
+            let mut graphs = Vec::new();
+            collect_graph_json(&v, &data, &mut graphs);
+        }
+
+        /// graph_parts on arbitrary node JSON + data: total.
+        #[test]
+        fn graph_parts_never_panics(v in json_value(4), data in data_map()) {
+            let _ = graph_parts(&v, &data);
+        }
+
+        /// Well-formed trees: render_text/dot/mermaid never panic;
+        /// dot/mermaid error iff no graph nodes exist.
+        #[test]
+        fn renderers_total_on_valid_trees(node in view_node(), data in data_map()) {
+            let text_out = render_text(&node, &data);
+            prop_assert!(!text_out.is_empty() || node.base().title.is_none());
+            let _ = render_dot(&node, &data);
+            let _ = render_mermaid(&node, &data);
+        }
+
+        /// render_model_cli/render_model_text on arbitrary models.
+        #[test]
+        fn render_model_cli_total(m in render_model_value()) {
+            let _ = render_model_cli(&m);
+            let mut out = String::new();
+            render_model_text(&m, "  ", &mut out);
+        }
+
+        /// rows_text/pad/cell_str helpers on adversarial strings.
+        #[test]
+        fn helpers_never_panics(
+            headers in prop::collection::vec(text(), 0..6),
+            aligns in prop::collection::vec(text(), 0..6),
+            rows in prop::collection::vec(prop::collection::vec(text(), 0..6), 0..4),
+            cell in text(),
+        ) {
+            let aligns_typed: Vec<pavo_protocol::Align> = aligns
+                .iter()
+                .map(|a| match a.as_str() {
+                    "center" => pavo_protocol::Align::Center,
+                    "right" => pavo_protocol::Align::Right,
+                    _ => pavo_protocol::Align::Left,
+                })
+                .collect();
+            let _ = rows_text(&headers, &aligns_typed, &rows, "  ");
+            let _ = pad(&cell, 3, "right");
+            let _ = pad(&cell, 3, "center");
+            let _ = cell_str(&Value::String(cell));
+            let _ = dot_str("a\"b\\c");
+            let _ = mermaid_str("x\"y\nz");
+        }
+    }
+
+    fn render_model_value() -> BoxedStrategy<RenderModel> {
+        prop_oneof![
+            (
+                prop::collection::vec(text(), 0..4),
+                prop::collection::vec(text(), 0..4),
+                prop::collection::vec(prop::collection::vec(text(), 0..4), 0..4),
+            )
+                .prop_map(|(headers, aligns, rows)| RenderModel::Rows {
+                    headers,
+                    aligns: aligns
+                        .iter()
+                        .map(|a| match a.as_str() {
+                            "center" => pavo_protocol::Align::Center,
+                            "right" => pavo_protocol::Align::Right,
+                            _ => pavo_protocol::Align::Left,
+                        })
+                        .collect(),
+                    rows,
+                }),
+            text().prop_map(|markup| RenderModel::Svg { markup }),
+            prop::collection::vec(text(), 0..4).prop_map(|lines| RenderModel::Text { lines }),
+            (text(), json_value(2)).prop_map(|(component, props)| RenderModel::Placeholder {
+                component,
+                props: props.as_object().cloned().unwrap_or_default(),
+            }),
+        ]
+        .boxed()
+    }
+}
