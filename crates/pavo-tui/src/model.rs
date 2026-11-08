@@ -648,6 +648,17 @@ fn graph_json(v: &Value, data: &Map<String, Value>, depth: usize, b: &mut Builde
             .unwrap_or_else(|| id.to_string())
     };
 
+    // Simple deterministic layered layout (longest-path layering +
+    // barycenter ordering) — edges between adjacent layers draw as
+    // box-drawing connectors; longer edges stay in the edge list.
+    let layout = ascii_layout(&nodes, &edges);
+    if !layout.is_empty() {
+        b.row(&format!("{ind}layout"), RowStyle::Dim);
+        for line in layout {
+            b.row(&format!("{ind}  {line}"), RowStyle::Normal);
+        }
+    }
+
     b.row(&format!("{ind}nodes"), RowStyle::Dim);
     for node in &nodes {
         let id = node.get("id").and_then(Value::as_str).unwrap_or("");
@@ -730,6 +741,242 @@ fn graph_parts(v: &Value, data: &Map<String, Value>) -> (Vec<Value>, Vec<Value>)
         }
     }
     (nodes, edges)
+}
+
+// ---------- graph ASCII layout ----------
+
+/// Render `(nodes, edges)` as a layered ASCII diagram: longest-path
+/// layering, one barycenter ordering sweep per direction, node boxes
+/// `┌─┐│x│└─┘`, and `│ ─ ┌ ┐ └ ┘` connectors for edges between
+/// adjacent layers. Edges spanning multiple layers (or cycles) are
+/// not drawn — they remain in the edge list below. Deterministic,
+/// allocation-light; fine for dozens of nodes at 60fps.
+fn ascii_layout(nodes: &[Value], edges: &[Value]) -> Vec<String> {
+    /// One grid cell.
+    #[derive(Clone, Copy)]
+    struct Cell(char);
+
+    let ids: Vec<String> = nodes
+        .iter()
+        .map(|n| {
+            n.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    let index: HashMap<String, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i))
+        .collect();
+    let labels: Vec<String> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            n.get("label")
+                .and_then(Value::as_str)
+                .filter(|l| !l.is_empty())
+                .unwrap_or(ids[i].as_str())
+                .to_string()
+        })
+        .collect();
+    // (from_idx, to_idx) — unknown endpoints dropped.
+    let links: Vec<(usize, usize)> = edges
+        .iter()
+        .filter_map(|e| {
+            let f = e.get("from").and_then(Value::as_str)?;
+            let t = e.get("to").and_then(Value::as_str)?;
+            Some((*index.get(f)?, *index.get(t)?))
+        })
+        .collect();
+    let n = ids.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Longest-path layering, bounded relaxation (cycle-safe).
+    let mut layer = vec![0usize; n];
+    for _ in 0..n {
+        let mut changed = false;
+        for &(f, t) in &links {
+            let want = layer[f] + 1;
+            if want > layer[t] {
+                layer[t] = want;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let depth = layer.iter().copied().max().unwrap_or(0);
+
+    // Group node indices per layer (stable, input order).
+    let mut by_layer: Vec<Vec<usize>> = vec![Vec::new(); depth + 1];
+    for (i, &l) in layer.iter().enumerate() {
+        by_layer[l].push(i);
+    }
+
+    // Barycenter ordering: a few top-down + bottom-up sweeps sorting
+    // each layer by the mean position of its already-placed neighbors.
+    let mut pos = vec![0usize; n]; // index within its layer
+    let refresh_pos = |by_layer: &[Vec<usize>], pos: &mut [usize]| {
+        for layer_nodes in by_layer {
+            for (i, &node) in layer_nodes.iter().enumerate() {
+                pos[node] = i;
+            }
+        }
+    };
+    refresh_pos(&by_layer, &mut pos);
+    for sweep in 0..4 {
+        let forward = sweep % 2 == 0;
+        let order: Vec<usize> = if forward {
+            (1..=depth).collect()
+        } else {
+            (0..depth).rev().collect()
+        };
+        for li in order {
+            // Neighbor positions in adjacent layers (already placed
+            // this sweep): predecessors on the way down, successors
+            // on the way up.
+            let want_preds = forward;
+            by_layer[li].sort_by_key(|&node| {
+                // Mean position of adjacent-layer neighbors already
+                // placed this sweep (predecessors going down,
+                // successors going up); unconnected nodes keep place.
+                let mut sum = 0usize;
+                let mut cnt = 0usize;
+                for &(f, t) in &links {
+                    let other = if want_preds {
+                        (t == node).then_some(f)
+                    } else {
+                        (f == node).then_some(t)
+                    };
+                    if let Some(o) = other {
+                        if layer[o].abs_diff(layer[node]) == 1 {
+                            sum += pos[o];
+                            cnt += 1;
+                        }
+                    }
+                }
+                sum.checked_div(cnt).unwrap_or(pos[node])
+            });
+            refresh_pos(&by_layer, &mut pos);
+        }
+    }
+
+    // Geometry: per-layer column pitch, per-node box width, fixed
+    // 4-row pitch (3 box rows + 1 connector gap).
+    const BOX_H: usize = 3;
+    const PITCH_Y: usize = 4;
+    let widths: Vec<usize> = labels
+        .iter()
+        .map(|l| l.chars().count().max(1) + 4)
+        .collect();
+    let layer_pitch: Vec<usize> = by_layer
+        .iter()
+        .map(|ns| ns.iter().map(|&i| widths[i]).max().unwrap_or(0) + 3)
+        .collect();
+    // A layer's width is its node count times the per-node pitch.
+    let layer_w: Vec<usize> = by_layer
+        .iter()
+        .enumerate()
+        .map(|(li, ns)| ns.len() * layer_pitch[li])
+        .collect();
+    let mut layer_x = vec![0usize; depth + 1];
+    for li in 1..=depth {
+        layer_x[li] = layer_x[li - 1] + layer_w[li - 1];
+    }
+    let total_w = layer_x[depth] + layer_w[depth];
+    let rows_n = depth * PITCH_Y + BOX_H;
+
+    // Node boxes.
+    let mut grid = vec![vec![Cell(' '); total_w]; rows_n];
+    let mut center = vec![(0usize, 0usize); n]; // (x_center, y_top)
+    for (li, ns) in by_layer.iter().enumerate() {
+        for (slot, &node) in ns.iter().enumerate() {
+            let w = widths[node];
+            let x = layer_x[li] + slot * layer_pitch[li] + layer_pitch[li].saturating_sub(w) / 2;
+            let y = li * PITCH_Y;
+            center[node] = (x + w / 2, y);
+            let label = &labels[node];
+            let label_len = label.chars().count();
+            let pad = w.saturating_sub(2 + label_len);
+            let left = pad / 2;
+            let right = pad - left;
+            let top: String = format!("┌{}┐", "─".repeat(w.saturating_sub(2)));
+            let mid = format!("│{}{}{}│", " ".repeat(left), label, " ".repeat(right));
+            let bot: String = format!("└{}┘", "─".repeat(w.saturating_sub(2)));
+            for (dy, line) in [top, mid, bot].iter().enumerate() {
+                for (dx, ch) in line.chars().enumerate() {
+                    if x + dx < total_w && y + dy < rows_n {
+                        grid[y + dy][x + dx] = Cell(ch);
+                    }
+                }
+            }
+        }
+    }
+
+    // Edges between adjacent layers only. Two passes — horizontal
+    // runs first, then stubs — so later edges don't erase earlier
+    // corners on a shared gap row.
+    let mut drawn: Vec<(usize, usize, usize)> = Vec::new(); // (fx, tx, gap_y)
+    let mut long_edges = 0usize;
+    for &(f, t) in &links {
+        if layer[t] != layer[f] + 1 {
+            long_edges += 1;
+            continue;
+        }
+        let (fx, fy) = center[f];
+        let (tx, _ty) = center[t];
+        drawn.push((fx, tx, fy + BOX_H));
+    }
+    for &(fx, tx, gap_y) in &drawn {
+        let (lo, hi) = if fx <= tx { (fx, tx) } else { (tx, fx) };
+        if gap_y < rows_n {
+            for cell in grid[gap_y].iter_mut().take(hi + 1).skip(lo) {
+                *cell = Cell('─');
+            }
+        }
+    }
+    for &(fx, tx, gap_y) in &drawn {
+        // Source stub: down out of the box, turning toward target.
+        if gap_y < rows_n && fx < total_w {
+            grid[gap_y][fx] = Cell(if tx > fx {
+                '└'
+            } else if tx < fx {
+                '┘'
+            } else {
+                '│'
+            });
+        }
+        // Target stub: horizontal arrives, turns down into the box.
+        if gap_y < rows_n && tx < total_w {
+            grid[gap_y][tx] = Cell(if fx < tx {
+                '┐'
+            } else if fx > tx {
+                '┌'
+            } else {
+                '│'
+            });
+        }
+    }
+
+    let mut out: Vec<String> = grid
+        .iter()
+        .map(|row| {
+            let s: String = row.iter().map(|c| c.0).collect();
+            s.trim_end().to_string()
+        })
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if long_edges > 0 {
+        out.push(format!(
+            "({long_edges} edge(s) span layers — see edge list)"
+        ));
+    }
+    out
 }
 
 fn dot_block(nodes: &[Value], edges: &[Value]) -> String {
@@ -1301,6 +1548,52 @@ mod tests {
         let dot = m.graph_dot.unwrap();
         assert!(dot.contains("digraph"), "{dot}");
         assert!(dot.contains("\"a\" -> \"b\" [label=\"uses\"]"), "{dot}");
+    }
+
+    #[test]
+    fn ascii_layout_draws_boxes_connectors_and_notes_long_edges() {
+        let nodes = vec![
+            json!({"id": "a", "label": "Alpha"}),
+            json!({"id": "b", "label": "Beta"}),
+            json!({"id": "c", "label": "Gamma"}),
+        ];
+        let edges = vec![
+            json!({"from": "a", "to": "b"}),
+            json!({"from": "b", "to": "c"}),
+            json!({"from": "a", "to": "c"}), // spans two layers → skipped
+        ];
+        let out = ascii_layout(&nodes, &edges);
+        let text = out.join("\n");
+        assert!(text.contains('┌'), "{text}");
+        assert!(text.contains("Alpha"), "{text}");
+        assert!(text.contains('─'), "{text}");
+        assert!(text.contains("1 edge(s) span layers"), "{text}");
+
+        // Cycles and empty inputs must not panic; output is stable.
+        let cyc_nodes = vec![json!({"id": "x"}), json!({"id": "y"})];
+        let cyc_edges = vec![
+            json!({"from": "x", "to": "y"}),
+            json!({"from": "y", "to": "x"}),
+        ];
+        let once = ascii_layout(&cyc_nodes, &cyc_edges);
+        assert_eq!(once, ascii_layout(&cyc_nodes, &cyc_edges));
+        assert!(ascii_layout(&[], &[]).is_empty());
+        assert!(ascii_layout(&cyc_nodes, &[])
+            .iter()
+            .any(|l| l.contains('x')));
+    }
+
+    #[test]
+    fn graph_model_includes_layout_section() {
+        let node = root(json!({
+            "kind": "graph",
+            "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "edges": [{"from": "a", "to": "b"}]
+        }));
+        let m = build_view(&node, &data(), 100);
+        let t = texts(&m);
+        assert!(t.iter().any(|l| l.contains("layout")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains('┌')), "{t:?}");
     }
 
     #[test]
