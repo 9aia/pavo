@@ -37,9 +37,11 @@ Install a driver → get visualization everywhere. There is no
   client-only SVG island.
 
 Real product drivers ship from their own repos — `tamias-driver-kuda`
-(kuda), `tamias-driver-myco` (myco), `tamias-driver-cuora` (cuora),
-`tamias-driver-peregrin` (peregrin) — discovered like any installed
-driver once on `PATH` or in `$TAMIAS_HOME/drivers`.
+(kuda), `tamias-driver-myco` (myco), `tamias-driver-cuora` (cuora) —
+discovered like any installed driver once on `PATH` or in
+`$TAMIAS_HOME/drivers`. (peregrin's `tamias-driver-peregrin` is a
+tamias *content* driver for bundle install/deploy — it does not yet
+serve pavo views.)
 
 ## Layout
 
