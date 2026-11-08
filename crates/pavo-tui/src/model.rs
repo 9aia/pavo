@@ -1,0 +1,1229 @@
+//! ViewNode → flat render model for the ratatui canvas.
+//!
+//! [`build_view`] walks a resolved view's node tree (as raw JSON, same
+//! as `pavo-cli`'s `render.rs` — the protocol's forward-compat rule
+//! holds end-to-end: an unknown `kind` degrades through
+//! [`kv_fallback_json`] to a key/value listing, never an error) and
+//! produces plain rows the renderer styles. Selectable rows carry an
+//! index into [`Model::selections`]; the detail pane renders the
+//! matching [`Selection`].
+//!
+//! Traversal semantics deliberately mirror `pavo-cli/src/render.rs`:
+//! containers (`panel`/`row`/`column`) print their title then children
+//! indented two spaces per level (`row` does not attempt side-by-side
+//! layout), inline `rows`/`items`/`pairs` win over query-bound data,
+//! and a bound payload of `{"error": "…"}` renders as an error row
+//! instead of data.
+//!
+//! [`build_dashboard`] and [`build_note`] synthesize models for the
+//! chrome pseudo-views (contribution listing, error/info panes) that
+//! aren't driver views at all.
+
+use pavo_core::{kv_fallback_json, node_kind_json, Chrome, ViewEntry};
+use pavo_protocol::{KvNode, TreeItem, ViewNode};
+use serde_json::{Map, Value};
+
+/// Visual weight of a canvas row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowStyle {
+    /// Body content.
+    Normal,
+    /// Column headers / emphasized structure.
+    Header,
+    /// Secondary text — separators, hints, edge lists.
+    Dim,
+    /// Errors — failed query bindings, resolve failures.
+    Error,
+    /// Node/panel titles.
+    Title,
+}
+
+/// One display line of the canvas.
+#[derive(Clone, Debug)]
+pub struct Row {
+    /// Pre-rendered text (indentation + glyphs already applied).
+    pub text: String,
+    /// Base style; the renderer may override for the selected row.
+    pub style: RowStyle,
+    /// Index into [`Model::selections`] when this row is selectable.
+    pub sel: Option<usize>,
+}
+
+/// Detail-pane content for one selectable row — title plus ordered
+/// `key → value` fields (empty key = plain line). Values may contain
+/// `\n`; the pane splits them.
+#[derive(Clone, Debug, Default)]
+pub struct Selection {
+    /// Heading — what was selected (view title, row id, node label…).
+    pub title: String,
+    /// Ordered detail fields.
+    pub fields: Vec<(String, String)>,
+}
+
+/// The flat canvas: rows to draw plus the selection table.
+#[derive(Clone, Debug, Default)]
+pub struct Model {
+    /// Display rows, top to bottom.
+    pub rows: Vec<Row>,
+    /// Detail content per selectable row (indexed by `Row::sel`).
+    pub selections: Vec<Selection>,
+    /// Indices into `rows` that are selectable, in display order —
+    /// j/k navigation walks this list.
+    pub selectables: Vec<usize>,
+    /// Every `graph` node's DOT dump, concatenated — `g` writes this
+    /// to a file. `None` when the view has no graphs.
+    pub graph_dot: Option<String>,
+}
+
+/// Build the canvas model for a resolved view. `width` is the canvas
+/// width in columns — tables size their columns to fit (truncating
+/// cells with `…` when they can't).
+#[must_use]
+pub fn build_view(root: &ViewNode, data: &Map<String, Value>, width: usize) -> Model {
+    // ViewNode → JSON can't fail for a well-formed node; on the
+    // impossible error we render an empty doc rather than panic.
+    let value = serde_json::to_value(root).unwrap_or(Value::Null);
+    let mut b = Builder::default();
+    node_json(&value, data, 0, width, &mut b);
+    b.finish()
+}
+
+/// Build the dashboard pseudo-view: every view every driver offers,
+/// plus the merged chrome contributions (dashboard/navbar/statusbar/
+/// routes), grouped under dim section headers. Every entry is
+/// selectable — the app resolves view targets on Enter.
+#[must_use]
+pub fn build_dashboard(
+    views: &[ViewEntry],
+    chrome: &Chrome,
+    route_target: &dyn Fn(&str) -> Option<String>,
+    width: usize,
+) -> Model {
+    let _ = width; // no tables here — nothing to fit
+    let mut b = Builder::default();
+    b.row(
+        "dashboard — jump to any view or contribution",
+        RowStyle::Title,
+    );
+
+    b.row("views", RowStyle::Dim);
+    for v in views {
+        let text = format!("{}:{} — {}", v.driver, v.id, v.title);
+        let mut fields = vec![
+            ("view".to_string(), v.namespaced.clone()),
+            ("driver".to_string(), v.driver.clone()),
+            ("title".to_string(), v.title.clone()),
+            ("route".to_string(), v.route.clone()),
+        ];
+        if let Some(d) = &v.description {
+            fields.push(("description".to_string(), d.clone()));
+        }
+        if !v.queries.is_empty() {
+            fields.push(("queries".to_string(), v.queries.join(", ")));
+        }
+        b.sel_row(&text, RowStyle::Normal, v.namespaced.clone(), fields);
+    }
+    if views.is_empty() {
+        b.row("  (no views discovered)", RowStyle::Dim);
+    }
+
+    section(
+        &mut b,
+        "dashboard contributions",
+        &chrome.dashboard,
+        route_target,
+    );
+    section(&mut b, "navbar", &chrome.navbar, route_target);
+    section(&mut b, "statusbar", &chrome.statusbar, route_target);
+    section(&mut b, "routes", &chrome.routes, route_target);
+    b.finish()
+}
+
+/// A titled key/value note — error panes, route-info panes, the empty
+/// state. Every field is a selectable row.
+#[must_use]
+pub fn build_note(title: &str, fields: &[(String, String)], error: bool) -> Model {
+    let mut b = Builder::default();
+    b.row(
+        title,
+        if error {
+            RowStyle::Error
+        } else {
+            RowStyle::Title
+        },
+    );
+    for (k, v) in fields {
+        let text = if k.is_empty() {
+            v.clone()
+        } else {
+            format!("{k}: {v}")
+        };
+        b.sel_row(
+            &text,
+            if error {
+                RowStyle::Error
+            } else {
+                RowStyle::Normal
+            },
+            title.to_string(),
+            vec![(k.clone(), v.clone())],
+        );
+    }
+    b.finish()
+}
+
+/// Loading placeholder.
+#[must_use]
+pub fn build_loading(target: &str) -> Model {
+    let mut b = Builder::default();
+    b.row(&format!("loading {target}…"), RowStyle::Dim);
+    b.finish()
+}
+
+// ---------- builder ----------
+
+#[derive(Default)]
+struct Builder {
+    rows: Vec<Row>,
+    selections: Vec<Selection>,
+    dots: Vec<String>,
+}
+
+impl Builder {
+    fn row(&mut self, text: &str, style: RowStyle) {
+        self.rows.push(Row {
+            text: text.to_string(),
+            style,
+            sel: None,
+        });
+    }
+
+    /// Push a selectable row; returns nothing — `sel` indexes
+    /// `selections`.
+    fn sel_row(
+        &mut self,
+        text: &str,
+        style: RowStyle,
+        title: String,
+        fields: Vec<(String, String)>,
+    ) {
+        let sel = self.selections.len();
+        self.selections.push(Selection { title, fields });
+        self.rows.push(Row {
+            text: text.to_string(),
+            style,
+            sel: Some(sel),
+        });
+    }
+
+    fn finish(self) -> Model {
+        let selectables = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.sel.map(|_| i))
+            .collect();
+        Model {
+            rows: self.rows,
+            selections: self.selections,
+            selectables,
+            graph_dot: if self.dots.is_empty() {
+                None
+            } else {
+                Some(self.dots.join("\n"))
+            },
+        }
+    }
+}
+
+fn section(
+    b: &mut Builder,
+    name: &str,
+    entries: &[pavo_core::SlotEntry],
+    route_target: &dyn Fn(&str) -> Option<String>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    b.row(name, RowStyle::Dim);
+    for e in entries {
+        let c = &e.contribution;
+        let target = route_target(&c.route);
+        let text = format!("  {} — {} ({})", c.title, c.route, e.driver);
+        let mut fields = vec![
+            ("title".to_string(), c.title.clone()),
+            ("route".to_string(), c.route.clone()),
+            ("driver".to_string(), e.driver.clone()),
+            ("id".to_string(), c.id.clone()),
+        ];
+        if let Some(t) = &target {
+            fields.push(("resolves to".to_string(), t.clone()));
+        } else {
+            fields.push(("note".to_string(), "driver-owned route".to_string()));
+        }
+        // Selection title doubles as the jump target when resolvable.
+        b.sel_row(
+            &text,
+            RowStyle::Normal,
+            target.unwrap_or_else(|| c.title.clone()),
+            fields,
+        );
+    }
+}
+
+// ---------- node dispatch (mirrors pavo-cli render.rs) ----------
+
+fn node_json(v: &Value, data: &Map<String, Value>, depth: usize, width: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    match node_kind_json(v).unwrap_or("") {
+        "panel" | "row" | "column" => {
+            if let Some(title) = scalar_str(v.get("title")) {
+                b.row(&format!("{ind}{title}"), RowStyle::Title);
+            }
+            if let Some(children) = v.get("children").and_then(Value::as_array) {
+                for child in children {
+                    node_json(child, data, depth + 1, width, b);
+                }
+            }
+        }
+        "table" => table_json(v, data, depth, width, b),
+        "tree" => tree_json(v, data, depth, b),
+        "graph" => graph_json(v, data, depth, b),
+        "form" => form_json(v, depth, b),
+        "kv" => kv_json(v, data, depth, b),
+        "markdown" => markdown_json(v, depth, b),
+        "embed" => embed_json(v, depth, b),
+        // Unknown or missing kind — degrade to KV per the protocol's
+        // forward-compat rule.
+        _ => {
+            let fallback = kv_fallback_json(v);
+            match serde_json::from_value::<KvNode>(fallback) {
+                Ok(kv) => kv_node(&kv, depth, b),
+                Err(_) => b.row(&format!("{ind}(unrenderable node)"), RowStyle::Dim),
+            }
+        }
+    }
+}
+
+/// The node's bound query payload, if `query` names a key in `data`.
+fn bound<'a>(v: &'a Value, data: &'a Map<String, Value>) -> Option<(&'a str, &'a Value)> {
+    let query = v.get("query").and_then(Value::as_str)?;
+    data.get(query).map(|d| (query, d))
+}
+
+/// Emit the `[query 'q' error: …]` row when the bound payload is a
+/// degradation marker. Returns true when emitted (caller returns).
+fn bound_error(v: &Value, data: &Map<String, Value>, ind: &str, b: &mut Builder) -> bool {
+    let Some((query, payload)) = bound(v, data) else {
+        return false;
+    };
+    if let Some(err) = payload.get("error").and_then(Value::as_str) {
+        b.row(
+            &format!("{ind}[query '{query}' error: {err}]"),
+            RowStyle::Error,
+        );
+        return true;
+    }
+    false
+}
+
+fn title_row(v: &Value, ind: &str, b: &mut Builder) {
+    if let Some(title) = scalar_str(v.get("title")) {
+        b.row(&format!("{ind}{title}"), RowStyle::Title);
+    }
+}
+
+// ---------- table ----------
+
+struct Col {
+    key: String,
+    title: String,
+    align: String,
+}
+
+fn table_json(v: &Value, data: &Map<String, Value>, depth: usize, width: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    title_row(v, &ind, b);
+    if bound_error(v, data, &ind, b) {
+        return;
+    }
+    let mut columns: Vec<Col> = v
+        .get("columns")
+        .and_then(Value::as_array)
+        .map(|cols| {
+            cols.iter()
+                .map(|c| Col {
+                    key: c
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    title: c
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .or_else(|| c.get("key").and_then(Value::as_str))
+                        .unwrap_or("")
+                        .to_string(),
+                    align: c
+                        .get("align")
+                        .and_then(Value::as_str)
+                        .unwrap_or("left")
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Rows: inline `rows` win; otherwise the bound query payload —
+    // an array of arrays, or an array of objects keyed by column key.
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    if let Some(inline) = v.get("rows").and_then(Value::as_array) {
+        for row in inline {
+            if let Some(cells) = row.as_array() {
+                rows.push(cells.iter().map(cell_str).collect());
+            }
+        }
+    } else if let Some((_, payload)) = bound(v, data) {
+        match payload {
+            Value::Array(items) => {
+                for item in items {
+                    match item {
+                        Value::Array(cells) => {
+                            rows.push(cells.iter().map(cell_str).collect());
+                        }
+                        Value::Object(map) => {
+                            rows.push(
+                                columns
+                                    .iter()
+                                    .map(|c| cell_str(map.get(&c.key).unwrap_or(&Value::Null)))
+                                    .collect(),
+                            );
+                        }
+                        other => rows.push(vec![cell_str(other)]),
+                    }
+                }
+            }
+            other => {
+                b.row(&format!("{ind}{}", cell_str(other)), RowStyle::Dim);
+                return;
+            }
+        }
+    }
+    if columns.is_empty() && !rows.is_empty() {
+        let n = rows.iter().map(Vec::len).max().unwrap_or(0);
+        columns = (1..=n)
+            .map(|i| Col {
+                key: i.to_string(),
+                title: i.to_string(),
+                align: "left".to_string(),
+            })
+            .collect();
+    }
+    if columns.is_empty() {
+        b.row(&format!("{ind}(empty table)"), RowStyle::Dim);
+        return;
+    }
+    for row in &mut rows {
+        row.resize(columns.len(), String::new());
+        row.truncate(columns.len());
+    }
+
+    // Column widths = max(header, cells); shrink the widest until the
+    // row fits `width` (cells truncate with '…' at emit time).
+    let avail = width.saturating_sub(depth * 2).max(columns.len() * 4);
+    let sep = 2usize;
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.title.chars().count()).collect();
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.chars().count());
+            }
+        }
+    }
+    loop {
+        let total: usize = widths.iter().sum::<usize>() + sep * (widths.len() - 1);
+        if total <= avail {
+            break;
+        }
+        // Shrink the widest column that can still shrink.
+        let Some((idx, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| **w > 3)
+            .max_by_key(|(_, w)| *w)
+        else {
+            break;
+        };
+        widths[idx] -= 1;
+    }
+
+    let mut emit = |cells: &[String], style: RowStyle, sel: Option<Selection>| {
+        let parts: Vec<String> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| fit(cell, widths[i], &columns[i].align))
+            .collect();
+        let text = format!("{ind}{}", parts.join(&" ".repeat(sep)));
+        if let Some(sel) = sel {
+            let sel_idx = b.selections.len();
+            b.selections.push(sel);
+            b.rows.push(Row {
+                text,
+                style,
+                sel: Some(sel_idx),
+            });
+        } else {
+            b.row(&text, style);
+        }
+    };
+
+    let header_cells: Vec<String> = columns.iter().map(|c| c.title.clone()).collect();
+    emit(&header_cells, RowStyle::Header, None);
+    let sep_cells: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    emit(&sep_cells, RowStyle::Dim, None);
+    let col_meta: Vec<(String, String)> = columns
+        .iter()
+        .map(|c| (c.title.clone(), c.key.clone()))
+        .collect();
+    for row in &rows {
+        let fields: Vec<(String, String)> = col_meta
+            .iter()
+            .enumerate()
+            .map(|(i, (title, _))| (title.clone(), row.get(i).cloned().unwrap_or_default()))
+            .collect();
+        let node_title = v
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("table")
+            .to_string();
+        emit(
+            row,
+            RowStyle::Normal,
+            Some(Selection {
+                title: format!("{node_title} row"),
+                fields,
+            }),
+        );
+    }
+}
+
+// ---------- tree ----------
+
+fn tree_json(v: &Value, data: &Map<String, Value>, depth: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    title_row(v, &ind, b);
+    if bound_error(v, data, &ind, b) {
+        return;
+    }
+    let mut items: Vec<TreeItem> = Vec::new();
+    let inline = v.get("items").and_then(Value::as_array);
+    let bound_items = bound(v, data).and_then(|(_, d)| {
+        d.get("items")
+            .and_then(Value::as_array)
+            .or_else(|| d.as_array())
+    });
+    let source = inline.or(bound_items);
+    if let Some(arr) = source {
+        for item in arr {
+            if let Ok(t) = serde_json::from_value::<TreeItem>(item.clone()) {
+                items.push(t);
+            }
+        }
+    }
+    if items.is_empty() {
+        if let Some((_, payload)) = bound(v, data) {
+            if inline.is_none() && !payload.is_array() {
+                b.row(&format!("{ind}{}", cell_str(payload)), RowStyle::Dim);
+                return;
+            }
+        }
+        b.row(&format!("{ind}(empty tree)"), RowStyle::Dim);
+        return;
+    }
+    let prefix = format!("{ind}  ");
+    tree_items(&items, &prefix, b);
+}
+
+fn tree_items(items: &[TreeItem], prefix: &str, b: &mut Builder) {
+    for (i, item) in items.iter().enumerate() {
+        let last = i + 1 == items.len();
+        let conn = if last { "└─ " } else { "├─ " };
+        let mut text = format!("{prefix}{conn}{}", item.label);
+        if let Some(detail) = &item.detail {
+            text.push_str(&format!("  — {detail}"));
+        }
+        let mut fields = vec![("label".to_string(), item.label.clone())];
+        if let Some(d) = &item.detail {
+            fields.push(("detail".to_string(), d.clone()));
+        }
+        if let Some(id) = &item.id {
+            fields.push(("id".to_string(), id.clone()));
+        }
+        if let Some(icon) = &item.icon {
+            fields.push(("icon".to_string(), icon.clone()));
+        }
+        if !item.children.is_empty() {
+            fields.push(("children".to_string(), item.children.len().to_string()));
+        }
+        if !item.props.is_empty() {
+            fields.push((
+                "props".to_string(),
+                pretty(&Value::Object(item.props.clone())),
+            ));
+        }
+        b.sel_row(&text, RowStyle::Normal, item.label.clone(), fields);
+        let child_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
+        tree_items(&item.children, &child_prefix, b);
+    }
+}
+
+// ---------- graph ----------
+
+fn graph_json(v: &Value, data: &Map<String, Value>, depth: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    title_row(v, &ind, b);
+    if bound_error(v, data, &ind, b) {
+        return;
+    }
+    let (nodes, edges) = graph_parts(v, data);
+    if edges.is_empty() && nodes.is_empty() {
+        b.row(&format!("{ind}(empty graph)"), RowStyle::Dim);
+        return;
+    }
+    // id → label lookup so edges read as names where possible.
+    let mut labels: Map<String, Value> = Map::new();
+    for node in &nodes {
+        if let (Some(id), Some(label)) = (
+            node.get("id").and_then(Value::as_str),
+            node.get("label").and_then(Value::as_str),
+        ) {
+            labels.insert(id.to_string(), Value::from(label));
+        }
+    }
+    let disp = |id: &str| -> String {
+        labels
+            .get(id)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| id.to_string())
+    };
+
+    b.row(&format!("{ind}nodes"), RowStyle::Dim);
+    for node in &nodes {
+        let id = node.get("id").and_then(Value::as_str).unwrap_or("");
+        let label = node.get("label").and_then(Value::as_str).unwrap_or(id);
+        let kind = node.get("kind").and_then(Value::as_str);
+        let mut text = format!("{ind}  {label}");
+        if let Some(k) = kind {
+            text.push_str(&format!(" [{k}]"));
+        }
+        if !id.is_empty() {
+            text.push_str(&format!(" ({id})"));
+        }
+        let mut fields = vec![
+            ("id".to_string(), id.to_string()),
+            ("label".to_string(), label.to_string()),
+        ];
+        if let Some(k) = kind {
+            fields.push(("kind".to_string(), k.to_string()));
+        }
+        if let Some(props) = node
+            .get("props")
+            .filter(|p| !p.as_object().is_some_and(Map::is_empty))
+        {
+            fields.push(("props".to_string(), pretty(props)));
+        }
+        b.sel_row(&text, RowStyle::Normal, label.to_string(), fields);
+    }
+
+    b.row(&format!("{ind}edges"), RowStyle::Dim);
+    for edge in &edges {
+        let from = edge.get("from").and_then(Value::as_str).unwrap_or("");
+        let to = edge.get("to").and_then(Value::as_str).unwrap_or("");
+        let mut text = format!("{ind}  {} -> {}", disp(from), disp(to));
+        if let Some(label) = edge.get("label").and_then(Value::as_str) {
+            text.push_str(&format!("  ({label})"));
+        }
+        let fields = vec![
+            ("from".to_string(), disp(from)),
+            ("to".to_string(), disp(to)),
+            (
+                "label".to_string(),
+                edge.get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+        ];
+        b.sel_row(&text, RowStyle::Dim, format!("{from} -> {to}"), fields);
+    }
+
+    // DOT dump for the 'g' key — same shape as pavo-cli render_dot.
+    b.dots.push(dot_block(&nodes, &edges));
+}
+
+/// A graph node's effective `(nodes, edges)` — inline fields win,
+/// falling back to the bound query payload's `nodes`/`edges` keys.
+fn graph_parts(v: &Value, data: &Map<String, Value>) -> (Vec<Value>, Vec<Value>) {
+    let mut nodes = v
+        .get("nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut edges = v
+        .get("edges")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some((_, payload)) = bound(v, data) {
+        if payload.get("error").and_then(Value::as_str).is_none() {
+            if let Some(n) = payload.get("nodes").and_then(Value::as_array) {
+                if !n.is_empty() {
+                    nodes = n.clone();
+                }
+            }
+            if let Some(e) = payload.get("edges").and_then(Value::as_array) {
+                if !e.is_empty() {
+                    edges = e.clone();
+                }
+            }
+        }
+    }
+    (nodes, edges)
+}
+
+fn dot_block(nodes: &[Value], edges: &[Value]) -> String {
+    let mut out = String::from("digraph \"pavo\" {\n");
+    for node in nodes {
+        let id = node.get("id").and_then(Value::as_str).unwrap_or("");
+        let label = node.get("label").and_then(Value::as_str).unwrap_or(id);
+        out.push_str(&format!(
+            "  \"{}\" [label=\"{}\"];\n",
+            dot_str(id),
+            dot_str(label)
+        ));
+    }
+    for edge in edges {
+        let from = edge.get("from").and_then(Value::as_str).unwrap_or("");
+        let to = edge.get("to").and_then(Value::as_str).unwrap_or("");
+        match edge.get("label").and_then(Value::as_str) {
+            Some(label) => out.push_str(&format!(
+                "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
+                dot_str(from),
+                dot_str(to),
+                dot_str(label)
+            )),
+            None => out.push_str(&format!(
+                "  \"{}\" -> \"{}\";\n",
+                dot_str(from),
+                dot_str(to)
+            )),
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
+// ---------- form / kv / markdown / embed ----------
+
+fn form_json(v: &Value, depth: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    title_row(v, &ind, b);
+    if let Some(fields) = v.get("fields").and_then(Value::as_array) {
+        for f in fields {
+            let key = f.get("key").and_then(Value::as_str).unwrap_or("");
+            let label = f.get("label").and_then(Value::as_str).unwrap_or(key);
+            let kind = f.get("kind").and_then(Value::as_str).unwrap_or("text");
+            let mut text = format!("{ind}- {key}: {label} [{kind}]");
+            if f.get("required").and_then(Value::as_bool) == Some(true) {
+                text.push_str(" (required)");
+            }
+            if let Some(default) = f.get("default") {
+                text.push_str(&format!(" default={}", cell_str(default)));
+            }
+            if let Some(value) = f.get("value") {
+                text.push_str(&format!(" value={}", cell_str(value)));
+            }
+            if let Some(options) = f.get("options").and_then(Value::as_array) {
+                let opts: Vec<String> = options.iter().map(cell_str).collect();
+                text.push_str(&format!(" options={}", opts.join("|")));
+            }
+            if let Some(hint) = f.get("hint").and_then(Value::as_str) {
+                text.push_str(&format!(" — {hint}"));
+            }
+            let mut detail = vec![
+                ("key".to_string(), key.to_string()),
+                ("label".to_string(), label.to_string()),
+                ("kind".to_string(), kind.to_string()),
+            ];
+            if f.get("required").and_then(Value::as_bool) == Some(true) {
+                detail.push(("required".to_string(), "yes".to_string()));
+            }
+            for (k, vk) in [("default", "default"), ("value", "value")] {
+                if let Some(val) = f.get(vk) {
+                    detail.push((k.to_string(), cell_str(val)));
+                }
+            }
+            if let Some(hint) = f.get("hint").and_then(Value::as_str) {
+                detail.push(("hint".to_string(), hint.to_string()));
+            }
+            b.sel_row(&text, RowStyle::Normal, label.to_string(), detail);
+        }
+    }
+    if let Some(op) = v.get("submit_op").and_then(Value::as_str) {
+        let label = v
+            .get("submit_label")
+            .and_then(Value::as_str)
+            .unwrap_or("Submit");
+        b.row(&format!("{ind}submit → {op} ({label})"), RowStyle::Dim);
+    }
+}
+
+fn kv_json(v: &Value, data: &Map<String, Value>, depth: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    title_row(v, &ind, b);
+    if bound_error(v, data, &ind, b) {
+        return;
+    }
+    let mut pairs: Vec<(String, Value, Option<String>)> = v
+        .get("pairs")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    Some((
+                        p.get("key").and_then(Value::as_str)?.to_string(),
+                        p.get("value").cloned().unwrap_or(Value::Null),
+                        p.get("kind").and_then(Value::as_str).map(str::to_string),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Query-bound kv: an object payload becomes the pairs.
+    if pairs.is_empty() {
+        if let Some((_, payload)) = bound(v, data) {
+            if let Value::Object(map) = payload {
+                pairs = map
+                    .iter()
+                    .map(|(k, val)| (k.clone(), val.clone(), None))
+                    .collect();
+            } else {
+                b.row(&format!("{ind}{}", cell_str(payload)), RowStyle::Dim);
+                return;
+            }
+        }
+    }
+    if pairs.is_empty() {
+        b.row(&format!("{ind}(empty)"), RowStyle::Dim);
+        return;
+    }
+    for (key, value, kind) in pairs {
+        let mut text = format!("{ind}{key}: {}", cell_str(&value));
+        if let Some(k) = &kind {
+            text.push_str(&format!("  [{k}]"));
+        }
+        let fields = vec![
+            ("key".to_string(), key.clone()),
+            ("value".to_string(), detail_value(&value)),
+        ];
+        b.sel_row(&text, RowStyle::Normal, key.clone(), fields);
+    }
+}
+
+/// Render a typed [`KvNode`] — used for the unknown-kind fallback.
+fn kv_node(kv: &KvNode, depth: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    if let Some(title) = &kv.base.title {
+        b.row(&format!("{ind}{title}"), RowStyle::Title);
+    }
+    if kv.pairs.is_empty() {
+        b.row(&format!("{ind}(empty)"), RowStyle::Dim);
+        return;
+    }
+    for pair in &kv.pairs {
+        let mut text = format!("{ind}{}: {}", pair.key, cell_str(&pair.value));
+        if let Some(k) = &pair.kind {
+            text.push_str(&format!("  [{k}]"));
+        }
+        let fields = vec![
+            ("key".to_string(), pair.key.clone()),
+            ("value".to_string(), detail_value(&pair.value)),
+        ];
+        b.sel_row(&text, RowStyle::Normal, pair.key.clone(), fields);
+    }
+}
+
+fn markdown_json(v: &Value, depth: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    title_row(v, &ind, b);
+    let text = v.get("text").and_then(Value::as_str).unwrap_or("");
+    for line in text.lines() {
+        b.row(&format!("{ind}{line}"), RowStyle::Normal);
+    }
+}
+
+fn embed_json(v: &Value, depth: usize, b: &mut Builder) {
+    let ind = "  ".repeat(depth);
+    title_row(v, &ind, b);
+    let component = v.get("component").and_then(Value::as_str).unwrap_or("?");
+    let mut text = format!("{ind}[embed: {component}]");
+    if let Some(props) = v
+        .get("props")
+        .filter(|p| p.as_object().is_some_and(|m| !m.is_empty()))
+    {
+        text.push_str(&format!(
+            " {}",
+            serde_json::to_string(props).unwrap_or_default()
+        ));
+    }
+    let mut fields = vec![("component".to_string(), component.to_string())];
+    if let Some(props) = v.get("props") {
+        if !props.as_object().is_some_and(Map::is_empty) {
+            fields.push(("props".to_string(), pretty(props)));
+        }
+    }
+    if let Some(desc) = v.get("description").and_then(Value::as_str) {
+        fields.push(("description".to_string(), desc.to_string()));
+    }
+    b.sel_row(&text, RowStyle::Dim, format!("embed: {component}"), fields);
+}
+
+// ---------- shared helpers ----------
+
+/// Stringify a JSON cell for terminal output: strings raw,
+/// numbers/bools via Display, null empty, anything else compact JSON.
+fn cell_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// Detail-pane value: scalars inline, objects/arrays pretty-printed.
+fn detail_value(v: &Value) -> String {
+    match v {
+        Value::Object(_) | Value::Array(_) => pretty(v),
+        _ => cell_str(v),
+    }
+}
+
+fn pretty(v: &Value) -> String {
+    serde_json::to_string_pretty(v).unwrap_or_default()
+}
+
+fn scalar_str(v: Option<&Value>) -> Option<String> {
+    v.and_then(Value::as_str).map(str::to_string)
+}
+
+/// Truncate to `width` chars with a trailing `…`, then pad to exactly
+/// `width` per the alignment hint.
+fn fit(text: &str, width: usize, align: &str) -> String {
+    let truncated = if text.chars().count() > width {
+        if width == 0 {
+            String::new()
+        } else if width == 1 {
+            "…".to_string()
+        } else {
+            let mut t: String = text.chars().take(width - 1).collect();
+            t.push('…');
+            t
+        }
+    } else {
+        text.to_string()
+    };
+    let len = truncated.chars().count();
+    if len >= width {
+        return truncated;
+    }
+    let fill = width - len;
+    match align {
+        "right" => format!("{}{truncated}", " ".repeat(fill)),
+        "center" => {
+            let left = fill / 2;
+            format!("{}{truncated}{}", " ".repeat(left), " ".repeat(fill - left))
+        }
+        _ => format!("{truncated}{}", " ".repeat(fill)),
+    }
+}
+
+/// Escape a string for a DOT quoted string.
+fn dot_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use serde_json::json;
+
+    fn data() -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert(
+            "items".to_string(),
+            json!([["T-1", "Alpha", "done"], ["T-2", "Beta", "wip"]]),
+        );
+        m.insert("counts".to_string(), json!({"open": 1, "done": 1}));
+        m.insert(
+            "deps".to_string(),
+            json!({"nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                   "edges": [{"from": "a", "to": "b", "label": "uses"}]}),
+        );
+        m
+    }
+
+    fn root(v: Value) -> ViewNode {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn texts(model: &Model) -> Vec<&str> {
+        model.rows.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    #[test]
+    fn kv_renders_pairs_and_bound_object() {
+        let node = root(json!({
+            "kind": "column", "title": "Board",
+            "children": [
+                {"kind": "kv", "query": "counts", "pairs": []},
+            ]
+        }));
+        let m = build_view(&node, &data(), 80);
+        let t = texts(&m);
+        assert!(t.iter().any(|l| l.contains("Board")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("open: 1")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("done: 1")), "{t:?}");
+        // every pair row is selectable with a detail
+        assert!(!m.selectables.is_empty());
+        let sel = &m.selections[m.rows[m.selectables[0]].sel.unwrap()];
+        assert!(!sel.fields.is_empty());
+    }
+
+    #[test]
+    fn table_inline_and_bound_rows_with_headers() {
+        let node = root(json!({
+            "kind": "table", "title": "Items", "query": "items",
+            "columns": [
+                {"key": "0", "title": "ID"},
+                {"key": "1", "title": "Title"},
+                {"key": "2", "title": "Status", "align": "right"}
+            ]
+        }));
+        let m = build_view(&node, &data(), 80);
+        let t = texts(&m);
+        assert!(t.iter().any(|l| l.contains("ID")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("T-1")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("Beta")), "{t:?}");
+        // header + separator + 2 rows selectable? header/sep not.
+        let sel_rows = m.rows.iter().filter(|r| r.sel.is_some()).count();
+        assert_eq!(sel_rows, 2);
+        // detail of first row carries column titles → cells
+        let first = m.rows.iter().find(|r| r.sel.is_some()).unwrap();
+        let sel = &m.selections[first.sel.unwrap()];
+        assert_eq!(sel.fields[0], ("ID".to_string(), "T-1".to_string()));
+    }
+
+    #[test]
+    fn table_object_payload_keyed_by_column() {
+        let mut d = Map::new();
+        d.insert(
+            "rows".to_string(),
+            json!([{"name": "obj-row", "n": 3}, {"name": "two", "n": 4}]),
+        );
+        let node = root(json!({
+            "kind": "table", "query": "rows",
+            "columns": [{"key": "name", "title": "Name"}, {"key": "n", "title": "N"}]
+        }));
+        let m = build_view(&node, &d, 80);
+        let t = texts(&m);
+        assert!(
+            t.iter().any(|l| l.contains("obj-row") && l.contains('3')),
+            "{t:?}"
+        );
+    }
+
+    #[test]
+    fn table_truncates_to_width() {
+        let node = root(json!({
+            "kind": "table",
+            "columns": [{"key": "a", "title": "A"}, {"key": "b", "title": "B"}],
+            "rows": [["aaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbb"]]
+        }));
+        let m = build_view(&node, &data(), 20);
+        for r in &m.rows {
+            assert!(r.text.chars().count() <= 22, "{} too wide", r.text);
+        }
+        assert!(
+            m.rows.iter().any(|r| r.text.contains('…')),
+            "{:?}",
+            texts(&m)
+        );
+    }
+
+    #[test]
+    fn tree_renders_nested_glyphs() {
+        let node = root(json!({
+            "kind": "tree", "items": [
+                {"label": "root", "detail": "top", "children": [
+                    {"label": "child", "children": [{"label": "leaf"}]},
+                    {"label": "child2"}
+                ]},
+                {"label": "second"}
+            ]
+        }));
+        let m = build_view(&node, &data(), 80);
+        let t = texts(&m);
+        assert!(t.iter().any(|l| l.contains("├─ root")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("├─ child")), "{t:?}");
+        assert!(t.iter().any(|l| l.trim_end().ends_with("└─ leaf")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("└─ child2")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("└─ second")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("— top")), "{t:?}");
+        // 5 selectable items
+        assert_eq!(m.rows.iter().filter(|r| r.sel.is_some()).count(), 5);
+    }
+
+    #[test]
+    fn graph_lists_nodes_edges_and_dot() {
+        let node = root(json!({
+            "kind": "graph", "query": "deps",
+            "nodes": [], "edges": []
+        }));
+        let m = build_view(&node, &data(), 80);
+        let t = texts(&m);
+        assert!(t.iter().any(|l| l.contains("nodes")), "{t:?}");
+        assert!(
+            t.iter().any(|l| l.contains('A') && l.contains("(a)")),
+            "{t:?}"
+        );
+        assert!(t.iter().any(|l| l.contains("A -> B")), "{t:?}");
+        let dot = m.graph_dot.unwrap();
+        assert!(dot.contains("digraph"), "{dot}");
+        assert!(dot.contains("\"a\" -> \"b\" [label=\"uses\"]"), "{dot}");
+    }
+
+    #[test]
+    fn form_kv_markdown_embed_render() {
+        let node = root(json!({
+            "kind": "column",
+            "children": [
+                {"kind": "form", "submit_op": "set", "fields": [
+                    {"key": "name", "label": "Name", "kind": "text", "required": true,
+                     "default": "x"}
+                ]},
+                {"kind": "kv", "pairs": [{"key": "k", "value": 1}]},
+                {"kind": "markdown", "text": "hello **world**"},
+                {"kind": "embed", "component": "timeline", "props": {"x": 1}}
+            ]
+        }));
+        let m = build_view(&node, &data(), 80);
+        let t = texts(&m);
+        assert!(
+            t.iter().any(|l| l.contains("name: Name [text] (required)")),
+            "{t:?}"
+        );
+        assert!(t.iter().any(|l| l.contains("submit → set")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("k: 1")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("hello **world**")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("[embed: timeline]")), "{t:?}");
+        // no graph → no dot
+        assert!(m.graph_dot.is_none());
+    }
+
+    #[test]
+    fn unknown_kind_degrades_to_kv() {
+        // Unknown kinds can't deserialize as ViewNode — but a *known*
+        // container can hold... no, it can't either. Exercise the JSON
+        // fallback path through a panel whose child serde would fail;
+        // instead verify kv_fallback_json output renders via build on a
+        // raw value by round-tripping what the wire would produce.
+        // Here: build a ViewNode tree is impossible, so test the pieces:
+        let raw = json!({"kind": "hologram", "id": "h1", "intensity": 0.8});
+        let fallback = kv_fallback_json(&raw);
+        let kv: KvNode = serde_json::from_value(fallback).unwrap();
+        let mut b = Builder::default();
+        kv_node(&kv, 0, &mut b);
+        let m = b.finish();
+        let t = texts(&m);
+        assert!(t.iter().any(|l| l.contains("kind: hologram")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("intensity: 0.8")), "{t:?}");
+    }
+
+    #[test]
+    fn bound_query_error_payload() {
+        let mut d = Map::new();
+        d.insert("items".to_string(), json!({"error": "boom"}));
+        let node = root(json!({"kind": "table", "query": "items",
+            "columns": [{"key": "a", "title": "A"}]}));
+        let m = build_view(&node, &d, 80);
+        let t = texts(&m);
+        assert!(
+            t.iter().any(|l| l.contains("[query 'items' error: boom]")),
+            "{t:?}"
+        );
+        assert!(m
+            .rows
+            .iter()
+            .all(|r| r.style != RowStyle::Header || !r.text.contains('A')));
+    }
+
+    #[test]
+    fn empty_states() {
+        let node = root(json!({"kind": "kv", "pairs": []}));
+        let m = build_view(&node, &data(), 80);
+        assert!(texts(&m).iter().any(|l| l.contains("(empty)")));
+        let g = root(json!({"kind": "graph", "nodes": [], "edges": []}));
+        let m2 = build_view(&g, &data(), 80);
+        assert!(texts(&m2).iter().any(|l| l.contains("(empty graph)")));
+    }
+
+    #[test]
+    fn dashboard_lists_views_and_contributions() {
+        let views = vec![ViewEntry {
+            driver: "demo".to_string(),
+            driver_title: "Demo".to_string(),
+            id: "board".to_string(),
+            namespaced: "demo:board".to_string(),
+            route: "/demo/board".to_string(),
+            title: "Board".to_string(),
+            description: None,
+            queries: vec!["items".to_string()],
+        }];
+        let chrome = Chrome::default();
+        let m = build_dashboard(&views, &chrome, &|_| None, 80);
+        let t = texts(&m);
+        assert!(t.iter().any(|l| l.contains("demo:board — Board")), "{t:?}");
+        // view rows resolve via their Selection title
+        let first = m.rows.iter().find(|r| r.sel.is_some()).unwrap();
+        assert_eq!(m.selections[first.sel.unwrap()].title, "demo:board");
+    }
+
+    #[test]
+    fn note_and_loading_models() {
+        let m = build_note("boom", &[("err".to_string(), "nope".to_string())], true);
+        assert!(texts(&m).iter().any(|l| l.contains("boom")));
+        assert!(texts(&m).iter().any(|l| l.contains("err: nope")));
+        let l = build_loading("demo:board");
+        assert!(texts(&l).iter().any(|l| l.contains("loading demo:board")));
+    }
+
+    #[test]
+    fn markdown_and_panel_titles() {
+        let node = root(json!({
+            "kind": "panel", "title": "P",
+            "children": [{"kind": "row", "title": "R",
+                "children": [{"kind": "markdown", "text": "x"}]}]
+        }));
+        let m = build_view(&node, &data(), 80);
+        let t = texts(&m);
+        assert!(t.iter().any(|l| l.trim() == "P"), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("R")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("  x")), "{t:?}");
+    }
+}
