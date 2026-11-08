@@ -2,10 +2,12 @@
 //! one side, the Nuxt web app (or any JSON client) on the other.
 //!
 //! Hand-rolled HTTP/1.1 over [`std::net::TcpListener`], thread-per-
-//! connection, std-only (see [`crate::http`] for the wire bits). The
-//! [`Host`] is shared across threads behind a mutex — its methods need
-//! `&mut` (lazy manifest fetches, client spawns) and driver round-trips
-//! are serialized anyway by each driver's single `serve` process.
+//! connection, std-only (see [`crate::http`] for the wire bits). One
+//! [`Host`] is shared across threads behind an `Arc` — it is `Sync`:
+//! lazy manifest fetches, client spawns, and the view cache are
+//! internally locked, and each driver's `serve` client carries its own
+//! mutex so requests to *different* drivers run in parallel while
+//! same-driver requests stay serialized on the wire.
 //!
 //! Routes:
 //!
@@ -29,7 +31,7 @@
 use std::io;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use pavo_core::{Host, Params, PavoError};
 use serde_json::{json, Value};
@@ -49,18 +51,14 @@ pub fn run(port: u16) -> io::Result<()> {
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    let host = Arc::new(Mutex::new(Host::discover()));
+    let host = Arc::new(Host::discover());
     let web_root = find_web_root();
     serve(listener, host, web_root)
 }
 
 /// The accept loop, split from [`run`] so tests can bind their own
 /// listener (and learn the port) without parsing stdout.
-fn serve(
-    listener: TcpListener,
-    host: Arc<Mutex<Host>>,
-    web_root: Option<PathBuf>,
-) -> io::Result<()> {
+fn serve(listener: TcpListener, host: Arc<Host>, web_root: Option<PathBuf>) -> io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
@@ -82,7 +80,7 @@ fn serve(
 /// fatal — one bad client can't take the bridge down.
 fn handle_connection(
     stream: &mut std::net::TcpStream,
-    host: &Arc<Mutex<Host>>,
+    host: &Arc<Host>,
     web_root: Option<&Path>,
 ) -> io::Result<()> {
     loop {
@@ -113,7 +111,7 @@ fn handle_connection(
 
 /// Route one request → (response, close_after). `close_after` is set
 /// for HEAD and for errors where keep-alive state is uncertain.
-fn route(req: &Request, host: &Arc<Mutex<Host>>, web_root: Option<&Path>) -> (Response, bool) {
+fn route(req: &Request, host: &Arc<Host>, web_root: Option<&Path>) -> (Response, bool) {
     let (path, query) = http::split_target(&req.target);
     let path = http::percent_decode(path);
     let pairs = http::parse_query(query);
@@ -159,13 +157,8 @@ fn route(req: &Request, host: &Arc<Mutex<Host>>, web_root: Option<&Path>) -> (Re
 
 // ---------- /api routing ----------
 
-fn api_route(path: &str, pairs: &[(String, String)], host: &Arc<Mutex<Host>>) -> Response {
+fn api_route(path: &str, pairs: &[(String, String)], host: &Host) -> Response {
     let endpoint = path.trim_start_matches("/api/");
-    let mut guard = match host.lock() {
-        Ok(g) => g,
-        Err(_) => return api_error(500, "host lock poisoned", true),
-    };
-    let host = &mut *guard;
 
     let result: Result<Value, ApiFail> = match endpoint {
         "health" => Ok(json!({})),
@@ -222,7 +215,7 @@ fn api_error(status: u16, message: &str, cors: bool) -> Response {
     Response::json(status, &json!({"ok": false, "error": message}), cors)
 }
 
-fn api_drivers(host: &mut Host) -> Result<Value, ApiFail> {
+fn api_drivers(host: &Host) -> Result<Value, ApiFail> {
     let kinds: Vec<String> = host.drivers().iter().map(|d| d.kind.clone()).collect();
     let mut rows = Vec::new();
     for kind in kinds {
@@ -243,7 +236,7 @@ fn api_drivers(host: &mut Host) -> Result<Value, ApiFail> {
     Ok(json!(rows))
 }
 
-fn api_views(host: &mut Host) -> Result<Value, ApiFail> {
+fn api_views(host: &Host) -> Result<Value, ApiFail> {
     let views = host.list_views();
     let rows: Vec<Value> = views
         .iter()
@@ -263,7 +256,7 @@ fn api_views(host: &mut Host) -> Result<Value, ApiFail> {
     Ok(json!(rows))
 }
 
-fn api_chrome(host: &mut Host) -> Result<Value, ApiFail> {
+fn api_chrome(host: &Host) -> Result<Value, ApiFail> {
     let chrome = host.chrome();
     let slot = |entries: &[pavo_core::SlotEntry]| -> Vec<Value> {
         entries
@@ -314,14 +307,14 @@ fn view_target(pairs: &[(String, String)]) -> Result<String, ApiFail> {
     }
 }
 
-fn api_view(host: &mut Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
+fn api_view(host: &Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
     let target = view_target(pairs)?;
     let params: Params = http::collect_params(pairs).into_iter().collect();
     let resolved = host.resolve_view(&target, params)?;
     serde_json::to_value(&resolved.result).map_err(|e| ApiFail::new(500, e.to_string()))
 }
 
-fn api_query(host: &mut Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
+fn api_query(host: &Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
     let driver = http::query_get(pairs, "driver")
         .ok_or_else(|| ApiFail::new(400, "missing 'driver' param"))?;
     let query = http::query_get(pairs, "query")
@@ -333,7 +326,7 @@ fn api_query(host: &mut Host, pairs: &[(String, String)]) -> Result<Value, ApiFa
 
 /// The renderer-plugin registry — every `renderers` declaration,
 /// resolved to driver bindings (sorted by namespaced id).
-fn api_renderers(host: &mut Host) -> Result<Value, ApiFail> {
+fn api_renderers(host: &Host) -> Result<Value, ApiFail> {
     let registry = host.renderers();
     let rows: Vec<Value> = registry
         .entries()
@@ -357,7 +350,7 @@ fn api_renderers(host: &mut Host) -> Result<Value, ApiFail> {
 /// driver. `node`/`data` are URL-encoded JSON (`data` defaults to
 /// `{}`); `surface` is required (`cli`/`tui`/`web`); `format` is the
 /// optional format hint.
-fn api_render(host: &mut Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
+fn api_render(host: &Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
     let kind =
         http::query_get(pairs, "kind").ok_or_else(|| ApiFail::new(400, "missing 'kind' param"))?;
     let surface = http::query_get(pairs, "surface")
@@ -516,10 +509,10 @@ fn html_page(title: &str, body: &str) -> Response {
 }
 
 /// Built-in landing: driver cards + view links. Uses a throwaway
-/// Host (the shared one is mutex-guarded in `route` — landing runs
-/// outside it, so discover again; discovery is cheap probing).
+/// Host (landing runs outside the shared one, so discover again;
+/// discovery is cheap probing).
 fn landing_page() -> Response {
-    let mut host = Host::discover();
+    let host = Host::discover();
     let drivers = host.drivers().to_vec();
     let views = host.list_views();
     let chrome = host.chrome();
@@ -583,7 +576,7 @@ fn landing_page() -> Response {
 /// ViewResult JSON inline so the bridge is debuggable without Nuxt.
 fn view_page_stub(reference: &str) -> Response {
     // Discover a fresh host (same reasoning as landing_page).
-    let mut host = Host::discover();
+    let host = Host::discover();
     let params = Params::new();
     let body_inner = match host.resolve_view(reference, params) {
         Ok(resolved) => format!(
@@ -605,10 +598,10 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use pavo_core::PavoError;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    fn host() -> Arc<Mutex<Host>> {
-        Arc::new(Mutex::new(Host::discover()))
+    fn host() -> Arc<Host> {
+        Arc::new(Host::discover())
     }
 
     fn req(method: &str, target: &str) -> Request {
@@ -824,7 +817,7 @@ exit 1
 "#;
 
     /// A Host over a tempdir fixture driver — env-free discovery.
-    fn fixture_host() -> Arc<Mutex<Host>> {
+    fn fixture_host() -> Arc<Host> {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -845,10 +838,10 @@ exit 1
             tamias_home: Some(home),
             ..Default::default()
         };
-        Arc::new(Mutex::new(Host::discover_with(opts)))
+        Arc::new(Host::discover_with(opts))
     }
 
-    fn api(host: &Arc<Mutex<Host>>, target: &str) -> Response {
+    fn api(host: &Arc<Host>, target: &str) -> Response {
         let (path, query) = http::split_target(target);
         let pairs = http::parse_query(query);
         api_route(path, &pairs, host)
@@ -958,6 +951,241 @@ exit 1
         assert_eq!(resp.status, 404);
         assert!(resp.body.is_empty());
     }
+
+    // ---------- concurrency ----------
+
+    use std::time::{Duration, Instant};
+
+    /// A pavo manifest JSON with no views — `host.query` doesn't
+    /// consult view declarations, so empty is fine for these tests.
+    fn bare_manifest(name: &str) -> String {
+        format!(
+            "{{\"name\":\"{name}\",\"title\":\"{name}\",\"version\":\"1.0.0\",\"verbs\":[\"manifest\",\"serve\"],\"capabilities\":[\"pavo\"],\"views\":[]}}"
+        )
+    }
+
+    /// Write `body` as an executable `tamias-driver-<name>` under
+    /// `dir`.
+    fn write_exec(dir: &Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// `gate` driver: query `"wait"` touches `started`, then blocks
+    /// until `release` exists; every other query answers `"fast"`.
+    fn gate_driver(started: &Path, release: &Path) -> String {
+        let manifest = bare_manifest("gate");
+        let wire = format!("{{\"ok\":true,\"result\":{manifest}}}");
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{manifest}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"manifest"'*) printf '%s\n' '{wire}' ;;
+      *'"query":"wait"'*)
+        touch '{started}'
+        while [ ! -f '{release}' ]; do sleep 0.05; done
+        printf '%s\n' '{{"ok":true,"result":{{"query":"wait","data":"released"}}}}' ;;
+      *'"op":"query"'*) printf '%s\n' '{{"ok":true,"result":{{"query":"x","data":"fast"}}}}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#,
+            manifest = manifest,
+            wire = wire,
+            started = started.display(),
+            release = release.display(),
+        )
+    }
+
+    /// `snap` driver: every query answers `"snap"` immediately.
+    fn snap_driver() -> String {
+        let manifest = bare_manifest("snap");
+        let wire = format!("{{\"ok\":true,\"result\":{manifest}}}");
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{manifest}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"manifest"'*) printf '%s\n' '{wire}' ;;
+      *'"op":"query"'*) printf '%s\n' '{{"ok":true,"result":{{"query":"ping","data":"snap"}}}}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#,
+            manifest = manifest,
+            wire = wire,
+        )
+    }
+
+    /// `echo` driver: answers each query with its own name as `data`
+    /// (after a beat, to widen any would-be race window), and appends
+    /// `begin`/`end` markers to `log`.
+    fn echo_driver(log: &Path) -> String {
+        let manifest = bare_manifest("echo");
+        let wire = format!("{{\"ok\":true,\"result\":{manifest}}}");
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{manifest}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"manifest"'*) printf '%s\n' '{wire}' ;;
+      *'"op":"query"'*)
+        q=$(printf '%s' "$line" | sed -n 's/.*"query":"\([^"]*\)".*/\1/p')
+        echo "begin $q" >> '{log}'
+        sleep 0.05
+        echo "end $q" >> '{log}'
+        printf '{{"ok":true,"result":{{"query":"%s","data":"%s"}}}}\n' "$q" "$q" ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#,
+            manifest = manifest,
+            wire = wire,
+            log = log.display(),
+        )
+    }
+
+    /// A Host over a tempdir `bin` — env-free discovery, tempdir kept.
+    fn fixture_host_in(bin: &Path, root: &Path) -> Arc<Host> {
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let opts = pavo_core::discovery::DiscoveryOptions {
+            path: Some(std::ffi::OsString::from(bin)),
+            tamias_home: Some(home),
+            ..Default::default()
+        };
+        Arc::new(Host::discover_with(opts))
+    }
+
+    /// Poll `path` until it exists or `deadline` passes.
+    fn wait_for(path: &Path, deadline: Duration) {
+        let start = Instant::now();
+        while !path.exists() {
+            assert!(
+                start.elapsed() < deadline,
+                "{} never appeared",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The bridge's whole point: a blocked driver must not stall
+    /// requests to other drivers. `gate` parks inside its `"wait"`
+    /// query until released; `snap` must answer meanwhile.
+    #[test]
+    fn different_drivers_run_in_parallel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let _keep = tmp.keep();
+        let bin = root.join("bin");
+        let started = root.join("gate-started");
+        let release = root.join("gate-release");
+        write_exec(&bin, "tamias-driver-gate", &gate_driver(&started, &release));
+        write_exec(&bin, "tamias-driver-snap", &snap_driver());
+        let host = fixture_host_in(&bin, &root);
+
+        // Slow request on `gate` — parks until we release it.
+        let host2 = Arc::clone(&host);
+        let slow = std::thread::spawn(move || api(&host2, "/api/query?driver=gate&query=wait"));
+
+        // Wait until the gate driver is provably inside its request.
+        wait_for(&started, Duration::from_secs(10));
+
+        // `snap` answers while `gate` is still blocked — under the old
+        // global Host mutex this call would queue behind `wait`.
+        let snap = api(&host, "/api/query?driver=snap&query=ping");
+        let body = envelope(&snap);
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["result"]["data"], "snap");
+
+        // Release the gate; its parked request completes.
+        std::fs::write(&release, b"").unwrap();
+        let slow_resp = slow.join().unwrap();
+        let body = envelope(&slow_resp);
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["result"]["data"], "released");
+    }
+
+    /// Same-driver requests serialize on that driver's client lock —
+    /// each caller gets *its own* response back (no cross-talk on the
+    /// shared ndjson stream), and the driver's begin/end log never
+    /// interleaves.
+    #[test]
+    fn same_driver_requests_serialize() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let _keep = tmp.keep();
+        let bin = root.join("bin");
+        let log = root.join("echo.log");
+        write_exec(&bin, "tamias-driver-echo", &echo_driver(&log));
+        let host = fixture_host_in(&bin, &root);
+
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            for name in ["aa", "bb"] {
+                let host = Arc::clone(&host);
+                let query = format!("q{i}{name}");
+                handles.push(std::thread::spawn(move || {
+                    api(&host, &format!("/api/query?driver=echo&query={query}"))
+                }));
+            }
+        }
+        for (i, h) in handles.into_iter().enumerate() {
+            let resp = h.join().unwrap();
+            let body = envelope(&resp);
+            assert_eq!(body["ok"], true, "request {i}: {body}");
+            // The echo driver returns the query name as `data` —
+            // a swapped response would fail here.
+            let expected = if i % 2 == 0 { "aa" } else { "bb" };
+            let round = i / 2;
+            assert_eq!(
+                body["result"]["data"],
+                format!("q{round}{expected}"),
+                "request {i} got a foreign response"
+            );
+        }
+
+        // begin/end markers strictly alternate — no interleaving.
+        let log_text = std::fs::read_to_string(&log).unwrap();
+        let mut open = false;
+        for line in log_text.lines() {
+            if line.starts_with("begin ") {
+                assert!(!open, "interleaved begin while open: {line}");
+                open = true;
+            } else if line.starts_with("end ") {
+                assert!(open, "end without begin: {line}");
+                open = false;
+            }
+        }
+        assert!(!open, "unclosed begin at end of log");
+        assert_eq!(log_text.lines().count(), 16);
+    }
 }
 
 #[cfg(test)]
@@ -1024,7 +1252,7 @@ mod socket_tests {
     /// Spawn `serve` on an ephemeral port; returns the port. The
     /// accept loop runs forever — the thread leaks until test exit,
     /// which is fine.
-    fn serve_port(host: Arc<Mutex<Host>>) -> u16 {
+    fn serve_port(host: Arc<Host>) -> u16 {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -1038,7 +1266,7 @@ mod socket_tests {
         // Direct handle_connection over a socketpair-ish TCP pair.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let host = Arc::new(Mutex::new(Host::discover()));
+        let host = Arc::new(Host::discover());
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let (mut server, _) = listener.accept().unwrap();
@@ -1066,7 +1294,7 @@ mod socket_tests {
         // Malformed head → 400 + close.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let host = Arc::new(Mutex::new(Host::discover()));
+        let host = Arc::new(Host::discover());
         std::thread::spawn(move || {
             let (mut server, _) = listener.accept().unwrap();
             let _ = handle_connection(&mut server, &host, None);
@@ -1077,7 +1305,7 @@ mod socket_tests {
         // Bare EOF → clean return.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let host = Arc::new(Mutex::new(Host::discover()));
+        let host = Arc::new(Host::discover());
         let (tx2, rx2) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let (mut server, _) = listener.accept().unwrap();
@@ -1092,7 +1320,7 @@ mod socket_tests {
     fn serve_accept_loop_routes_api_and_static() {
         // fixture_host is defined in the sibling tests module —
         // rebuild a minimal empty host here to keep modules decoupled.
-        let host = Arc::new(Mutex::new(Host::discover()));
+        let host = Arc::new(Host::discover());
         let port = serve_port(host);
 
         let out = roundtrip(port, b"GET /api/health HTTP/1.1\r\n\r\n");

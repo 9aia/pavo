@@ -21,11 +21,21 @@
 //! live until the `Host` drops (each `DriverClient`'s `Drop` kills its
 //! child).
 //!
+//! [`Host`] is `Send + Sync` and every method takes `&self` — share
+//! one behind an `Arc` (e.g. `pavo serve`'s per-connection threads).
+//! Concurrency is serialized **per driver**: each `DriverClient` sits
+//! behind its own [`Mutex`], so requests to different drivers proceed
+//! in parallel while requests to the same driver stay one-in-flight
+//! on its single `serve` process (the ndjson wire is
+//! request/response ordered — interleaved writes would misattribute
+//! responses).
+//!
 //! Errors are typed: [`PavoError::UnknownDriver`] /
 //! [`PavoError::UnknownView`] / [`PavoError::BadViewRef`] for bad
 //! targets, driver/transport errors propagated from the client.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pavo_protocol::wire::{QueryResult, ViewResult, ViewSummary};
@@ -44,12 +54,28 @@ use crate::Params;
 const DEFAULT_VIEW_CACHE_TTL: Duration = Duration::from_secs(10);
 
 /// The pavo host — discovered drivers, lazy serve clients, merged
-/// chrome, view cache.
+/// chrome, view cache. `Send + Sync`: all mutable state is behind
+/// mutexes, and the only lock held across a driver round-trip is that
+/// driver's own client lock.
 pub struct Host {
     drivers: Vec<DriverInfo>,
-    clients: HashMap<String, DriverClient>,
+    /// Live `serve` clients keyed by driver kind. The outer mutex
+    /// guards only the map (lookup + lazy spawn); each value carries
+    /// its own [`Mutex`] so requests to different drivers run in
+    /// parallel while same-driver requests serialize on the wire.
+    clients: Mutex<HashMap<String, Arc<Mutex<DriverClient>>>>,
+    /// Manifests fetched lazily over the `serve` wire for drivers
+    /// whose `manifest` probe didn't answer eagerly (those stay on
+    /// [`DriverInfo::manifest`]).
+    manifest_cache: Mutex<HashMap<String, DriverManifest>>,
     client_config: ClientConfig,
     view_cache: TtlCache<ViewResult>,
+}
+
+/// A mutex-poisoned failure — a thread panicked while holding a host
+/// lock. Surfaced as `io` so callers see an ordinary error.
+fn poisoned(what: &str) -> PavoError {
+    PavoError::Io(std::io::Error::other(format!("{what} lock poisoned")))
 }
 
 /// A resolved view: which driver served it plus the wire result.
@@ -133,7 +159,8 @@ impl Host {
     pub fn from_drivers(drivers: Vec<DriverInfo>) -> Self {
         Self {
             drivers,
-            clients: HashMap::new(),
+            clients: Mutex::new(HashMap::new()),
+            manifest_cache: Mutex::new(HashMap::new()),
             client_config: ClientConfig::default(),
             view_cache: TtlCache::new(DEFAULT_VIEW_CACHE_TTL),
         }
@@ -168,45 +195,75 @@ impl Host {
 
     /// The driver's manifest — from discovery when eager, otherwise
     /// fetched once over the `serve` wire's `manifest` op and cached
-    /// on the [`DriverInfo`].
+    /// in [`Host::manifest_cache`].
     ///
     /// # Errors
     /// [`PavoError::UnknownDriver`] for undiscovered kinds; client
     /// errors propagate.
-    pub fn manifest(&mut self, kind: &str) -> Result<DriverManifest, PavoError> {
-        let index = self
+    pub fn manifest(&self, kind: &str) -> Result<DriverManifest, PavoError> {
+        let info = self
             .drivers
             .iter()
-            .position(|d| d.kind == kind)
+            .find(|d| d.kind == kind)
             .ok_or_else(|| PavoError::UnknownDriver(kind.to_string()))?;
-        if self.drivers[index].manifest.is_none() {
-            let manifest = self.client(kind)?.manifest()?;
-            self.drivers[index].manifest = Some(manifest);
+        if let Some(manifest) = &info.manifest {
+            return Ok(manifest.clone());
         }
-        self.drivers[index]
-            .manifest
-            .clone()
-            .ok_or_else(|| PavoError::UnknownDriver(kind.to_string()))
+        if let Some(manifest) = self
+            .manifest_cache
+            .lock()
+            .map_err(|_| poisoned("manifest cache"))?
+            .get(kind)
+            .cloned()
+        {
+            return Ok(manifest);
+        }
+        // Two threads may race the fetch — both answer correctly and
+        // the last insert wins; the wire op is idempotent.
+        let manifest = self.with_client(kind, DriverClient::manifest)?;
+        self.manifest_cache
+            .lock()
+            .map_err(|_| poisoned("manifest cache"))?
+            .insert(kind.to_string(), manifest.clone());
+        Ok(manifest)
     }
 
     /// The live `serve` client for `kind`, spawning on first use.
     ///
+    /// The returned [`Arc<Mutex<DriverClient>>`] is the per-driver
+    /// serialization point — [`Host::with_client`] locks it for you.
+    /// The spawn happens under the clients-map lock so two threads
+    /// can't double-spawn; the lock is released before any request.
+    ///
     /// # Errors
     /// [`PavoError::UnknownDriver`] / [`PavoError::MissingDriver`] /
     /// spawn errors.
-    pub fn client(&mut self, kind: &str) -> Result<&mut DriverClient, PavoError> {
-        if !self.clients.contains_key(kind) {
-            let info = self
-                .drivers
-                .iter()
-                .find(|d| d.kind == kind)
-                .ok_or_else(|| PavoError::UnknownDriver(kind.to_string()))?;
-            let client = DriverClient::spawn(info.path.clone(), self.client_config.clone())?;
-            self.clients.insert(kind.to_string(), client);
+    pub fn client(&self, kind: &str) -> Result<Arc<Mutex<DriverClient>>, PavoError> {
+        let mut map = self.clients.lock().map_err(|_| poisoned("clients"))?;
+        if let Some(client) = map.get(kind) {
+            return Ok(Arc::clone(client));
         }
-        self.clients
-            .get_mut(kind)
-            .ok_or_else(|| PavoError::UnknownDriver(kind.to_string()))
+        let info = self
+            .drivers
+            .iter()
+            .find(|d| d.kind == kind)
+            .ok_or_else(|| PavoError::UnknownDriver(kind.to_string()))?;
+        let client = DriverClient::spawn(info.path.clone(), self.client_config.clone())?;
+        let client = Arc::new(Mutex::new(client));
+        map.insert(kind.to_string(), Arc::clone(&client));
+        Ok(client)
+    }
+
+    /// Run `f` against `kind`'s client under its per-driver lock —
+    /// the only place a [`DriverClient`] is borrowed mutably.
+    fn with_client<T>(
+        &self,
+        kind: &str,
+        f: impl FnOnce(&mut DriverClient) -> Result<T, PavoError>,
+    ) -> Result<T, PavoError> {
+        let client = self.client(kind)?;
+        let mut guard = client.lock().map_err(|_| poisoned("driver client"))?;
+        f(&mut guard)
     }
 
     /// Merge every driver's `contributes` into one [`Chrome`].
@@ -214,7 +271,7 @@ impl Host {
     /// their slots contribute nothing rather than failing the whole
     /// chrome.
     #[must_use]
-    pub fn chrome(&mut self) -> Chrome {
+    pub fn chrome(&self) -> Chrome {
         let kinds: Vec<String> = self.drivers.iter().map(|d| d.kind.clone()).collect();
         let mut pairs: Vec<(String, DriverManifest)> = Vec::new();
         for kind in kinds {
@@ -231,7 +288,7 @@ impl Host {
     /// manifests as needed; drivers that can't produce one are
     /// skipped.
     #[must_use]
-    pub fn list_views(&mut self) -> Vec<ViewEntry> {
+    pub fn list_views(&self) -> Vec<ViewEntry> {
         let mut out = Vec::new();
         let kinds: Vec<String> = self.drivers.iter().map(|d| d.kind.clone()).collect();
         for kind in kinds {
@@ -258,7 +315,7 @@ impl Host {
     /// Every navigable route: view routes (`RouteKind::View`) plus
     /// `contributes.routes` slot entries (`RouteKind::Slot`).
     #[must_use]
-    pub fn list_routes(&mut self) -> Vec<RouteEntry> {
+    pub fn list_routes(&self) -> Vec<RouteEntry> {
         let mut out = Vec::new();
         for view in self.list_views() {
             out.push(RouteEntry {
@@ -293,11 +350,7 @@ impl Host {
     /// [`PavoError::BadViewRef`] on unparseable targets,
     /// [`PavoError::UnknownDriver`]/[`PavoError::UnknownView`] for
     /// missing pieces, client errors propagate.
-    pub fn resolve_view(
-        &mut self,
-        target: &str,
-        params: Params,
-    ) -> Result<ResolvedView, PavoError> {
+    pub fn resolve_view(&self, target: &str, params: Params) -> Result<ResolvedView, PavoError> {
         let (driver, view) = self.parse_target(target)?;
         let manifest = self.manifest(&driver)?;
         let view_id = match view {
@@ -333,7 +386,7 @@ impl Host {
             });
         }
 
-        let result = self.client(&driver)?.view(&view_id, params)?;
+        let result = self.with_client(&driver, |client| client.view(&view_id, params))?;
         self.view_cache.insert(key, result.clone());
         Ok(ResolvedView {
             driver,
@@ -349,12 +402,12 @@ impl Host {
     /// # Errors
     /// [`PavoError::UnknownDriver`] / client errors.
     pub fn query(
-        &mut self,
+        &self,
         driver: &str,
         query: &str,
         params: Params,
     ) -> Result<QueryResult, PavoError> {
-        self.client(driver)?.query(query, params)
+        self.with_client(driver, |client| client.query(query, params))
     }
 
     /// `{"op":"views"}` passthrough — the driver's view summaries
@@ -363,8 +416,8 @@ impl Host {
     ///
     /// # Errors
     /// [`PavoError::UnknownDriver`] / client errors.
-    pub fn views(&mut self, driver: &str) -> Result<Vec<ViewSummary>, PavoError> {
-        self.client(driver)?.views()
+    pub fn views(&self, driver: &str) -> Result<Vec<ViewSummary>, PavoError> {
+        self.with_client(driver, DriverClient::views)
     }
 
     /// The merged renderer-plugin registry — every `renderers`
@@ -373,7 +426,7 @@ impl Host {
     /// conflict policy). Fetches lazy manifests as needed; drivers
     /// that can't produce one contribute no renderers.
     #[must_use]
-    pub fn renderers(&mut self) -> RendererRegistry {
+    pub fn renderers(&self) -> RendererRegistry {
         let kinds: Vec<String> = self.drivers.iter().map(|d| d.kind.clone()).collect();
         let mut pairs: Vec<(String, DriverManifest)> = Vec::new();
         for kind in kinds {
@@ -391,7 +444,7 @@ impl Host {
     /// # Errors
     /// [`PavoError::UnknownDriver`] / client errors.
     pub fn render_node(
-        &mut self,
+        &self,
         driver: &str,
         kind: &str,
         node: &Value,
@@ -399,8 +452,9 @@ impl Host {
         surface: &str,
         format: Option<&str>,
     ) -> Result<RenderModel, PavoError> {
-        self.client(driver)?
-            .render(kind, node, data, surface, format)
+        self.with_client(driver, |client| {
+            client.render(kind, node, data, surface, format)
+        })
     }
 
     /// Route one node to whichever driver claims `kind` on `surface`
@@ -411,7 +465,7 @@ impl Host {
     /// [`PavoError::UnknownDriver`] when no renderer claims the kind
     /// for that surface; client errors propagate.
     pub fn render_by_kind(
-        &mut self,
+        &self,
         kind: &str,
         node: &Value,
         data: &Params,
@@ -441,7 +495,7 @@ impl Host {
     /// `None` for the surface default.
     #[must_use]
     pub fn render_view_plugins(
-        &mut self,
+        &self,
         resolved: &ResolvedView,
         surface: &str,
         format: Option<&str>,
@@ -450,7 +504,8 @@ impl Host {
         let nodes = plugin_nodes(&resolved.result.view.root, &registry, surface, format);
         let mut out = std::collections::HashMap::new();
         // Group by driver so each client's requests stay sequential —
-        // DriverClient is &mut and one-in-flight anyway.
+        // one driver lock is held for the whole group (the wire is
+        // one-in-flight anyway), never two drivers' locks at once.
         let mut by_driver: std::collections::BTreeMap<String, Vec<_>> =
             std::collections::BTreeMap::new();
         for n in nodes {
@@ -460,16 +515,16 @@ impl Host {
                 .push(n);
         }
         for (driver, group) in by_driver {
-            let Ok(client) = self.client(&driver) else {
-                continue;
-            };
-            for n in group {
-                if let Ok(model) =
-                    client.render(&n.kind, &n.node, &resolved.result.data, surface, format)
-                {
-                    out.insert(n.path, model);
+            let _ = self.with_client(&driver, |client| {
+                for n in group {
+                    if let Ok(model) =
+                        client.render(&n.kind, &n.node, &resolved.result.data, surface, format)
+                    {
+                        out.insert(n.path, model);
+                    }
                 }
-            }
+                Ok(())
+            });
         }
         out
     }
@@ -580,7 +635,7 @@ exit 1
         write_driver(&bin, "tamias-driver-lz", LZ);
         let home = tmp.path().join("home");
 
-        let mut host = Host::discover_with(opts(&bin, &home));
+        let host = Host::discover_with(opts(&bin, &home));
         assert_eq!(host.drivers().len(), 2);
 
         // chrome merges eager + lazy manifests
@@ -627,7 +682,7 @@ exit 1
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
         write_driver(&bin, "tamias-driver-fx", FX);
-        let mut host = Host::discover_with(opts(&bin, tmp.path()));
+        let host = Host::discover_with(opts(&bin, tmp.path()));
 
         assert!(matches!(
             host.resolve_view("ghost:board", Params::new()),
@@ -701,7 +756,7 @@ exit 1
         let bin = tmp.path().join("bin");
         write_driver(&bin, "tamias-driver-dv", DV);
         write_driver(&bin, "tamias-driver-vz", VZ);
-        let mut host = Host::discover_with(opts(&bin, tmp.path()));
+        let host = Host::discover_with(opts(&bin, tmp.path()));
 
         // Registry sees the plugin claim (renderer-only driver).
         let reg = host.renderers();
@@ -745,7 +800,7 @@ exit 1
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let mut host = Host::discover_with(opts(&bin, tmp.path()));
+        let host = Host::discover_with(opts(&bin, tmp.path()));
         assert!(host.drivers().is_empty());
         assert!(host.list_views().is_empty());
         assert!(host.list_routes().is_empty());
