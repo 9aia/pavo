@@ -14,8 +14,11 @@ stdout: `{"op":"manifest"}` → the
 [`DriverManifest`](/reference/driver-manifest), `{"op":"views"}` →
 view summaries, `{"op":"view","view":"…","params":{…}}` → a
 `ViewResult` (tree + bound data), `{"op":"query",…}` → one query's
-data. Every response is `{"ok":true,"result":…}` or
-`{"ok":false,"error":"…"}`. Full spec: [Wire ops](/reference/wire-ops).
+data. `{"op":"submit","view":"…","form":"…"?,"values":{…}}` →
+a `SubmitResult` backs interactive `form` nodes (see
+[Wire ops → submit](/reference/wire-ops#submit)). Every response is
+`{"ok":true,"result":…}` or `{"ok":false,"error":"…"}`. Full spec:
+[Wire ops](/reference/wire-ops).
 
 ## Minimal shape
 

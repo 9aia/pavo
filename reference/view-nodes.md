@@ -35,7 +35,7 @@ Every kind flattens these to the top level:
 | `table` | tabular data | `columns[]` (`key`,`title`,`align?`,`width?`), `rows?` (inline cell arrays win over query data), `sortable?` |
 | `tree` | hierarchical items | `items[]` (`id?`,`label`,`detail?`,`icon?`,`children[]`,`props`), `expandable?` |
 | `graph` | nodes + edges; layout is the renderer's problem | `nodes[]` (`id`,`label`,`kind?`,`props`), `edges[]` (`from`,`to`,`label?`), `layout?` (`"dot"`,`"mermaid"`,`"layered"`,…) |
-| `form` | input fields + submit op | `fields[]`, `submit_op?`, `submit_label?` — **read-only in v1** (field list renders; interactive submit is v2) |
+| `form` | input fields + submit op — **interactive** via the `submit` wire op | `fields[]`, `submit_op?`, `submit_label?` |
 | `kv` | key/value pairs — detail panes, metadata, **universal degradation target** | `pairs[]` (`key`,`value`,`kind?`) |
 | `markdown` | free-form markdown | `text` |
 | `embed` | escape hatch for rich renderers | `component` (registry/web-component name); component props ride in `props` |
@@ -56,7 +56,12 @@ Every kind flattens these to the top level:
   may ignore.
 - **`form.fields[].kind`** — `text` (default), `textarea`, `number`,
   `bool`, `select` (with `options`). `required`, `default`, `value`,
-  `hint` are supported; v1 renders read-only.
+  `hint`, `editable` (default `true`; `false` renders read-only and
+  is never submitted), and `placeholder` are supported. Submission
+  goes through the [`submit` op](/reference/wire-ops#submit); the
+  form node's `id` is the `form` param when a view has several
+  forms, and `submit_op` names the driver-side action (`"set"`,
+  `"update"`, `"add"`, …).
 - **`embed`** — for visuals no built-in model covers (live graphs,
   timelines, WASM). `component` resolves against the host's
   renderer registry and, on web, registered components.

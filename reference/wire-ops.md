@@ -19,6 +19,8 @@ Requests are discriminated by `op` (internally tagged, lowercase):
 {"op":"query","query":"items","params":{"limit":5}}
 {"op":"render","kind":"graph","node":{…},"data":{…},
  "surface":"cli","format":"svg"}
+{"op":"submit","view":"edit","form":"set-config",
+ "values":{"key":"myco.theme","value":"dark"}}
 ```
 
 Responses:
@@ -89,6 +91,24 @@ the node's kind on the asking surface (see
 - `surface` — open string; hosts may add surfaces.
 - `format` — the surface's format hint when one applies.
 
+### `submit`
+
+`{"op":"submit","view":"<id>","form":"<id>"?,"values":{…}}` →
+[`SubmitResult`](#submitresult) — the form-submission verb. A
+surface collects the editable fields of a `form` ViewNode and posts
+their `key` → value pairs here.
+
+- `view` — the view the form lives in (same namespace as `view`).
+- `form` — optional form-node `id` when the view carries several
+  forms; absent = the driver's default/first form.
+- `values` — submitted field values keyed by `FormField.key`.
+
+The driver resolves the form node, reads its `submit_op`
+(driver-defined: `"set"`, `"update"`, `"add"`, …), and answers a
+`SubmitResult`. Drivers without form support answer `ok:false`.
+`pavo submit <driver>:<view> --param k=v …` is the CLI face;
+`GET /api/submit?ref=…&values={…}` the web-bridge face.
+
 ## Types
 
 ### ViewSummary
@@ -105,6 +125,15 @@ Failed bindings carry `{"error": "…"}` payloads.
 
 `{query: string, data: any}` — one binding's data payload; shape is
 driver-defined, hosts pass it through verbatim.
+
+### SubmitResult
+
+`{message?, errors?, data?, view?}` — every field optional; a bare
+`{"message":"…"}` is complete. `errors` is a per-field validation
+map keyed by `FormField.key` — non-empty means the driver *rejected*
+the submit (hosts re-render with the messages; `pavo submit` exits
+1). `view`, when present, is a fresh `ViewResult` to swap in.
+Unknown fields survive typed round-trips.
 
 ### RenderModel
 

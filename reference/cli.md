@@ -11,6 +11,7 @@ Commands:
   chrome      Show the merged contribution slots
   view        Resolve a deep link and render it
   query       Raw query-op passthrough to a driver
+  submit      Submit a form's field values (submit wire op)
   serve       Run the localhost HTTP bridge for the web host
   open        Hand off to pavo-tui (falls back to `view` text off-TTY)
   manifest    Print the machine-readable capability manifest
@@ -87,6 +88,21 @@ pavo query <driver> <query> [--param k=v …] [--json]
 
 Raw `query` op passthrough — `{"op":"query","query":"<query>",
 "params":{…}}` — for probing a driver's data without a view.
+
+## submit
+
+```sh
+pavo submit <driver>:<view> [--form <id>] [--param k=v …] [--json]
+```
+
+Sends the `submit` wire op — the form-interaction verb — with the
+given field values (`--param key=value`, repeatable; values parse as
+JSON when possible). `--form` picks a specific form node when the
+view carries several. Prints the driver's `SubmitResult` message and
+data; per-field validation `errors` exit 1 so CI can gate on them.
+`--json` dumps the full `SubmitResult` (including any updated
+`view`). Example: `pavo submit config:edit --param key=myco.theme
+--param value=dark`.
 
 ## serve
 

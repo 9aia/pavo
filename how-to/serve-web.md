@@ -8,7 +8,7 @@ serves two things:
 
 - **`/api/*`** — JSON `{"ok":…,"result"/"error"}` envelopes over the
   same `Host` the CLI uses:
-  `GET /api/health|drivers|views|chrome|view|raw|query|renderers|render`
+  `GET /api/health|drivers|views|chrome|view|raw|query|submit|renderers|render`
 - **`/*`** — static files from `web/.output/public`, then `web/dist`,
   then `$PAVO_WEB_DIR`; with no build present it serves a built-in
   landing page that still understands `/view/` deep links.
