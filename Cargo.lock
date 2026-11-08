@@ -193,6 +193,7 @@ dependencies = [
  "pavo-core",
  "pavo-protocol",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
