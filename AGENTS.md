@@ -104,9 +104,15 @@ cargo xtask install        # release-install pavo → ~/.cargo/bin
 ./scripts/smoke-examples.sh  # run examples/drivers/* end-to-end via pavo
 ```
 
-Git hooks live in `.hooks/` when present (`core.hooksPath` =
-`.hooks`): pre-commit `cargo fmt --check`, pre-push `cargo xtask
-check`. Scaffold stage — hooks not yet installed.
+Surface verbs: `pavo open [<driver>:<view>]` launches `pavo-tui`
+(falls back to `view` text off-TTY); `pavo serve [--port N]` runs the
+localhost bridge (`/api/*` + static Nuxt host — see `web/README.md`).
+`cargo xtask coverage` needs `cargo-llvm-cov` plus `LLVM_COV`/
+`LLVM_PROFDATA` when rustup's llvm-tools-preview is absent.
+
+Git hooks live in `.hooks/` (`core.hooksPath` = `.hooks`):
+pre-commit `cargo fmt --all -- --check`, pre-push `cargo xtask
+check`.
 
 ## Rules
 

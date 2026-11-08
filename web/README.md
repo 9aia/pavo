@@ -80,6 +80,18 @@ default same-origin setup you don't need to know it for the web UI,
 but set `NUXT_PUBLIC_PAVO_API=http://127.0.0.1:<port>` if the Nuxt dev
 server should bypass its proxy.
 
+
+## Security notes
+
+`npm audit` currently reports 12 transitive vulnerabilities (6 low,
+6 moderate) inside the Nuxt/Nitro build chain (`deepmerge`,
+`glob`/`minimatch`, `archiver` via `readdir-glob`, `@vercel/nft`).
+Every fix path requires `npm audit fix --force`, which downgrades
+`nuxt` to 4.1.3 — a breaking change — so they are intentionally left
+unfixed. Exposure is limited to the local dev/build toolchain; the
+shipped artifact is static files served by `pavo serve`.
+Re-check on Nuxt upgrades.
+
 ## Status
 
 v1: dashboard + view deep links + all ViewNode kinds (graph as a

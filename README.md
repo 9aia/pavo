@@ -21,16 +21,25 @@ Install a driver → get visualization everywhere. There is no
 
 ## Surfaces
 
-- **CLI** (`pavo`) — `pavo drivers`, `pavo view <driver>:<view>
-  --format json`, deep links; doubles as the protocol conformance
-  harness. `--json` everywhere.
+- **CLI** (`pavo`) — `pavo drivers`, `pavo views`, `pavo chrome`,
+  `pavo view <driver>:<view> --format json|dot|mermaid|<plugin>`,
+  `pavo query`, deep links; doubles as the protocol conformance
+  harness. `--json` everywhere. `pavo serve` is the localhost HTTP
+  bridge for the web host; `pavo open [<driver>:<view>]` hands off to
+  the TUI (falls back to `view` text output off-TTY).
 - **TUI** (`pavo-tui`) — ratatui host: driver rail, ViewNode canvas,
-  detail pane, contribution-driven chrome.
+  detail pane, contribution-driven chrome. Launch directly or via
+  `pavo open`.
 - **Web** (`web/`, Nuxt 4 SSR shell + islands) — `pavo serve` is the
   localhost bridge: `/api/*` JSON over the same `Host` plus static
   serving of the Nuxt build. Dashboard, deep links
   (`/view/myco:item/T-001`), all ViewNode kinds; `graph` renders in a
   client-only SVG island.
+
+Real product drivers ship from their own repos — `tamias-driver-kuda`
+(kuda), `tamias-driver-myco` (myco), `tamias-driver-cuora` (cuora),
+`tamias-driver-peregrin` (peregrin) — discovered like any installed
+driver once on `PATH` or in `$TAMIAS_HOME/drivers`.
 
 ## Layout
 
@@ -104,6 +113,9 @@ graph TD
 `check_driver` runs the wire contract suite, and record/replay
 transcripts give renderers deterministic sessions. The example
 drivers are themselves held to the suite in its tests.
+
+v1 forms are **read-only** — the `form` ViewNode kind renders its
+field list; interactive submit is v2 (same for the web surface).
 
 ## Web
 
