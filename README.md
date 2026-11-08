@@ -22,14 +22,18 @@ Install a driver → get visualization everywhere. There is no
   harness. `--json` everywhere.
 - **TUI** (`pavo-tui`) — ratatui host: driver rail, ViewNode canvas,
   detail pane, contribution-driven chrome.
-- **Web** (`web/`, Nuxt SSR + islands) — streaming shell, per-view
-  islands, deep links (`/myco/item/T-001`) as stable URLs.
+- **Web** (`web/`, Nuxt 4 SSR shell + islands) — `pavo serve` is the
+  localhost bridge: `/api/*` JSON over the same `Host` plus static
+  serving of the Nuxt build. Dashboard, deep links
+  (`/view/myco:item/T-001`), all ViewNode kinds; `graph` renders in a
+  client-only SVG island.
 
 ## Layout
 
 ```
 crates/    pavo-protocol · pavo-core · pavo-cli · pavo-tui · pavo-testkit
-web/       Nuxt SSR host + serve bridge (stdio↔ws) — scaffold stage
+web/       Nuxt 4 app — dashboard + ViewNode renderer; `npm run dev`
+           (proxied to the bridge) or `npm run build` → static export
 protocol/  driver capability spec · contribution slots · ViewNode IR ·
            wire ops (versioned, additive-only within v1)
 xtask      check / test / coverage / install (myco anatomy)
@@ -93,8 +97,25 @@ graph TD
 transcripts give renderers deterministic sessions. The example
 drivers are themselves held to the suite in its tests.
 
+## Web
+
+```bash
+pavo serve --port 7420          # bridge + static host, prints the URL
+cd web && npm run dev           # dev server → http://localhost:3000
+# …or ship the static build the bridge serves:
+cd web && npm run build         # → .output/public (auto-detected)
+```
+
+`pavo serve` binds `127.0.0.1` (`--port 0` picks a free port and
+prints it), exposes `GET /api/{health,drivers,views,chrome,view,raw,
+query}` as `{"ok":…}` envelopes, and serves `web/.output/public` (or
+`web/dist`, or `$PAVO_WEB_DIR`) — falling back to a built-in
+landing page when no build exists. See `web/README.md` for the full
+workflow and env vars.
+
 ## Status
 
-`pavo-protocol`, `pavo-core`, `pavo-cli`, `pavo-testkit`, and the
-example drivers are implemented and tested (`cargo xtask check` /
-`cargo xtask test`). `pavo-tui` and `web/` are scaffolds.
+`pavo-protocol`, `pavo-core`, `pavo-cli` (incl. `serve`),
+`pavo-testkit`, `pavo-tui`, `web/`, and the example drivers are
+implemented and tested (`cargo xtask check` / `cargo xtask test`,
+`cd web && npm run build`).

@@ -14,7 +14,7 @@ docs/
 web/node_modules/
 web/.nuxt/
 web/.output/
-web/dist/
+web/dist
 
 # fuzzing artifacts
 fuzz/target

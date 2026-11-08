@@ -1,15 +1,20 @@
 {
   "name": "pavo-web",
+  "type": "module",
   "private": true,
-  "version": "0.1.0",
-  "description": "Nuxt SSR host + serve bridge for the pavo viz host (scaffold — see README.md)",
   "scripts": {
-    "dev": "nuxi dev",
-    "build": "nuxi build",
-    "generate": "nuxi generate"
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "nuxt": "^4.6.4",
+    "vue": "^3.5.44",
+    "vue-router": "^5.4.0"
   },
   "devDependencies": {
-    "nuxt": "^3.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.9.0"
   }
 }
