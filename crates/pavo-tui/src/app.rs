@@ -1061,3 +1061,389 @@ fn field(sel: &Selection, key: &str) -> Option<String> {
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.clone())
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    //! Headless UI tests: drive [`App`] through synthetic worker
+    //! events, keys and mouse clicks, and render every state onto a
+    //! ratatui `TestBackend`. No TTY, no real drivers — the worker
+    //! channels are plain mpsc pairs.
+
+    use super::*;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use pavo_core::host::{ResolvedView, RouteEntry, RouteKind, ViewEntry};
+    use pavo_core::merge::SlotEntry;
+    use pavo_protocol::manifest::Contribution;
+    use pavo_protocol::manifest::ViewSpec;
+    use pavo_protocol::wire::ViewResult;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use serde_json::{Map, Value};
+    use std::sync::mpsc::channel;
+
+    /// An app plus the command receiver (what the app asks the
+    /// worker to do) and the event sender (what tests feed it).
+    fn make_app() -> (
+        App,
+        std::sync::mpsc::Receiver<Cmd>,
+        std::sync::mpsc::Sender<Ev>,
+    ) {
+        let (tx, rx_cmd) = channel::<Cmd>();
+        let (ev_tx, ev_rx) = channel::<Ev>();
+        (App::new(Worker { tx, rx: ev_rx }, None), rx_cmd, ev_tx)
+    }
+
+    fn kv_root() -> Value {
+        serde_json::json!({
+            "kind": "kv",
+            "id": "root",
+            "title": "Root",
+            "pairs": [{"key": "status", "value": "ok"}],
+        })
+    }
+
+    fn view_spec(id: &str) -> ViewSpec {
+        ViewSpec {
+            id: id.to_string(),
+            title: format!("View {id}"),
+            route: format!("/demo/{id}"),
+            description: None,
+            queries: Vec::new(),
+            root: serde_json::from_value(kv_root()).unwrap(),
+        }
+    }
+
+    fn view_entry(id: &str) -> ViewEntry {
+        ViewEntry {
+            driver: "demo".to_string(),
+            driver_title: "Demo".to_string(),
+            id: id.to_string(),
+            namespaced: format!("demo:{id}"),
+            route: format!("/demo/{id}"),
+            title: format!("View {id}"),
+            description: None,
+            queries: Vec::new(),
+        }
+    }
+
+    fn resolved(id: &str) -> ResolvedView {
+        ResolvedView {
+            driver: "demo".to_string(),
+            view: id.to_string(),
+            namespaced: format!("demo:{id}"),
+            result: ViewResult {
+                view: view_spec(id),
+                data: Map::new(),
+            },
+        }
+    }
+
+    fn boot_ev() -> Ev {
+        Ev::Boot {
+            drivers: vec![DriverRow {
+                kind: "demo".to_string(),
+                title: "Demo".to_string(),
+                views: 2,
+            }],
+            views: vec![view_entry("board"), view_entry("item")],
+            chrome: Chrome {
+                navbar: vec![SlotEntry {
+                    driver: "demo".to_string(),
+                    driver_title: "Demo".to_string(),
+                    contribution: Contribution {
+                        id: "demo:nav-board".to_string(),
+                        title: "Board".to_string(),
+                        route: "/demo/board".to_string(),
+                        priority: 1,
+                        icon: None,
+                    },
+                }],
+                dashboard: Vec::new(),
+                statusbar: Vec::new(),
+                routes: Vec::new(),
+                extra: Default::default(),
+            },
+            routes: vec![RouteEntry {
+                route: "/demo/board".to_string(),
+                driver: "demo".to_string(),
+                title: "Board".to_string(),
+                target: "demo:board".to_string(),
+                kind: RouteKind::View,
+            }],
+        }
+    }
+
+    fn draw(app: &mut App, w: u16, h: u16) -> TestBackend {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        terminal.backend().clone()
+    }
+
+    fn click(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn scroll(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn boot_empty_draws_hint_and_status() {
+        let (mut app, _rx, _ev) = make_app();
+        app.on_event(Ev::Boot {
+            drivers: vec![],
+            views: vec![],
+            chrome: Chrome::default(),
+            routes: vec![],
+        });
+        // step() drains worker events then polls crossterm — on a
+        // non-TTY poll errors → returns true immediately.
+        assert!(app.step());
+        let backend = draw(&mut app, 100, 30);
+        let buf = backend.buffer().clone();
+        // Status bar shows the "no drivers" message.
+        let text: String = (0..100)
+            .map(|x| buf[(x, 29u16)].symbol().to_string())
+            .collect();
+        assert!(text.contains("no pavo drivers"), "{text}");
+    }
+
+    #[test]
+    fn boot_with_drivers_resolves_default_and_draws() {
+        let (mut app, rx_cmd, ev) = make_app();
+        ev.send(boot_ev()).unwrap();
+        app.on_event(Ev::Boot {
+            drivers: vec![DriverRow {
+                kind: "demo".to_string(),
+                title: "Demo".to_string(),
+                views: 2,
+            }],
+            views: vec![view_entry("board"), view_entry("item")],
+            chrome: Chrome::default(),
+            routes: vec![],
+        });
+        // No navbar chrome → per-driver fallback tabs; boot resolves
+        // the first view of the first driver.
+        assert!(matches!(
+            rx_cmd.try_recv(),
+            Ok(Cmd::Resolve { target, .. }) if target == "demo:board"
+        ));
+        let _ = ev;
+        // Simulate the view arriving.
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+        });
+        draw(&mut app, 120, 40);
+    }
+
+    #[test]
+    fn navbar_tab_click_resolves_route_target() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        draw(&mut app, 120, 40);
+        // Tab bar is row 0; first tab starts at x=1, " dashboard " is
+        // 11 wide, then " Board " starts around x=12.
+        let hit = app.tab_hits.iter().find(|(_, _, i)| *i == 1).copied();
+        let Some((x0, _, _)) = hit else {
+            panic!("expected a second tab");
+        };
+        app.on_mouse(click(x0 + 1, 0));
+        assert!(matches!(
+            rx_cmd.try_recv(),
+            Ok(Cmd::Resolve { target, .. }) if target == "demo:board"
+        ));
+    }
+
+    #[test]
+    fn navbar_slot_without_route_shows_note_tab() {
+        let (mut app, _rx, _ev) = make_app();
+        let mut ev = boot_ev();
+        if let Ev::Boot { routes, .. } = &mut ev {
+            routes.clear(); // driver-owned route — not resolvable
+        }
+        app.on_event(ev);
+        draw(&mut app, 120, 40);
+        // Clicking the note tab sets Canvas::Note.
+        let hit = app.tab_hits.iter().find(|(_, _, i)| *i == 1).copied();
+        let Some((x0, _, _)) = hit else {
+            panic!("expected note tab");
+        };
+        app.on_mouse(click(x0 + 1, 0));
+        assert!(matches!(app.current, Some(Canvas::Note { .. })));
+        draw(&mut app, 120, 40);
+    }
+
+    #[test]
+    fn rail_two_click_opens_driver_and_keys_navigate() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        draw(&mut app, 120, 40);
+        // Drain the boot-time Resolve.
+        while rx_cmd.try_recv().is_ok() {}
+        // Rail occupies left ~24 cols; first driver row is a couple
+        // rows below the border.
+        let rail = app.rects.rail;
+        let row = rail.y + 1; // first driver row (inside border)
+                              // First click arms, second opens.
+        app.on_mouse(click(rail.x + 2, row));
+        assert!(rx_cmd.try_recv().is_err());
+        app.on_mouse(click(rail.x + 2, row));
+        assert!(matches!(
+            rx_cmd.try_recv(),
+            Ok(Cmd::Resolve { target, .. }) if target == "demo:board"
+        ));
+        // Keys: move around, open help, dump, quit-path.
+        assert!(app.on_key(KeyCode::Char('?')));
+        assert!(app.help);
+        assert!(app.on_key(KeyCode::Esc)); // dismisses help
+        assert!(!app.help);
+        app.on_key(KeyCode::Tab);
+        app.on_key(KeyCode::BackTab);
+        app.on_key(KeyCode::Right);
+        app.on_key(KeyCode::Left);
+        app.on_key(KeyCode::Char('j'));
+        app.on_key(KeyCode::Char('k'));
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Up);
+        app.on_key(KeyCode::PageDown);
+        app.on_key(KeyCode::PageUp);
+        app.on_key(KeyCode::Char('h'));
+        app.on_key(KeyCode::Char('l'));
+        app.on_key(KeyCode::Char('d')); // no view → status only
+        app.on_key(KeyCode::Char('g'));
+        app.on_key(KeyCode::Char('r'));
+        app.on_key(KeyCode::Enter);
+        draw(&mut app, 120, 40);
+        // q quits from rail/canvas (not detail).
+        assert!(!app.on_key(KeyCode::Char('q')));
+    }
+
+    #[test]
+    fn view_loaded_keys_cover_detail_dump_refresh() {
+        let (mut app, _rx, _ev) = make_app();
+        app.on_event(boot_ev());
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+        });
+        assert!(matches!(app.current, Some(Canvas::View(_))));
+        assert_eq!(app.pane, Pane::Canvas);
+        draw(&mut app, 120, 40);
+        // Enter on the kv selection opens the detail pane.
+        app.on_key(KeyCode::Enter);
+        assert_eq!(app.pane, Pane::Detail);
+        draw(&mut app, 120, 40);
+        // Detail-pane navigation + q backs out to canvas.
+        app.on_key(KeyCode::Char('j'));
+        app.on_key(KeyCode::Char('k'));
+        app.on_key(KeyCode::PageDown);
+        app.on_key(KeyCode::PageUp);
+        app.on_key(KeyCode::Enter); // detail Enter → canvas
+        assert_eq!(app.pane, Pane::Canvas);
+        app.on_key(KeyCode::Tab);
+        assert_eq!(app.pane, Pane::Detail);
+        assert!(app.on_key(KeyCode::Char('q'))); // exits detail → canvas
+        assert_eq!(app.pane, Pane::Canvas);
+        // Now on a real view: d dumps JSON, g reports no graph, r
+        // re-resolves with refresh.
+        app.on_key(KeyCode::Char('d'));
+        app.on_key(KeyCode::Char('g'));
+        app.on_key(KeyCode::Char('r'));
+        draw(&mut app, 120, 40);
+        assert!(!app.on_key(KeyCode::Char('q')));
+    }
+
+    #[test]
+    fn resolve_error_and_reload_paths() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        // Failed resolve → load_error note.
+        app.on_event(Ev::View {
+            target: "demo:missing".to_string(),
+            result: Err("driver exploded".to_string()),
+            renders: HashMap::new(),
+        });
+        assert!(app.load_error.is_some());
+        draw(&mut app, 120, 40);
+        // Reloaded event rebuilds tabs.
+        app.on_event(Ev::Reloaded {
+            views: vec![view_entry("board")],
+            chrome: Chrome::default(),
+            routes: vec![],
+        });
+        // Refresh on dashboard sends Reload.
+        app.on_event(Ev::View {
+            target: "dashboard".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+        });
+        app.resolve("dashboard");
+        assert!(matches!(app.current, Some(Canvas::Dashboard)));
+        draw(&mut app, 120, 40);
+        // Drain earlier commands, then refresh on dashboard → Reload.
+        while rx_cmd.try_recv().is_ok() {}
+        app.refresh();
+        assert!(matches!(rx_cmd.try_recv(), Ok(Cmd::Reload)));
+        // Refresh with no current → status only.
+        let (mut app2, _rx2, _ev2) = make_app();
+        app2.refresh();
+        draw(&mut app2, 80, 24);
+    }
+
+    #[test]
+    fn mouse_scroll_and_canvas_clicks() {
+        let (mut app, _rx, _ev) = make_app();
+        app.on_event(boot_ev());
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+        });
+        draw(&mut app, 120, 40);
+        // Scroll events adjust offsets.
+        app.on_mouse(scroll(MouseEventKind::ScrollDown));
+        app.on_mouse(scroll(MouseEventKind::ScrollUp));
+        app.on_mouse(scroll(MouseEventKind::ScrollRight));
+        app.on_mouse(scroll(MouseEventKind::ScrollLeft));
+        // Click inside canvas on a selectable row, then again to
+        // open detail.
+        let canvas = app.rects.canvas;
+        let row = canvas.y + 2;
+        app.on_mouse(click(canvas.x + 2, row));
+        app.on_mouse(click(canvas.x + 2, row));
+        // Click outside any rect is a no-op.
+        app.on_mouse(click(0, 0));
+        app.on_mouse(click(u16::MAX, u16::MAX));
+        draw(&mut app, 120, 40);
+    }
+
+    #[test]
+    fn small_terminal_still_draws() {
+        let (mut app, _rx, _ev) = make_app();
+        app.on_event(boot_ev());
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+        });
+        app.help = true;
+        draw(&mut app, 40, 10);
+        draw(&mut app, 20, 5);
+    }
+}

@@ -58,17 +58,26 @@ struct Args {
     initial: Option<String>,
     /// `--list` — print drivers + views and exit.
     list: bool,
+    /// `-h`/`--help` — print usage and exit 0.
+    help: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
+    parse_args_iter(std::env::args().skip(1))
+}
+
+/// [`parse_args`] over an explicit argv — split out so tests can
+/// exercise every flag without touching the process env.
+fn parse_args_iter<I: Iterator<Item = String>>(mut iter: I) -> Result<Args, String> {
     let mut initial: Option<String> = None;
     let mut list = false;
-    let mut iter = std::env::args().skip(1);
+    let mut help = false;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => {
-                print!("{USAGE}");
-                std::process::exit(0);
+                // Original semantics: help wins as soon as it's seen.
+                help = true;
+                break;
             }
             "--list" => list = true,
             "--driver" => {
@@ -92,7 +101,11 @@ fn parse_args() -> Result<Args, String> {
             }
         }
     }
-    Ok(Args { initial, list })
+    Ok(Args {
+        initial,
+        list,
+        help,
+    })
 }
 
 fn main() -> ExitCode {
@@ -103,6 +116,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.help {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     if args.list {
         return ExitCode::from(worker::list() as u8);
     }
@@ -139,4 +156,53 @@ fn run_tui(initial: Option<String>) -> io::Result<()> {
     let mut out = io::stdout();
     let _ = out.flush();
     result
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn args(v: &[&str]) -> Result<Args, String> {
+        parse_args_iter(v.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parse_args_covers_all_flags() {
+        let a = args(&[]).unwrap();
+        assert!(!a.list && !a.help && a.initial.is_none());
+
+        let a = args(&["--list"]).unwrap();
+        assert!(a.list);
+
+        for h in ["-h", "--help"] {
+            let a = args(&[h]).unwrap();
+            assert!(a.help);
+        }
+        // Help short-circuits later junk, like the old exit(0).
+        let a = args(&["--help", "--bogus"]).unwrap();
+        assert!(a.help);
+        // …but an error before --help still errors.
+        assert!(args(&["--bogus", "--help"]).is_err());
+
+        let a = args(&["--driver", "demo"]).unwrap();
+        assert_eq!(a.initial.as_deref(), Some("demo"));
+
+        let a = args(&["--view", "demo:board"]).unwrap();
+        assert_eq!(a.initial.as_deref(), Some("demo:board"));
+
+        let a = args(&["demo:item"]).unwrap();
+        assert_eq!(a.initial.as_deref(), Some("demo:item"));
+
+        // Flag-looking positionals are rejected; extras rejected.
+        assert!(args(&["--bogus"]).is_err());
+        assert!(args(&["a", "b"]).is_err());
+        assert!(args(&["--driver"]).is_err());
+        assert!(args(&["--view"]).is_err());
+        // --driver consumes the next arg even if it looks like a flag.
+        let a = args(&["--driver", "--list"]).unwrap();
+        assert_eq!(a.initial.as_deref(), Some("--list"));
+        assert!(!a.list);
+    }
 }

@@ -1790,3 +1790,166 @@ mod tests {
         assert!(t.iter().any(|l| l.contains("  x")), "{t:?}");
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod proptests {
+    #![allow(clippy::unwrap_used)]
+    //! Property/fuzz tests: the canvas model builder must be total
+    //! over arbitrary node JSON (KV-fallback contract — garbage in,
+    //! degraded rows out, never a panic) and over arbitrary
+    //! RenderModels / chrome inputs.
+
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::strategy::BoxedStrategy;
+
+    fn text() -> BoxedStrategy<String> {
+        prop::collection::vec(any::<char>(), 0..16)
+            .prop_map(|cs| cs.into_iter().collect())
+            .boxed()
+    }
+
+    fn json_value(depth: usize) -> BoxedStrategy<Value> {
+        if depth == 0 {
+            return prop_oneof![
+                Just(Value::Null),
+                any::<bool>().prop_map(Value::Bool),
+                any::<i64>().prop_map(|n| Value::from(n.clamp(-999, 999))),
+                text().prop_map(Value::String),
+            ]
+            .boxed();
+        }
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::from(n.clamp(-999, 999))),
+            text().prop_map(Value::String),
+            prop::collection::vec(json_value(depth - 1), 0..4).prop_map(Value::Array),
+            prop::collection::hash_map(text(), json_value(depth - 1), 0..4)
+                .prop_map(|m| Value::Object(m.into_iter().collect())),
+        ]
+        .boxed()
+    }
+
+    fn data_map() -> BoxedStrategy<Map<String, Value>> {
+        prop::collection::hash_map(text(), json_value(3), 0..4)
+            .prop_map(|m| m.into_iter().collect())
+            .boxed()
+    }
+
+    fn render_model() -> BoxedStrategy<RenderModel> {
+        prop_oneof![
+            (
+                prop::collection::vec(text(), 0..4),
+                prop::collection::vec(text(), 0..4),
+                prop::collection::vec(prop::collection::vec(text(), 0..4), 0..4),
+            )
+                .prop_map(|(headers, aligns, rows)| RenderModel::Rows {
+                    headers,
+                    aligns: aligns
+                        .iter()
+                        .map(|a| match a.as_str() {
+                            "center" => pavo_protocol::Align::Center,
+                            "right" => pavo_protocol::Align::Right,
+                            _ => pavo_protocol::Align::Left,
+                        })
+                        .collect(),
+                    rows,
+                }),
+            text().prop_map(|markup| RenderModel::Svg { markup }),
+            prop::collection::vec(text(), 0..4).prop_map(|lines| RenderModel::Text { lines }),
+            (text(), json_value(2)).prop_map(|(component, props)| RenderModel::Placeholder {
+                component,
+                props: props.as_object().cloned().unwrap_or_default(),
+            }),
+        ]
+        .boxed()
+    }
+
+    proptest! {
+        /// Arbitrary JSON through the canvas walker at assorted
+        /// widths — total, and the model invariants hold: every
+        /// selectable index points at a row with `sel`, selections
+        /// and selectables stay in sync.
+        #[test]
+        fn node_walk_never_panics(
+            v in json_value(5),
+            data in data_map(),
+            width in prop_oneof![Just(0usize), Just(1), Just(20), Just(80), Just(400)],
+        ) {
+            let mut b = Builder::default();
+            node_json_path(&v, &data, 0, width, String::new(), &HashMap::new(), &mut b);
+            let model = b.finish();
+            for &ri in &model.selectables {
+                prop_assert!(ri < model.rows.len());
+                prop_assert!(model.rows[ri].sel.is_some());
+            }
+            for row in &model.rows {
+                if let Some(sel) = row.sel {
+                    prop_assert!(sel < model.selections.len());
+                }
+            }
+        }
+
+        /// Plugin-render substitution path on arbitrary JSON +
+        /// arbitrary renders map.
+        #[test]
+        fn node_walk_with_plugins_never_panics(
+            v in json_value(4),
+            data in data_map(),
+            width in prop_oneof![Just(0usize), Just(10), Just(120)],
+            renders in prop::collection::hash_map(
+                prop_oneof![Just(String::new()), text()],
+                render_model(),
+                0..3,
+            ),
+        ) {
+            let mut b = Builder::default();
+            node_json_path(
+                &v,
+                &data,
+                0,
+                width,
+                String::new(),
+                &renders,
+                &mut b,
+            );
+            let _ = b.finish();
+        }
+
+        /// render_model_rows on arbitrary models at assorted widths.
+        #[test]
+        fn render_model_rows_never_panics(
+            m in render_model(),
+            depth in 0usize..4,
+            width in prop_oneof![Just(0usize), Just(1), Just(30), Just(200)],
+        ) {
+            let mut b = Builder::default();
+            render_model_rows(&m, depth, width, &mut b);
+            let model = b.finish();
+            prop_assert!(model.rows.len() <= m_rows_bound(&m) + 8);
+        }
+
+        /// build_note/build_loading/build_dashboard on arbitrary
+        /// strings — total.
+        #[test]
+        fn chrome_models_never_panics(
+            title in text(),
+            fields in prop::collection::vec((text(), text()), 0..8),
+            error in any::<bool>(),
+        ) {
+            let _ = build_note(&title, &fields, error);
+            let _ = build_loading(&title);
+            let _ = build_dashboard(&[], &Chrome::default(), &|_| None, 80);
+        }
+    }
+
+    fn m_rows_bound(m: &RenderModel) -> usize {
+        match m {
+            RenderModel::Text { lines } => lines.len(),
+            RenderModel::Rows { rows, .. } => rows.len() + 2,
+            _ => 1,
+        }
+    }
+}

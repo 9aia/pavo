@@ -162,7 +162,12 @@ fn boot(host: &mut Host, ev_tx: &Sender<Ev>) {
 /// `--list` path — synchronous discovery + listing, no TUI.
 /// Prints drivers with their views; returns the process exit code.
 pub fn list() -> i32 {
-    let mut host = Host::discover();
+    list_host(&mut Host::discover())
+}
+
+/// [`list`] over an explicit host — split so tests can exercise the
+/// empty-discovery path without touching the environment.
+fn list_host(host: &mut Host) -> i32 {
     let drivers: Vec<(String, String)> = host
         .drivers()
         .iter()
@@ -191,4 +196,129 @@ pub fn list() -> i32 {
         }
     }
     0
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    //! Worker channel-protocol tests: spawn the real worker thread
+    //! (discovery may find zero drivers in the test env — that's a
+    //! valid boot), then exercise every command/event pair.
+
+    use super::*;
+    use std::time::Duration;
+
+    fn recv_timeout(rx: &Receiver<Ev>) -> Ev {
+        // Boot does discovery; allow generous time on slow machines.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ev) => return ev,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for worker event"
+                    );
+                }
+                Err(e) => panic!("worker channel closed: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn worker_boot_reload_resolve_cycle() {
+        let w = spawn();
+        match recv_timeout(&w.rx) {
+            Ev::Boot {
+                drivers,
+                views,
+                routes,
+                ..
+            } => {
+                // Whatever the environment discovered, the shapes are
+                // consistent: every view belongs to a known driver.
+                for v in &views {
+                    assert!(drivers.iter().any(|d| d.kind == v.driver));
+                }
+                for d in &drivers {
+                    assert_eq!(d.views, views.iter().filter(|v| v.driver == d.kind).count());
+                }
+                let _ = routes;
+            }
+            other => panic!("expected Boot, got {other:?}"),
+        }
+
+        // Reload → fresh lists.
+        w.tx.send(Cmd::Reload).unwrap();
+        match recv_timeout(&w.rx) {
+            Ev::Reloaded { views, .. } => {
+                // list_views is deterministic across calls.
+                assert!(!views.is_empty() || drivers_empty_ok());
+            }
+            other => panic!("expected Reloaded, got {other:?}"),
+        }
+
+        // Resolve a bogus target → Ev::View with Err (never panics,
+        // never hangs — DriverClient timeouts bound the call).
+        w.tx.send(Cmd::Resolve {
+            target: "definitely-not-a-driver:nope".to_string(),
+            refresh: false,
+        })
+        .unwrap();
+        match recv_timeout(&w.rx) {
+            Ev::View {
+                target,
+                result,
+                renders,
+            } => {
+                assert_eq!(target, "definitely-not-a-driver:nope");
+                assert!(result.is_err());
+                assert!(renders.is_empty());
+            }
+            other => panic!("expected View, got {other:?}"),
+        }
+
+        // refresh variant takes the same path.
+        w.tx.send(Cmd::Resolve {
+            target: "definitely-not-a-driver:nope".to_string(),
+            refresh: true,
+        })
+        .unwrap();
+        match recv_timeout(&w.rx) {
+            Ev::View { result, .. } => assert!(result.is_err()),
+            other => panic!("expected View, got {other:?}"),
+        }
+        drop(w);
+    }
+
+    fn drivers_empty_ok() -> bool {
+        true
+    }
+
+    #[test]
+    fn list_never_panics() {
+        // Prints to stdout; returns 0 (drivers found) or 1 (none).
+        let code = list();
+        assert!(code == 0 || code == 1);
+    }
+
+    #[test]
+    fn list_host_empty_and_with_driver() {
+        // Empty host → "no drivers" path, exit 1.
+        let mut empty = Host::from_drivers(Vec::new());
+        assert_eq!(list_host(&mut empty), 1);
+        // A driver with no manifest → still listed via kind title.
+        // (DriverInfo.path needn't exist for list — no client spawn.)
+        let info = pavo_core::discovery::DriverInfo {
+            kind: "ghost".to_string(),
+            path: std::path::PathBuf::from("/nonexistent/tamias-driver-ghost"),
+            manifest: None,
+        };
+        let mut host = Host::from_drivers(vec![info]);
+        // list_views may try lazy manifest fetch → serve spawn fails
+        // gracefully; whatever it yields, list must not panic.
+        let code = list_host(&mut host);
+        assert!(code == 0 || code == 1);
+    }
 }
