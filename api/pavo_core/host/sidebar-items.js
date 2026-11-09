@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["RouteKind"],"struct":["Host","ResolvedView","RouteEntry","ViewEntry"]};
+window.SIDEBAR_ITEMS = {"enum":["RouteKind"],"struct":["FeedEntry","Host","ResolvedView","RouteEntry","ViewEntry"]};

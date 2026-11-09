@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["cache","client","discovery","error","host","merge","paths","renderers","viewnode"],"type":["Params"]};
+window.SIDEBAR_ITEMS = {"mod":["cache","client","deps","discovery","error","host","merge","paths","renderers","viewnode"],"type":["Params"]};

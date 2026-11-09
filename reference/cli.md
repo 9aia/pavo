@@ -15,6 +15,8 @@ Commands:
   view        Resolve a deep link and render it
   query       Raw query-op passthrough to a driver
   submit      Submit a form's field values (submit wire op)
+  jobs        List the aggregated job feed (contributes.jobs providers)
+  notifications  List the aggregated notification feed
   serve       Run the localhost HTTP bridge for the web host
   open        Hand off to pavo-tui (falls back to `view` text off-TTY)
   manifest    Print the machine-readable capability manifest
@@ -58,9 +60,12 @@ names. `--driver` filters to one driver.
 pavo chrome [--json]
 ```
 
-The merged contribution slots — `navbar`, `dashboard`, `statusbar`,
-`routes`, plus forward-compat `extra` slots — resolved across all
-drivers by priority.
+The merged contribution slots — all eight built-ins: `navbar`,
+`dashboard`, `statusbar`, `routes`, `sidebar`, `headerActions`,
+`notifications`, `jobs` — plus forward-compat `extra` slots,
+resolved across all drivers by priority. The `notifications`/`jobs`
+entries are provider display metadata; the feed *data* is what
+`pavo jobs` / `pavo notifications` aggregate.
 
 ## view
 
@@ -111,6 +116,28 @@ view carries several. Prints the driver's `SubmitResult` message and
 data; per-field validation `errors` exit 1 so CI can gate on them.
 `--json` dumps the full `SubmitResult` (including any updated
 `view`). Example: `pavo submit config:edit --param key=myco.theme --param value=dark`.
+
+## jobs
+
+```sh
+pavo jobs [--json]
+```
+
+The aggregated job feed: `{"op":"jobs"}` fanned out to every
+driver whose manifest declares `contributes.jobs`, each item
+flattened with `driver`/`driver_title` attribution. Per-driver
+failures are skipped, never fatal. Item shape: `JobItem` — see
+[Wire ops → Types](/reference/wire-ops#types).
+
+## notifications
+
+```sh
+pavo notifications [--json]
+```
+
+The aggregated notification feed — same pattern as `jobs` over the
+`notifications` wire op and `contributes.notifications` providers.
+`NotificationItem.read` is display-only in v1 (no write path).
 
 ## serve
 

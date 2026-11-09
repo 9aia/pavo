@@ -14,6 +14,10 @@ and the three renderers (CLI, TUI, web). Neighbors own theirs:
 * **products** (myco, kuda, sturn, mimus, cuora, …) — state owners.
   They ship drivers that proxy their existing `serve` wires (see
   the [proxy pattern](/how-to/write-a-driver#the-proxy-pattern-recommended-for-real-products)).
+  Rust drivers are typically authored with `pavo-driver-kit` — an
+  in-repo convenience SDK, not a second contract: it wraps
+  `pavo-protocol` types and the ndjson loop, and anything it
+  doesn't cover is written against the protocol directly.
   Pavo never reads product internals — no myco files, no kuda
   sqlite, no store schemas. If a driver needs product state, the
   product's own `serve` is the API.

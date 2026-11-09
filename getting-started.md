@@ -24,7 +24,7 @@ or in `<tamias-home>/drivers/` (`$TAMIAS_HOME` or
 under `examples/drivers/` — Python 3, stdlib only:
 
 ```sh
-export PATH="$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PATH"
+export PATH="$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PWD/examples/drivers/platform-demo:$PATH"
 ```
 
 Real product drivers (`tamias-driver-kuda`, `tamias-driver-myco`,
@@ -40,6 +40,9 @@ pavo view demo:board                  # text summary of the tree
 pavo view demo:deps --format mermaid  # graph → mermaid
 pavo view demo:deps --format svg      # viz-graph renderer plugin
 pavo query demo items --param status=open
+pavo jobs                              # aggregated feed (platform-demo provider)
+pavo notifications
+pavo chrome                            # all eight contribution slots
 ```
 
 ## Open the TUI or web surface

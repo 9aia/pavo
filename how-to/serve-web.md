@@ -11,7 +11,10 @@ serves two things:
 
 * **`/api/*`** — JSON `{"ok":…,"result"/"error"}` envelopes over the
   same `Host` the CLI uses:
-  `GET /api/health|drivers|views|chrome|view|raw|query|submit|renderers|render`
+  `GET /api/health|drivers|views|chrome|view|raw|query|submit|renderers|render|jobs|notifications`,
+  plus `POST /api/call?driver=<kind>` — a cross-driver wire proxy
+  that forwards any wire `Request` body to the named driver's
+  `serve` session (the only POST endpoint).
 * **`/*`** — static files from `web/.output/public`, then `web/dist`,
   then `$PAVO_WEB_DIR`; with no build present it serves a built-in
   landing page that still understands `/view/` deep links.
@@ -41,6 +44,18 @@ pavo serve                   # auto-detects web/.output/public
 Open the printed `http://127.0.0.1:<port>/` — the dashboard lists
 drivers, views (deep links `/view/demo%3Aboard`), and chrome
 contributions; `/api/*` is same-origin, no CORS needed.
+
+With platform drivers installed (see
+`examples/drivers/platform-demo/`), the shell also renders the
+platform chrome: a **left sidebar** grouping `sidebar`+`navbar`
+slot entries by driver (with a built-in pavo group for dashboard
+and jobs; collapses to a drawer on mobile), **header actions**
+(`headerActions` icon buttons that open
+a `ViewPopover` rendering the action's view — or navigate for plain
+routes), a **notifications bell** with an unread badge over
+`/api/notifications`, and a **`/jobs`** page grouping the
+`/api/jobs` feed by status. All feed rows carry `driver`/
+`driver_title` attribution.
 
 `npm run generate` is equivalent (`nuxt generate`).
 `NITRO_PRESET=node-server npm run build` produces a standalone SSR

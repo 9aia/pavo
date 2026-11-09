@@ -24,6 +24,8 @@ Requests are discriminated by `op` (internally tagged, lowercase):
  "surface":"cli","format":"svg"}
 {"op":"submit","view":"edit","form":"set-config",
  "values":{"key":"myco.theme","value":"dark"}}
+{"op":"jobs"}
+{"op":"notifications"}
 ```
 
 Responses:
@@ -68,7 +70,10 @@ with static params merged under caller `params`) and puts results
 in `data` keyed by binding name — `data["items"]` feeds every node
 whose `query == "items"`. **Partial degradation**: a binding that
 fails appears as `{"error": "…"}` in `data` rather than failing the
-whole view.
+whole view. A `QueryBinding` may name a foreign `driver` — the host
+then issues the binding's `op` against *that* driver's `serve` and
+stores the payload under the same `data[name]` key (cross-driver
+queries; failures degrade identically).
 
 ### `query`
 
@@ -112,6 +117,24 @@ The driver resolves the form node, reads its `submit_op`
 `pavo submit <driver>:<view> --param k=v …` is the CLI face;
 `GET /api/submit?ref=…&values={…}` the web-bridge face.
 
+### `jobs`
+
+`{"op":"jobs"}` → `Vec<JobItem>` — the job/queue feed op. Drivers
+whose manifest declares `contributes.jobs` are **providers**: the
+host fans this op out to every provider and merges the results,
+tagging each item with its driver (`Host::jobs` /
+`GET /api/jobs` / `pavo jobs`). Drivers without a job feed answer
+`ok:false` or an empty list — hosts tolerate either and skip
+per-driver failures.
+
+### `notifications`
+
+`{"op":"notifications"}` → `Vec<NotificationItem>` — the
+notification feed op. Same provider pattern as `jobs`
+(`contributes.notifications` marks the provider; the host
+aggregates via `Host::notifications` / `GET /api/notifications` /
+`pavo notifications`).
+
 ## Types
 
 ### ViewSummary
@@ -153,6 +176,44 @@ internally tagged on `"type"`:
 Rules: no HTML in RenderModel (self-contained markup is `svg`
 only); unknown `type` degrades like `placeholder`; plugins needing
 richer output use `placeholder` or `svg`.
+
+### JobItem
+
+One entry from a driver's `jobs` op — a unit of background or
+queued work:
+
+```json
+{"id":"build-42","title":"Build pavo","status":"running",
+ "detail":"step 3/7","route":"/myco/job/build-42",
+ "updated_at":"2026-01-02T15:04:05Z"}
+```
+
+`id`/`title`/`status` are required (`status` may be empty);
+`detail`, `route`, `updated_at` optional. `route` resolves like a
+contribution route. Timestamps are **RFC 3339 strings**;
+`status` is a **driver-owned vocabulary** (`"queued"`, `"running"`,
+`"failed"`, …) — hosts render verbatim or degrade to neutral.
+Unknown fields survive via a flatten catch-all.
+
+### NotificationItem
+
+One entry from a driver's `notifications` op:
+
+```json
+{"id":"n-7","title":"Build failed","severity":"error",
+ "body":"cargo xtask check exited 1","route":"/myco/job/build-42",
+ "created_at":"2026-01-02T15:04:05Z","read":false}
+```
+
+`id`/`title` required; `body`, `severity`, `route`, `created_at`
+optional; `read` defaults `false` (drives unread badges — display
+only in v1, there is no write path). `severity` is driver-owned
+(`"info"`, `"warning"`, `"error"`, …); timestamps RFC 3339; `route`
+resolves like a contribution route; unknown fields preserved.
+
+Neither item type carries driver attribution — the host knows
+which driver produced an item (aggregated feeds tag it as
+`driver`/`driver_title`).
 
 ## Versioning
 

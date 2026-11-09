@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["manifest","render_model","view_node","wire"]};
+window.SIDEBAR_ITEMS = {"mod":["manifest","platform","render_model","view_node","wire"]};
