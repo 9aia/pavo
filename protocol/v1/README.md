@@ -126,6 +126,13 @@ Rules:
   kind) and override built-in rendering on the surfaces it declares.
   `graph` is the reference migration; `table`/`list` plugins are
   future work.
+- **Plugin claims take precedence, per node.** On every surface, a
+  node whose kind+surface is claimed renders via the plugin's
+  RenderModel — including `cli` format names that collide with
+  built-ins (`text`, `dot`, `mermaid` are claimable via
+  `cli.formats`); unclaimed nodes keep the built-in interpretation.
+  The one exception is `--format json`: the raw `ViewResult` dump is
+  host-owned and never routed to plugins.
 - **Fallback is mandatory.** When no plugin claims a kind+surface, or
   the `render` op errors/times out, hosts use the built-in
   interpretation (unknown kinds still degrade to KV). Plugin failure

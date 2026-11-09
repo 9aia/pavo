@@ -23,6 +23,14 @@
 //! - **mermaid** — a *single* `graph TD` merging every graph node in
 //!   the view; vertex ids are rewritten to `n0`, `n1`, … in first-seen
 //!   order so ids from different graphs can't collide.
+//!
+//! Renderer plugins take precedence over every built-in format except
+//! `json` (the raw `ViewResult` dump — host-owned, never claimed):
+//! for `text`/`dot`/`mermaid` the `*_plugins` variants substitute a
+//! claimed node's [`RenderModel`] (keyed by tree path, see
+//! [`pavo_core::renderers::plugin_nodes`]) and keep the built-in
+//! interpretation for everything unclaimed — the same per-node
+//! fallback rule the TUI and web surfaces apply.
 
 use std::collections::HashMap;
 
@@ -169,18 +177,69 @@ fn rows_text(
 ///
 /// # Errors
 /// `Err` when the view contains no `graph` nodes.
+#[allow(dead_code)] // tests + the no-plugin path; the CLI goes through render_dot_plugins
 pub fn render_dot(root: &ViewNode, data: &Map<String, Value>) -> Result<String, String> {
-    let graphs = collect_graphs(root, data);
-    if graphs.is_empty() {
+    render_dot_plugins(root, data, &HashMap::new())
+}
+
+/// [`render_dot`] with renderer-plugin substitution: a node claimed
+/// for `cli`+`dot` (a [`RenderModel`] in `renders`, keyed by tree
+/// path) emits the plugin's output in tree order instead of the
+/// built-in interpretation; unclaimed `graph` nodes still emit
+/// `digraph` blocks (numbered `pavo-0`, `pavo-1`, … over built-in
+/// graphs only). A claimed container suppresses its whole subtree,
+/// matching [`pavo_core::renderers::plugin_nodes`].
+///
+/// # Errors
+/// `Err` when nothing renders — no `graph` nodes and no plugin
+/// output.
+pub fn render_dot_plugins(
+    root: &ViewNode,
+    data: &Map<String, Value>,
+    renders: &HashMap<String, RenderModel>,
+) -> Result<String, String> {
+    let value = serde_json::to_value(root).unwrap_or(Value::Null);
+    let mut out = String::new();
+    let mut graph_index = 0usize;
+    node_dot_path(
+        &value,
+        data,
+        String::new(),
+        renders,
+        &mut graph_index,
+        &mut out,
+    );
+    if out.is_empty() {
         return Err("view contains no graph nodes".to_string());
     }
-    let mut out = String::new();
-    for (i, (nodes, edges)) in graphs.iter().enumerate() {
-        if i > 0 {
+    Ok(out)
+}
+
+/// Tree walk behind [`render_dot_plugins`] — see
+/// [`node_text_path`] for the shared path/plugin-substitution
+/// contract.
+fn node_dot_path(
+    v: &Value,
+    data: &Map<String, Value>,
+    path: String,
+    renders: &HashMap<String, RenderModel>,
+    graph_index: &mut usize,
+    out: &mut String,
+) {
+    if let Some(model) = renders.get(&path) {
+        out.push_str(&render_model_cli(model));
+        return;
+    }
+    if node_kind_json(v) == Some("graph") {
+        let (nodes, edges) = graph_parts(v, data);
+        // Blank line between digraph blocks (built-in output only —
+        // plugin models carry their own trailing newline).
+        if *graph_index > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("digraph \"pavo-{i}\" {{\n"));
-        for node in nodes {
+        out.push_str(&format!("digraph \"pavo-{graph_index}\" {{\n"));
+        *graph_index += 1;
+        for node in &nodes {
             let id = node.get("id").and_then(Value::as_str).unwrap_or("");
             let label = node.get("label").and_then(Value::as_str).unwrap_or(id);
             out.push_str(&format!(
@@ -189,7 +248,7 @@ pub fn render_dot(root: &ViewNode, data: &Map<String, Value>) -> Result<String, 
                 dot_str(label)
             ));
         }
-        for edge in edges {
+        for edge in &edges {
             let from = edge.get("from").and_then(Value::as_str).unwrap_or("");
             let to = edge.get("to").and_then(Value::as_str).unwrap_or("");
             match edge.get("label").and_then(Value::as_str) {
@@ -207,8 +266,18 @@ pub fn render_dot(root: &ViewNode, data: &Map<String, Value>) -> Result<String, 
             }
         }
         out.push_str("}\n");
+        return;
     }
-    Ok(out)
+    if let Some(children) = v.get("children").and_then(Value::as_array) {
+        for (i, child) in children.iter().enumerate() {
+            let child_path = if path.is_empty() {
+                i.to_string()
+            } else {
+                format!("{path}.{i}")
+            };
+            node_dot_path(child, data, child_path, renders, graph_index, out);
+        }
+    }
 }
 
 /// Render every `graph` node in the view as a single Mermaid
@@ -217,18 +286,93 @@ pub fn render_dot(root: &ViewNode, data: &Map<String, Value>) -> Result<String, 
 ///
 /// # Errors
 /// `Err` when the view contains no `graph` nodes.
+#[allow(dead_code)] // tests + the no-plugin path; the CLI goes through render_mermaid_plugins
 pub fn render_mermaid(root: &ViewNode, data: &Map<String, Value>) -> Result<String, String> {
-    let graphs = collect_graphs(root, data);
-    if graphs.is_empty() {
+    render_mermaid_plugins(root, data, &HashMap::new())
+}
+
+/// [`render_mermaid`] with renderer-plugin substitution: claimed
+/// nodes (a [`RenderModel`] in `renders`, keyed by tree path) emit
+/// the plugin's output *after* the merged `graph TD` block, in tree
+/// order; unclaimed `graph` nodes feed the mermaid block as usual.
+/// When every graph is claimed the `graph TD` header is omitted
+/// entirely — plugin output is the whole answer.
+///
+/// # Errors
+/// `Err` when nothing renders — no `graph` nodes and no plugin
+/// output.
+pub fn render_mermaid_plugins(
+    root: &ViewNode,
+    data: &Map<String, Value>,
+    renders: &HashMap<String, RenderModel>,
+) -> Result<String, String> {
+    let value = serde_json::to_value(root).unwrap_or(Value::Null);
+    let mut graphs: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
+    let mut claimed: Vec<RenderModel> = Vec::new();
+    collect_mermaid_parts(
+        &value,
+        data,
+        String::new(),
+        renders,
+        &mut graphs,
+        &mut claimed,
+    );
+    if graphs.is_empty() && claimed.is_empty() {
         return Err("view contains no graph nodes".to_string());
     }
+    let mut out = String::new();
+    if !graphs.is_empty() {
+        out.push_str(&mermaid_body(&graphs));
+    }
+    for model in &claimed {
+        out.push_str(&render_model_cli(model));
+    }
+    Ok(out)
+}
+
+/// Tree walk behind [`render_mermaid_plugins`]: claimed paths collect
+/// their [`RenderModel`] (subtree suppressed, like
+/// [`node_dot_path`]); unclaimed `graph` nodes collect `(nodes,
+/// edges)`; everything else recurses through `children`.
+fn collect_mermaid_parts(
+    v: &Value,
+    data: &Map<String, Value>,
+    path: String,
+    renders: &HashMap<String, RenderModel>,
+    graphs: &mut Vec<(Vec<Value>, Vec<Value>)>,
+    claimed: &mut Vec<RenderModel>,
+) {
+    if let Some(model) = renders.get(&path) {
+        claimed.push(model.clone());
+        return;
+    }
+    if node_kind_json(v) == Some("graph") {
+        graphs.push(graph_parts(v, data));
+        return;
+    }
+    if let Some(children) = v.get("children").and_then(Value::as_array) {
+        for (i, child) in children.iter().enumerate() {
+            let child_path = if path.is_empty() {
+                i.to_string()
+            } else {
+                format!("{path}.{i}")
+            };
+            collect_mermaid_parts(child, data, child_path, renders, graphs, claimed);
+        }
+    }
+}
+
+/// The merged `graph TD` block for `graphs` — the built-in mermaid
+/// body shared by [`render_mermaid`] and
+/// [`render_mermaid_plugins`].
+fn mermaid_body(graphs: &[(Vec<Value>, Vec<Value>)]) -> String {
     let mut out = String::from("graph TD\n");
     let mut ids: HashMap<String, String> = HashMap::new();
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut next = 0usize;
     // Allocate ids for every vertex up front so node lines precede
     // edges deterministically.
-    for (nodes, _) in &graphs {
+    for (nodes, _) in graphs {
         for node in nodes {
             if let Some(id) = node.get("id").and_then(Value::as_str) {
                 if !ids.contains_key(id) {
@@ -238,7 +382,7 @@ pub fn render_mermaid(root: &ViewNode, data: &Map<String, Value>) -> Result<Stri
             }
         }
     }
-    for (nodes, edges) in &graphs {
+    for (nodes, edges) in graphs {
         for node in nodes {
             let Some(id) = node.get("id").and_then(Value::as_str) else {
                 continue;
@@ -279,7 +423,7 @@ pub fn render_mermaid(root: &ViewNode, data: &Map<String, Value>) -> Result<Stri
             }
         }
     }
-    Ok(out)
+    out
 }
 
 // ---------- text rendering ----------
@@ -718,35 +862,6 @@ fn embed_text(v: &Value, depth: usize, out: &mut String) {
 
 // ---------- shared helpers ----------
 
-/// Collect `(nodes, edges)` value arrays for every `graph` node in
-/// the tree, honoring query-bound payloads (`{"nodes":[…],"edges":[…]}`).
-fn collect_graphs<'a>(
-    root: &'a ViewNode,
-    data: &'a Map<String, Value>,
-) -> Vec<(Vec<Value>, Vec<Value>)> {
-    let value = serde_json::to_value(root).unwrap_or(Value::Null);
-    let mut graphs = Vec::new();
-    collect_graph_json(&value, data, &mut graphs);
-    graphs
-}
-
-fn collect_graph_json<'a>(
-    v: &'a Value,
-    data: &'a Map<String, Value>,
-    out: &mut Vec<(Vec<Value>, Vec<Value>)>,
-) {
-    if node_kind_json(v) == Some("graph") {
-        let (nodes, edges) = graph_parts(v, data);
-        out.push((nodes, edges));
-        return;
-    }
-    if let Some(children) = v.get("children").and_then(Value::as_array) {
-        for child in children {
-            collect_graph_json(child, data, out);
-        }
-    }
-}
-
 /// A graph node's effective `(nodes, edges)` — inline fields win,
 /// falling back to the bound query payload's `nodes`/`edges` keys.
 fn graph_parts(v: &Value, data: &Map<String, Value>) -> (Vec<Value>, Vec<Value>) {
@@ -1007,6 +1122,103 @@ mod tests {
         assert!(out.contains("-->|go|"), "{out}");
         assert!(!out.contains("a b["), "{out}");
     }
+
+    /// Two sibling graphs; path "0" is plugin-claimed for the format.
+    fn two_graphs() -> ViewNode {
+        root(json!({
+            "kind": "column",
+            "children": [
+                {"kind": "graph", "nodes": [{"id": "a", "label": "A"}], "edges": []},
+                {"kind": "graph", "nodes": [{"id": "b", "label": "B"}], "edges": []}
+            ]
+        }))
+    }
+
+    #[test]
+    fn dot_plugins_substitute_claimed_nodes_only() {
+        let node = two_graphs();
+        let mut renders = HashMap::new();
+        renders.insert("0".to_string(), RenderModel::text(["PLUGIN-A"]));
+        let out = render_dot_plugins(&node, &data(), &renders).unwrap();
+        // Claimed graph → plugin lines, in tree order before the
+        // built-in block for the unclaimed sibling.
+        assert!(out.contains("PLUGIN-A"), "{out}");
+        assert!(!out.contains("[label=\"A\"]"), "{out}");
+        // Unclaimed graph still emits digraph, renumbered pavo-0.
+        assert_eq!(out.matches("digraph").count(), 1, "{out}");
+        assert!(out.contains("digraph \"pavo-0\""), "{out}");
+        assert!(out.contains("\"b\" [label=\"B\"]"), "{out}");
+    }
+
+    #[test]
+    fn dot_plugins_claimed_container_suppresses_subtree() {
+        // A claimed panel owns its whole subtree — the graph inside
+        // must not leak into built-in dot output.
+        let node = root(json!({
+            "kind": "column",
+            "children": [
+                {"kind": "panel", "children": [
+                    {"kind": "graph", "nodes": [{"id": "a", "label": "A"}], "edges": []}
+                ]},
+                {"kind": "graph", "nodes": [{"id": "b", "label": "B"}], "edges": []}
+            ]
+        }));
+        let mut renders = HashMap::new();
+        renders.insert("0".to_string(), RenderModel::text(["PLUGIN-PANEL"]));
+        let out = render_dot_plugins(&node, &data(), &renders).unwrap();
+        assert!(out.contains("PLUGIN-PANEL"), "{out}");
+        assert!(!out.contains("[label=\"A\"]"), "{out}");
+        assert!(out.contains("[label=\"B\"]"), "{out}");
+    }
+
+    #[test]
+    fn dot_plugins_without_claims_matches_builtin() {
+        let node = two_graphs();
+        let via_plugins = render_dot_plugins(&node, &data(), &HashMap::new()).unwrap();
+        assert_eq!(via_plugins, render_dot(&node, &data()).unwrap());
+    }
+
+    #[test]
+    fn mermaid_plugins_claimed_graphs_leave_builtin_block() {
+        let node = two_graphs();
+        let mut renders = HashMap::new();
+        renders.insert("0".to_string(), RenderModel::text(["PLUGIN-A"]));
+        let out = render_mermaid_plugins(&node, &data(), &renders).unwrap();
+        // Built-in block covers only the unclaimed graph; plugin
+        // output trails it.
+        assert!(out.starts_with("graph TD\n"), "{out}");
+        assert!(out.contains("n0[\"B\"]"), "{out}");
+        assert!(!out.contains("n0[\"A\"]"), "{out}");
+        assert!(out.contains("PLUGIN-A"), "{out}");
+        assert!(out.find("graph TD").unwrap() < out.find("PLUGIN-A").unwrap());
+    }
+
+    #[test]
+    fn mermaid_plugins_all_claimed_omits_builtin_block() {
+        let node = two_graphs();
+        let mut renders = HashMap::new();
+        renders.insert("0".to_string(), RenderModel::text(["PLUGIN-A"]));
+        renders.insert("1".to_string(), RenderModel::text(["PLUGIN-B"]));
+        let out = render_mermaid_plugins(&node, &data(), &renders).unwrap();
+        assert!(!out.contains("graph TD"), "{out}");
+        assert!(out.contains("PLUGIN-A"), "{out}");
+        assert!(out.contains("PLUGIN-B"), "{out}");
+        // Tree order preserved.
+        assert!(out.find("PLUGIN-A").unwrap() < out.find("PLUGIN-B").unwrap());
+    }
+
+    #[test]
+    fn graph_plugins_error_when_nothing_renders() {
+        // No graphs and no claims → same error as the built-ins.
+        let node = root(json!({"kind": "kv", "pairs": []}));
+        assert!(render_dot_plugins(&node, &data(), &HashMap::new()).is_err());
+        assert!(render_mermaid_plugins(&node, &data(), &HashMap::new()).is_err());
+        // …but a plugin claim alone is enough output (no graphs).
+        let mut renders = HashMap::new();
+        renders.insert("".to_string(), RenderModel::text(["ONLY-PLUGIN"]));
+        assert!(render_dot_plugins(&node, &data(), &renders).is_ok());
+        assert!(render_mermaid_plugins(&node, &data(), &renders).is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -1146,12 +1358,23 @@ mod proptests {
             prop_assert!(out.len() < 1_000_000);
         }
 
-        /// Same for collect_graph_json — arbitrary JSON can't break
-        /// graph collection.
+        /// Same for the graph collectors/walkers — arbitrary JSON
+        /// can't break graph collection or dot emission.
         #[test]
-        fn collect_graphs_never_panics(v in json_value(5), data in data_map()) {
+        fn graph_walks_never_panics(v in json_value(5), data in data_map()) {
             let mut graphs = Vec::new();
-            collect_graph_json(&v, &data, &mut graphs);
+            let mut claimed = Vec::new();
+            collect_mermaid_parts(
+                &v,
+                &data,
+                String::new(),
+                &HashMap::new(),
+                &mut graphs,
+                &mut claimed,
+            );
+            let mut out = String::new();
+            let mut graph_index = 0usize;
+            node_dot_path(&v, &data, String::new(), &HashMap::new(), &mut graph_index, &mut out);
         }
 
         /// graph_parts on arbitrary node JSON + data: total.

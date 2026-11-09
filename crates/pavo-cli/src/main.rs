@@ -46,7 +46,7 @@ mod render;
 mod serve;
 
 use clap::{Parser, Subcommand};
-use pavo_core::{Host, Params, PavoError};
+use pavo_core::{Host, Params, PavoError, ResolvedView};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -150,8 +150,11 @@ enum Command {
     Schema,
 }
 
-/// The built-in `view --format` values. Anything else is offered to
-/// renderer plugins (manifest `renderers[].surfaces.cli.formats`).
+/// The built-in `view --format` values — all but `json` can be
+/// claimed by renderer plugins (`renderers[].surfaces.cli.formats`,
+/// empty = wildcard); a plugin claim substitutes its RenderModel for
+/// the claimed nodes and the built-in covers the rest. `json` is the
+/// raw `ViewResult` dump — host-owned, never routed to plugins.
 const BUILTIN_FORMATS: [&str; 4] = ["text", "json", "dot", "mermaid"];
 
 /// A CLI failure: exit code + human message (stderr).
@@ -592,42 +595,64 @@ fn cmd_view(target: &str, params: &[String], format: &str) -> Result<(), Fail> {
 /// [`cmd_view`] over an explicit host — split for tests.
 fn cmd_view_host(host: &mut Host, target: &str, params: Params, format: &str) -> Result<(), Fail> {
     let resolved = host.resolve_view(target, params)?;
+    let out = view_output(host, &resolved, target, format)?;
+    print!("{out}");
+    Ok(())
+}
+
+/// The `view` verb's format dispatch — returns the exact bytes to
+/// print (split from [`cmd_view_host`] so tests can assert on
+/// output).
+///
+/// Precedence: renderer plugins are consulted for **every** format
+/// before the built-in interpretation runs — `text`/`dot`/`mermaid`
+/// substitute claimed nodes' RenderModels per tree path and keep the
+/// built-in rendering for unclaimed nodes. `json` is exempt (the raw
+/// `ViewResult` dump is host-owned). Any *other* format string is a
+/// plugin-only format: every claimed node's RenderModel is emitted;
+/// no claims → usage error naming the built-ins.
+fn view_output(
+    host: &Host,
+    resolved: &ResolvedView,
+    target: &str,
+    format: &str,
+) -> Result<String, Fail> {
     match format {
-        "json" => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&resolved.result)
-                    .map_err(|e| Fail::err(e.to_string()))?
-            );
-        }
+        "json" => serde_json::to_string_pretty(&resolved.result)
+            .map(|s| format!("{s}\n"))
+            .map_err(|e| Fail::err(e.to_string())),
         "text" => {
             // Renderer plugins that claim `text` (or wildcard cli
             // formats) substitute their RenderModel per node; the
             // rest render built-in.
-            let renders = host.render_view_plugins(&resolved, "cli", Some("text"));
-            print!(
-                "{}",
-                render::render_text_plugins(
-                    &resolved.result.view.root,
-                    &resolved.result.data,
-                    &renders
-                )
-            );
+            let renders = host.render_view_plugins(resolved, "cli", Some("text"));
+            Ok(render::render_text_plugins(
+                &resolved.result.view.root,
+                &resolved.result.data,
+                &renders,
+            ))
         }
-        "dot" => match render::render_dot(&resolved.result.view.root, &resolved.result.data) {
-            Ok(out) => print!("{out}"),
-            Err(e) => return Err(Fail::err(format!("{target}: {e}"))),
-        },
+        "dot" => {
+            // Plugins claiming `dot` (or wildcard cli formats) take
+            // precedence per node; unclaimed graphs still emit
+            // digraph blocks.
+            let renders = host.render_view_plugins(resolved, "cli", Some("dot"));
+            render::render_dot_plugins(&resolved.result.view.root, &resolved.result.data, &renders)
+                .map_err(|e| Fail::err(format!("{target}: {e}")))
+        }
         "mermaid" => {
-            match render::render_mermaid(&resolved.result.view.root, &resolved.result.data) {
-                Ok(out) => print!("{out}"),
-                Err(e) => return Err(Fail::err(format!("{target}: {e}"))),
-            }
+            let renders = host.render_view_plugins(resolved, "cli", Some("mermaid"));
+            render::render_mermaid_plugins(
+                &resolved.result.view.root,
+                &resolved.result.data,
+                &renders,
+            )
+            .map_err(|e| Fail::err(format!("{target}: {e}")))
         }
         other => {
             // Plugin format: route every claimed node through its
             // driver's `render` op and concatenate the models.
-            let renders = host.render_view_plugins(&resolved, "cli", Some(other));
+            let renders = host.render_view_plugins(resolved, "cli", Some(other));
             if renders.is_empty() {
                 return Err(Fail::err(format!(
                     "{target}: no renderer plugin handles --format '{other}' \
@@ -639,12 +664,13 @@ fn cmd_view_host(host: &mut Host, target: &str, params: Params, format: &str) ->
             // tree order).
             let mut keyed: Vec<(&String, &pavo_protocol::RenderModel)> = renders.iter().collect();
             keyed.sort_by(|a, b| a.0.cmp(b.0));
+            let mut out = String::new();
             for (_, model) in keyed {
-                print!("{}", render::render_model_cli(model));
+                out.push_str(&render::render_model_cli(model));
             }
+            Ok(out)
         }
     }
-    Ok(())
 }
 
 fn cmd_query(driver: &str, query: &str, params: &[String], json: bool) -> Result<(), Fail> {
@@ -911,6 +937,114 @@ exit 1
             .unwrap();
         // Bad view ref → error.
         assert!(cmd_view_host(&mut host, "badref", Params::new(), "text").is_err());
+    }
+
+    /// View driver `dv` — one `graph` node (the plugin target).
+    const DV_DRIVER: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"dv","title":"Dv","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[{"id":"g","title":"G","route":"/dv/g","root":{"kind":"graph","nodes":[{"id":"a","label":"A"}],"edges":[]}}]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"g","title":"G","route":"/dv/g","root":{"kind":"graph","nodes":[{"id":"a","label":"A"}],"edges":[]}},"data":{}}}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"g","title":"G","route":"/dv/g"}]}' ;;
+      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"dv","title":"Dv","version":"0.1.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"g","title":"G","route":"/dv/g","root":{"kind":"graph","nodes":[],"edges":[]}}]}}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    /// Renderer plugin `vz` — claims `graph` on cli formats
+    /// `dot`+`mermaid` (the built-in names); `render` answers a text
+    /// RenderModel so tests can tell plugin output from built-in.
+    const VZ_DRIVER: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"vz","title":"Vz","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[],"renderers":[{"id":"graph","kinds":["graph"],"priority":50,"surfaces":{"cli":{"formats":["dot","mermaid"]}}}]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"render"'*) printf '%s\n' '{"ok":true,"result":{"type":"text","lines":["PLUGIN-RENDER"]}}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[]}' ;;
+      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"vz","title":"Vz","version":"0.1.0","verbs":["serve"],"capabilities":["pavo"],"views":[],"renderers":[{"id":"graph","kinds":["graph"],"priority":50,"surfaces":{"cli":{"formats":["dot","mermaid"]}}}]}}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    /// Write `tamias-driver-<name>` into `bin` and return its path.
+    fn write_driver(bin: &std::path::Path, name: &str, script: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(bin).ok().unwrap();
+        let path = bin.join(format!("tamias-driver-{name}"));
+        std::fs::write(&path, script).ok().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .ok()
+                .unwrap();
+        }
+        path
+    }
+
+    /// Host over `dv` (+ optional `vz` plugin), manifests lazy.
+    fn plugin_host(with_plugin: bool) -> (tempfile::TempDir, Host) {
+        let tmp = tempfile::tempdir().ok().unwrap();
+        let bin = tmp.path().join("bin");
+        let dv = write_driver(&bin, "dv", DV_DRIVER);
+        let mut drivers = vec![DriverInfo {
+            kind: "dv".to_string(),
+            path: dv,
+            manifest: None,
+        }];
+        if with_plugin {
+            let vz = write_driver(&bin, "vz", VZ_DRIVER);
+            drivers.push(DriverInfo {
+                kind: "vz".to_string(),
+                path: vz,
+                manifest: None,
+            });
+        }
+        (tmp, Host::from_drivers(drivers))
+    }
+
+    #[test]
+    fn plugin_format_beats_builtin_dot_and_mermaid() {
+        let (_tmp, host) = plugin_host(true);
+        let resolved = host.resolve_view("dv:g", Params::new()).ok().unwrap();
+        // The plugin claims cli formats "dot"/"mermaid" for kind
+        // "graph" — its RenderModel wins over the built-in renderers.
+        for fmt in ["dot", "mermaid"] {
+            let out = view_output(&host, &resolved, "dv:g", fmt).ok().unwrap();
+            assert!(out.contains("PLUGIN-RENDER"), "{fmt}: {out}");
+            assert!(!out.contains("digraph"), "{fmt}: {out}");
+            assert!(!out.contains("graph TD"), "{fmt}: {out}");
+        }
+        // json stays host-owned: raw ViewResult, not plugin output.
+        let out = view_output(&host, &resolved, "dv:g", "json").ok().unwrap();
+        assert!(out.contains("\"root\""), "{out}");
+        assert!(!out.contains("PLUGIN-RENDER"), "{out}");
+        // Formats the plugin doesn't claim still error / built-in.
+        assert!(view_output(&host, &resolved, "dv:g", "bogus").is_err());
+    }
+
+    #[test]
+    fn builtin_dot_mermaid_without_plugin_claims() {
+        let (_tmp, host) = plugin_host(false);
+        let resolved = host.resolve_view("dv:g", Params::new()).ok().unwrap();
+        let out = view_output(&host, &resolved, "dv:g", "dot").ok().unwrap();
+        assert!(out.contains("digraph"), "{out}");
+        let out = view_output(&host, &resolved, "dv:g", "mermaid")
+            .ok()
+            .unwrap();
+        assert!(out.contains("graph TD"), "{out}");
     }
 
     #[test]

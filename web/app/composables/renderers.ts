@@ -9,6 +9,11 @@
 //     kinds: ["graph"], priority: 100, entry?,
 //     surfaces: { cli?: {formats: []}, tui?: bool,
 //                 web?: {component?, island?} } }
+//
+// `web.component` is intentionally ignored in v1 (protocol decision):
+// every RenderModel renders through the generic mapping in
+// ViewNode.vue — `component`/`island` are hints for future
+// dynamic-imported mounts, not load-bearing.
 
 export interface RendererSurfaceCli {
   formats?: string[]
@@ -49,16 +54,31 @@ export function rendererRegistry(): Promise<RendererEntry[]> {
   return pending
 }
 
-/** Find the registry entry claiming `kind` for the `web` surface —
- *  explicit kinds beat `"*"` (the bridge already resolved conflicts;
- *  here we just take the first match in registry order). */
+/** Find the registry entry claiming `kind` for the `web` surface.
+ *
+ *  Mirrors the host's claim resolution (`RendererRegistry::for_kind`
+ *  in pavo-core): explicit kinds beat `"*"`; among competing claims
+ *  the lowest `priority` wins, ties break by driver name then
+ *  renderer id. `/api/renderers` lists every declaration sorted by
+ *  id, so the winner isn't necessarily first — resolve it here.
+ *
+ *  This is advisory only: `GET /api/render` re-resolves the claim
+ *  server-side and is authoritative — if the plugin path fails the
+ *  caller falls back to built-in rendering regardless. */
 export function webRendererFor(
   registry: RendererEntry[],
   kind: string,
 ): RendererEntry | undefined {
-  return registry.find(
-    (r) =>
-      r.surfaces?.web &&
-      (r.kinds.includes(kind) || r.kinds.includes('*')),
-  )
+  const onWeb = registry.filter((r) => r.surfaces?.web)
+  const wildcard = (r: RendererEntry) => r.kinds.includes('*')
+  // Explicit claims shadow the wildcard pool entirely (same as the
+  // host: the kind's winning binding decides surface support).
+  const explicit = onWeb.filter((r) => !wildcard(r) && r.kinds.includes(kind))
+  const pool = explicit.length ? explicit : onWeb.filter(wildcard)
+  return [...pool].sort(
+    (a, b) =>
+      (a.priority ?? 100) - (b.priority ?? 100) ||
+      a.driver.localeCompare(b.driver) ||
+      a.id.localeCompare(b.id),
+  )[0]
 }

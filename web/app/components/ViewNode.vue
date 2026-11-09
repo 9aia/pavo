@@ -16,16 +16,24 @@ const props = defineProps<{
 const kind = computed(() => String(props.node?.kind ?? ''))
 
 // ---- renderer plugins -------------------------------------------------
-// A driver may claim this node's kind via its manifest `renderers`
-// (e.g. viz-graph claims "graph"). Claimed nodes route through
-// `GET /api/render` → RenderModel; unclaimed/failing nodes keep the
-// built-in interpretation below.
+// Precedence (canonical, same rule as CLI/TUI): a driver that claims
+// this node's `kind` for the `web` surface (manifest `renderers[]`,
+// e.g. viz-graph claims "graph") OWNS the rendering — its RenderModel
+// via `GET /api/render` is the output. Built-in interpretation
+// (GraphIsland for `graph`, etc.) renders ONLY when no plugin claims
+// the kind, the registry hasn't resolved yet is impossible (see
+// registryReady below), or the render op fails — plugin failure
+// degrades one node, never the view.
 const registry = ref<RendererEntry[]>([])
+const registryReady = ref(false)
 rendererRegistry().then((r) => {
   registry.value = r
+  registryReady.value = true
 })
 
-const pluginRenderer = computed(() => webRendererFor(registry.value, kind.value))
+const pluginRenderer = computed(() =>
+  registryReady.value ? webRendererFor(registry.value, kind.value) : undefined,
+)
 
 const renderUrl = computed(() => {
   const r = pluginRenderer.value
@@ -40,7 +48,10 @@ const renderUrl = computed(() => {
 })
 
 // RenderModel wire shape: {ok, result: {type: rows|svg|text|placeholder, …}}
-const { data: pluginResponse } = await useFetch(renderUrl, {
+const {
+  data: pluginResponse,
+  error: pluginFetchError,
+} = await useFetch(renderUrl, {
   server: false,
   watch: [renderUrl],
   immediate: false,
@@ -52,8 +63,26 @@ const pluginModel = computed<any>(() => {
   return d?.ok ? d.result : null
 })
 // Plugin path is active only when a renderer claims the kind AND the
-// render op answered — otherwise built-in rendering takes over.
+// render op answered with a model — otherwise built-in rendering
+// takes over (mandatory fallback).
 const pluginActive = computed(() => !!pluginRenderer.value && !!pluginModel.value)
+// Claimed but unanswered: registry says a plugin owns this node and
+// /api/render hasn't produced a model yet (in flight, or the watch
+// hasn't fired). Render a placeholder — NEVER the built-in — so a
+// claimed node can't flash GraphIsland/table before the plugin's
+// canonical output lands. Settled-without-model (ok:false envelope
+// or fetch error) falls through to built-in.
+const pluginPending = computed(
+  () =>
+    !!pluginRenderer.value &&
+    !pluginModel.value &&
+    pluginResponse.value == null &&
+    !pluginFetchError.value,
+)
+// Registry unresolved: claims are unknown, so built-ins must not
+// render yet either — same placeholder, one shared fetch resolves
+// every node at once.
+const claimsUnknown = computed(() => !registryReady.value)
 
 // RenderModel → template helpers.
 const pluginRows = computed<any[]>(() => pluginModel.value?.rows ?? [])
@@ -192,10 +221,11 @@ function fmt(v: any): string {
     <h3 v-if="node.title" class="vtitle">{{ node.title }}</h3>
     <p v-if="node.description" class="muted">{{ node.description }}</p>
 
-    <!-- renderer-plugin output: a driver claimed this kind and
-         answered /api/render with a RenderModel. svg embeds verbatim
-         (plugin owns its layout); rows/text/placeholder map to native
-         elements. Falls through to built-in rendering on any failure. -->
+    <!-- renderer-plugin output: a driver claimed this kind for the
+         web surface and answered /api/render with a RenderModel —
+         canonical, built-ins never render for claimed nodes.
+         svg embeds verbatim (plugin owns its layout); rows/text/
+         placeholder map to native elements. -->
     <template v-if="pluginActive">
       <div
         v-if="pluginModel.type === 'svg'"
@@ -223,6 +253,19 @@ function fmt(v: any): string {
       </div>
     </template>
 
+    <!-- claimed by a plugin, render op still in flight: placeholder,
+         never the built-in (no GraphIsland flash for claimed kinds) -->
+    <p v-else-if="pluginPending" class="muted">
+      rendering via {{ pluginRenderer?.driver_title || pluginRenderer?.driver }}…
+    </p>
+
+    <!-- registry unresolved: claims unknown — hold built-ins until
+         /api/renderers answers (one shared fetch for the whole tree) -->
+    <p v-else-if="claimsUnknown" class="muted">…</p>
+
+    <!-- built-in interpretation: unclaimed kinds, or plugin render
+         failed (mandatory fallback — a broken plugin degrades one
+         node, never the view) -->
     <template v-else>
     <!-- layout containers -->
     <div v-if="kind === 'panel'" class="panel">

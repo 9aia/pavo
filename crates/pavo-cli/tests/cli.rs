@@ -38,11 +38,13 @@ exit 1
 "#;
 
 /// Renderer-plugin driver `viz`: declares a `graph` renderer for cli
-/// formats `svg`/`ascii` (+tui/web) and answers `render` with canned
-/// RenderModels. Zero views — renderer-only.
+/// formats `svg`/`ascii`/`dot`/`mermaid` (+tui/web) and answers `render`
+/// with canned RenderModels. Zero views — renderer-only. Claiming the
+/// built-in format names (`dot`/`mermaid`) exercises plugin-over-builtin
+/// precedence.
 const VIZ: &str = r#"#!/bin/sh
 if [ "$1" = manifest ]; then
-  printf '%s\n' '{"name":"viz","title":"Viz Plugin","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[],"renderers":[{"id":"graph","kinds":["graph"],"priority":50,"surfaces":{"cli":{"formats":["svg","ascii"]},"tui":true,"web":{"component":"viz-graph","island":true}}}]}'
+  printf '%s\n' '{"name":"viz","title":"Viz Plugin","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[],"renderers":[{"id":"graph","kinds":["graph"],"priority":50,"surfaces":{"cli":{"formats":["svg","ascii","dot","mermaid"]},"tui":true,"web":{"component":"viz-graph","island":true}}}]}'
   exit 0
 fi
 if [ "$1" = serve ]; then
@@ -52,6 +54,10 @@ if [ "$1" = serve ]; then
         printf '%s\n' '{"ok":true,"result":{"type":"svg","markup":"<svg>PLUGIN-SVG</svg>"}}';;
       *'"op":"render"'*'"format":"ascii"'*)
         printf '%s\n' '{"ok":true,"result":{"type":"text","lines":["PLUGIN-ASCII","a -> b"]}}';;
+      *'"op":"render"'*'"format":"dot"'*)
+        printf '%s\n' '{"ok":true,"result":{"type":"text","lines":["PLUGIN-DOT"]}}';;
+      *'"op":"render"'*'"format":"mermaid"'*)
+        printf '%s\n' '{"ok":true,"result":{"type":"text","lines":["PLUGIN-MERMAID"]}}';;
       *'"op":"render"'*)
         printf '%s\n' '{"ok":true,"result":{"type":"rows","headers":["id","label"],"rows":[["a","Alpha"]]}}';;
       *'"op":"views"'*)
@@ -237,10 +243,25 @@ fn view_plugin_format_delegates_to_renderer() {
     assert!(out.contains("PLUGIN-ASCII"), "{out}");
     assert!(out.contains("a -> b"), "{out}");
 
-    // Built-in formats stay built-in even with the plugin installed.
+    // Plugin formats take precedence over same-named built-ins:
+    // viz claims "dot"/"mermaid" for kind graph → its RenderModel
+    // wins over the graphviz/mermaid renderers.
     let o = pavo(&fx, &["view", "demo:deps", "--format", "dot"]);
     assert!(o.status.success(), "{}", stderr(&o));
-    assert!(stdout(&o).contains("digraph"), "{}", stdout(&o));
+    let out = stdout(&o);
+    assert!(out.contains("PLUGIN-DOT"), "{out}");
+    assert!(!out.contains("digraph"), "{out}");
+
+    let o = pavo(&fx, &["view", "demo:deps", "--format", "mermaid"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("PLUGIN-MERMAID"), "{out}");
+    assert!(!out.contains("graph TD"), "{out}");
+
+    // json is host-owned — never routed to plugins.
+    let o = pavo(&fx, &["view", "demo:deps", "--format", "json"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("\"root\""), "{}", stdout(&o));
 
     // Plain text: plugin's cli.formats doesn't claim "text" → built-in.
     let o = pavo(&fx, &["view", "demo:deps"]);
