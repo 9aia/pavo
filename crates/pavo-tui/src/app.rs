@@ -15,6 +15,11 @@
 //! draws [`model`] output and forwards [`Cmd`]s. Panes: `Rail`
 //! (drivers) → `Canvas` (current view/dashboard/note) → `Detail`
 //! (selected row's fields). `Tab`/`←`/`→` cycle focus.
+//!
+//! Platform chrome slots (`sidebar`, `header_actions`, `notifications`,
+//! `jobs`) have no dedicated TUI chrome — no sidebar pane, no action
+//! bar, no feed polling — so they render as contribution sections on
+//! the dashboard (see `model::build_dashboard`).
 
 use std::time::Duration;
 
@@ -1507,6 +1512,10 @@ mod tests {
                 dashboard: Vec::new(),
                 statusbar: Vec::new(),
                 routes: Vec::new(),
+                sidebar: Vec::new(),
+                header_actions: Vec::new(),
+                notifications: Vec::new(),
+                jobs: Vec::new(),
                 extra: Default::default(),
             },
             routes: vec![RouteEntry {

@@ -427,6 +427,7 @@ impl FixtureDriverBuilder {
             version: "0.0.0".to_string(),
             verbs: vec!["manifest".to_string(), "serve".to_string()],
             capabilities: vec!["pavo".to_string()],
+            deps: None,
             contributes: Default::default(),
             views: self.views.clone(),
             renderers: self.renderers.clone(),

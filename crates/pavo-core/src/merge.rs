@@ -16,7 +16,15 @@
 //!
 //! `extra` slots (unknown to this host version) merge the same way
 //! and pass through untouched — forward compatibility per the
-//! protocol's degrade-gracefully rule.
+//! protocol's degrade-gracefully rule. The platform slots
+//! (`sidebar`, `headerActions`, `notifications`, `jobs`) are typed
+//! [`Chrome`] fields like the original four; manifests from older
+//! hosts that carried them in `extra` still merge — they just land
+//! in `extra` instead.
+//!
+//! `notifications`/`jobs` slot *entries* are display metadata only —
+//! the feed data flows through the `notifications`/`jobs` wire ops
+//! ([`crate::host::Host::notifications`] / [`crate::host::Host::jobs`]).
 
 use std::collections::BTreeMap;
 
@@ -46,6 +54,18 @@ pub struct Chrome {
     pub statusbar: Vec<SlotEntry>,
     /// Standalone routes drivers own outside their views.
     pub routes: Vec<SlotEntry>,
+    /// Left-sidebar shell entries (`contributes.sidebar`).
+    pub sidebar: Vec<SlotEntry>,
+    /// Top-bar actions (`contributes.headerActions` — wire spelling;
+    /// the field is snake_case here like everywhere else).
+    pub header_actions: Vec<SlotEntry>,
+    /// Notification-provider display entries
+    /// (`contributes.notifications`) — metadata only; the feed data
+    /// comes from the `notifications` wire op.
+    pub notifications: Vec<SlotEntry>,
+    /// Job-feed provider display entries (`contributes.jobs`) —
+    /// metadata only; data comes from the `jobs` wire op.
+    pub jobs: Vec<SlotEntry>,
     /// Unknown/forward-compat slots, merged the same way, keyed by
     /// slot name. Renderers ignore slots they don't know.
     pub extra: BTreeMap<String, Vec<SlotEntry>>,
@@ -87,6 +107,25 @@ where
             title,
             &manifest.contributes.routes,
         );
+        collect(
+            &mut chrome.sidebar,
+            kind,
+            title,
+            &manifest.contributes.sidebar,
+        );
+        collect(
+            &mut chrome.header_actions,
+            kind,
+            title,
+            &manifest.contributes.header_actions,
+        );
+        collect(
+            &mut chrome.notifications,
+            kind,
+            title,
+            &manifest.contributes.notifications,
+        );
+        collect(&mut chrome.jobs, kind, title, &manifest.contributes.jobs);
         for (slot, entries) in &manifest.contributes.extra {
             let target = chrome.extra.entry(slot.clone()).or_default();
             for c in entries {
@@ -98,6 +137,10 @@ where
     sort_slot(&mut chrome.dashboard);
     sort_slot(&mut chrome.statusbar);
     sort_slot(&mut chrome.routes);
+    sort_slot(&mut chrome.sidebar);
+    sort_slot(&mut chrome.header_actions);
+    sort_slot(&mut chrome.notifications);
+    sort_slot(&mut chrome.jobs);
     for entries in chrome.extra.values_mut() {
         sort_slot(entries);
     }
@@ -150,6 +193,7 @@ mod tests {
             version: "0.0.0".to_string(),
             verbs: vec!["serve".to_string()],
             capabilities: vec!["pavo".to_string()],
+            deps: None,
             contributes,
             views: vec![],
             renderers: vec![],
@@ -221,6 +265,61 @@ mod tests {
             chrome.extra["weird"][0].contribution.id, "drv:w",
             "extra slots merge + namespace too"
         );
+    }
+
+    #[test]
+    fn platform_slots_merge_sort_and_namespace() {
+        let m = manifest(
+            "drv",
+            "Drv",
+            Contributes {
+                sidebar: vec![contrib("side", 20)],
+                header_actions: vec![contrib("act", 1)],
+                notifications: vec![contrib("note", 1)],
+                jobs: vec![contrib("job", 1)],
+                ..Contributes::default()
+            },
+        );
+        let chrome = merge_chrome([("drv", &m)]);
+        assert_eq!(chrome.sidebar[0].contribution.id, "drv:side");
+        assert_eq!(chrome.header_actions[0].contribution.id, "drv:act");
+        assert_eq!(chrome.notifications[0].contribution.id, "drv:note");
+        assert_eq!(chrome.jobs[0].contribution.id, "drv:job");
+    }
+
+    #[test]
+    fn platform_slots_sort_across_drivers() {
+        let a = manifest(
+            "aaa",
+            "A",
+            Contributes {
+                sidebar: vec![contrib("s", 50)],
+                ..Contributes::default()
+            },
+        );
+        let b = manifest(
+            "bbb",
+            "B",
+            Contributes {
+                sidebar: vec![contrib("s", 10)],
+                header_actions: vec![contrib("h", 1)],
+                ..Contributes::default()
+            },
+        );
+        let chrome = merge_chrome([("bbb", &b), ("aaa", &a)]);
+        // priority asc wins regardless of input/driver order.
+        assert_eq!(
+            chrome
+                .sidebar
+                .iter()
+                .map(|e| e.contribution.id.as_str())
+                .collect::<Vec<_>>(),
+            ["bbb:s", "aaa:s"]
+        );
+        assert_eq!(chrome.header_actions.len(), 1);
+        assert_eq!(chrome.header_actions[0].driver, "bbb");
+        // Untouched slots stay empty.
+        assert!(chrome.notifications.is_empty() && chrome.jobs.is_empty());
     }
 
     #[test]

@@ -95,6 +95,7 @@ fn spec(id: &str) -> ViewSpec {
         queries: vec![QueryBinding {
             name: "items".to_string(),
             op: "query".to_string(),
+            driver: None,
             params: Default::default(),
         }],
         root: ViewNode::Table(TableNode {

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use pavo_core::renderers::RendererRegistry;
 use pavo_core::viewnode;
-use pavo_core::{merge_chrome, TtlCache};
+use pavo_core::{merge_chrome, order_drivers, DepsError, TtlCache};
 use pavo_protocol::manifest::*;
 use pavo_protocol::view_node::*;
 use proptest::prelude::*;
@@ -168,8 +168,14 @@ fn contribution() -> BoxedStrategy<Contribution> {
         .boxed()
 }
 
-fn manifest() -> BoxedStrategy<DriverManifest> {
+/// A `Contributes` with entries in every slot — built-ins and the
+/// platform four — plus forward-compat `extra`.
+fn contributes() -> BoxedStrategy<Contributes> {
     (
+        prop::collection::vec(contribution(), 0..3),
+        prop::collection::vec(contribution(), 0..3),
+        prop::collection::vec(contribution(), 0..3),
+        prop::collection::vec(contribution(), 0..3),
         prop::collection::vec(contribution(), 0..3),
         prop::collection::vec(contribution(), 0..3),
         prop::collection::vec(contribution(), 0..3),
@@ -177,24 +183,47 @@ fn manifest() -> BoxedStrategy<DriverManifest> {
         prop::collection::hash_map(text(), prop::collection::vec(contribution(), 0..2), 0..2),
     )
         .prop_map(
-            |(navbar, dashboard, statusbar, routes, extra)| DriverManifest {
-                name: "m".into(),
-                title: "M".into(),
-                icon: None,
-                version: "0".into(),
-                verbs: vec!["serve".into()],
-                capabilities: vec![],
-                contributes: Contributes {
+            |(
+                navbar,
+                dashboard,
+                statusbar,
+                routes,
+                sidebar,
+                header_actions,
+                notifications,
+                jobs,
+                extra,
+            )| {
+                Contributes {
                     navbar,
                     dashboard,
                     statusbar,
                     routes,
+                    sidebar,
+                    header_actions,
+                    notifications,
+                    jobs,
                     extra: extra.into_iter().collect(),
-                },
-                views: vec![],
-                renderers: vec![],
+                }
             },
         )
+        .boxed()
+}
+
+fn manifest() -> BoxedStrategy<DriverManifest> {
+    contributes()
+        .prop_map(|contributes| DriverManifest {
+            name: "m".into(),
+            title: "M".into(),
+            icon: None,
+            version: "0".into(),
+            verbs: vec!["serve".into()],
+            capabilities: vec![],
+            deps: None,
+            contributes,
+            views: vec![],
+            renderers: vec![],
+        })
         .boxed()
 }
 
@@ -337,6 +366,10 @@ proptest! {
         check(&a.dashboard);
         check(&a.statusbar);
         check(&a.routes);
+        check(&a.sidebar);
+        check(&a.header_actions);
+        check(&a.notifications);
+        check(&a.jobs);
         for entries in a.extra.values() {
             check(entries);
         }
@@ -346,14 +379,83 @@ proptest! {
                 + m.contributes.dashboard.len()
                 + m.contributes.statusbar.len()
                 + m.contributes.routes.len()
+                + m.contributes.sidebar.len()
+                + m.contributes.header_actions.len()
+                + m.contributes.notifications.len()
+                + m.contributes.jobs.len()
                 + m.contributes.extra.values().map(Vec::len).sum::<usize>()
         }).sum();
         let total_out = a.navbar.len()
             + a.dashboard.len()
             + a.statusbar.len()
             + a.routes.len()
+            + a.sidebar.len()
+            + a.header_actions.len()
+            + a.notifications.len()
+            + a.jobs.len()
             + a.extra.values().map(Vec::len).sum::<usize>();
         prop_assert_eq!(total_in, total_out);
+    }
+
+    /// order_drivers is deterministic; on success it emits each
+    /// unique kind exactly once with every dep edge satisfied; on
+    /// failure the error is a *valid* Missing or Cycle.
+    #[test]
+    fn order_drivers_topological(ds in prop::collection::vec(dep_driver(), 1..6)) {
+        let refs: Vec<(&str, Option<&DriverDeps>)> = ds
+            .iter()
+            .map(|(k, d)| (k.as_str(), Some(d)))
+            .collect();
+        let a = order_drivers(refs.iter().copied());
+        let b = order_drivers(refs.iter().copied());
+        prop_assert_eq!(&a, &b, "order must be deterministic");
+
+        // order() dedups by kind, first occurrence wins — mirror it.
+        let mut first: HashMap<&str, &DriverDeps> = HashMap::new();
+        for (k, d) in &ds {
+            first.entry(k.as_str()).or_insert(d);
+        }
+        let kinds: BTreeSet<&str> = first.keys().copied().collect();
+
+        match &a {
+            Ok(order) => {
+                // A permutation of the unique kinds.
+                let mut got = order.clone();
+                got.sort();
+                let mut want: Vec<String> =
+                    kinds.iter().map(|s| s.to_string()).collect();
+                want.sort();
+                prop_assert_eq!(got, want);
+                let pos: HashMap<&str, usize> = order
+                    .iter()
+                    .enumerate()
+                    .map(|(i, k)| (k.as_str(), i))
+                    .collect();
+                for (kind, deps) in &first {
+                    for dep in deps.requires.iter().chain(&deps.optional) {
+                        if kinds.contains(dep.as_str()) {
+                            prop_assert!(
+                                pos[dep.as_str()] < pos[*kind],
+                                "dep {dep} must precede {kind}"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(DepsError::Missing { driver, dep }) => {
+                // The reported missing dep is real: `driver` requires
+                // it and no input kind matches.
+                let d = first[driver.as_str()];
+                prop_assert!(d.requires.contains(dep));
+                prop_assert!(!kinds.contains(dep.as_str()));
+            }
+            Err(DepsError::Cycle { drivers }) => {
+                prop_assert!(!drivers.is_empty());
+                for k in drivers {
+                    prop_assert!(kinds.contains(k.as_str()));
+                }
+            }
+        }
     }
 
     /// RendererRegistry: deterministic, entries sorted by id, and a
@@ -432,6 +534,24 @@ fn cache_op() -> BoxedStrategy<Op> {
     .boxed()
 }
 
+/// `(kind, deps)` pairs for order_drivers — kinds from a small
+/// alphabet (duplicates exercise first-wins dedup), dep names drawn
+/// from the same alphabet plus an always-absent "ghost".
+fn dep_driver() -> BoxedStrategy<(String, DriverDeps)> {
+    let kind = || prop::sample::select(vec!["a", "b", "c", "d"]).prop_map(str::to_string);
+    let dep_name =
+        || prop::sample::select(vec!["a", "b", "c", "d", "ghost"]).prop_map(str::to_string);
+    (
+        kind(),
+        (
+            prop::collection::vec(dep_name(), 0..3),
+            prop::collection::vec(dep_name(), 0..3),
+        )
+            .prop_map(|(requires, optional)| DriverDeps { requires, optional }),
+    )
+        .boxed()
+}
+
 fn renderer_manifest() -> BoxedStrategy<DriverManifest> {
     (
         text(),
@@ -447,6 +567,7 @@ fn renderer_manifest() -> BoxedStrategy<DriverManifest> {
             version: "0".into(),
             verbs: vec!["serve".into()],
             capabilities: vec![],
+            deps: None,
             contributes: Contributes::default(),
             views: vec![],
             renderers: vec![RendererDecl {

@@ -48,6 +48,10 @@ pub struct DriverManifest {
     /// roles (`"pavo"`, `"config"`, `"chrome"`).
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Driver dependency declarations — which other drivers this one
+    /// expects (or optionally uses). See [`DriverDeps`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps: Option<DriverDeps>,
     /// Contribution slots — where this driver's entries land in the
     /// composed chrome. See [`Contributes`].
     #[serde(default)]
@@ -62,6 +66,40 @@ pub struct DriverManifest {
     /// views (pure renderer plugin) or alongside views.
     #[serde(default)]
     pub renderers: Vec<RendererDecl>,
+}
+
+/// Driver dependency declarations — the ordering half of the plugin
+/// contract. Names are driver names: the `<type>` in
+/// `tamias-driver-<type>` (and `DriverManifest::name`).
+///
+/// Semantics mirror product `requiredDeps`/`optionalDeps`:
+///
+/// - `requires` — drivers that must be present and healthy for this
+///   driver to function. A missing required dep is a **discovery
+///   error**: the host refuses (or quarantines) the driver rather
+///   than half-rendering it.
+/// - `optional` — drivers whose absence merely degrades features.
+///   Missing optional deps never block discovery; the driver/host
+///   falls back gracefully.
+///
+/// Ordering (topological sort over the dep graph) is a host concern —
+/// a later phase; v1 only carries the declaration.
+///
+/// Wire shape:
+///
+/// ```json
+/// { "requires": ["config"], "optional": ["myco"] }
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DriverDeps {
+    /// Driver names this driver cannot function without — absence is
+    /// a discovery error.
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// Driver names this driver uses when present — absence degrades
+    /// gracefully.
+    #[serde(default)]
+    pub optional: Vec<String>,
 }
 
 /// One view-kind renderer a driver ships — the manifest half of the
@@ -155,8 +193,9 @@ pub struct WebSurface {
 /// view drivers fill slots. pavo merges contributions across drivers,
 /// resolving conflicts by driver priority.
 ///
-/// The four built-in slots are `navbar`, `dashboard`, `statusbar`,
-/// and `routes`. Unknown slots are preserved via [`Contributes::extra`]
+/// The built-in slots are `navbar`, `dashboard`, `statusbar`,
+/// `routes`, `sidebar`, `headerActions`, `notifications`, and
+/// `jobs`. Unknown slots are preserved via [`Contributes::extra`]
 /// so newer drivers degrade gracefully on older hosts.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Contributes {
@@ -175,6 +214,28 @@ pub struct Contributes {
     /// settings page. Each becomes a navigable URL on the web host.
     #[serde(default)]
     pub routes: Vec<Contribution>,
+    /// Entries for a left sidebar shell — grouped nav entries hosts
+    /// may cluster by `group`-like semantics later. Same
+    /// [`Contribution`] shape as the other slots: `route` navigates,
+    /// `priority` orders, `icon` decorates.
+    #[serde(default)]
+    pub sidebar: Vec<Contribution>,
+    /// Top-bar actions — buttons/icons in the header that open a
+    /// popover or panel. `route` points at the view the host renders
+    /// inside that surface.
+    #[serde(default, rename = "headerActions")]
+    pub header_actions: Vec<Contribution>,
+    /// Marks the driver as a notification provider. Entries are
+    /// display metadata (label, icon, ordering); the notification
+    /// *data* flows through the `notifications` wire op as
+    /// [`crate::platform::NotificationItem`]s.
+    #[serde(default)]
+    pub notifications: Vec<Contribution>,
+    /// Marks the driver as a job/queue feed provider. Same pattern
+    /// as `notifications`: entries are display metadata, data comes
+    /// from the `jobs` wire op as [`crate::platform::JobItem`]s.
+    #[serde(default)]
+    pub jobs: Vec<Contribution>,
     /// Forward-compat escape hatch: any slot name not listed above
     /// round-trips untouched. Renderers ignore slots they don't know.
     #[serde(flatten)]
@@ -244,6 +305,15 @@ pub struct QueryBinding {
     /// Wire op to invoke on the driver's `serve` (typically `"query"`,
     /// with the real product op carried in `params`).
     pub op: String,
+    /// Optional target driver — when set, the binding is a
+    /// **cross-driver** query: the host resolves `driver` (a driver
+    /// name, the `<type>` in `tamias-driver-<type>`) and issues the
+    /// op against *that* driver's `serve` instead of the view's own.
+    /// This is the data half of the cross-driver query contract;
+    /// host-side resolution/ordering is a later phase — v1 hosts may
+    /// ignore the field and treat the binding as local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
     /// Static params merged into every invocation of this binding.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub params: Map<String, Value>,

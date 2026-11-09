@@ -20,6 +20,7 @@ path = "src/main.rs"
 pavo-protocol.workspace = true
 pavo-core.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

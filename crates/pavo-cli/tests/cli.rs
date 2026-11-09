@@ -12,7 +12,7 @@ use std::process::{Command, Output};
 /// (graph). Pure sh builtins so it runs with a bare PATH.
 const DEMO: &str = r#"#!/bin/sh
 if [ "$1" = manifest ]; then
-  printf '%s\n' '{"name":"demo","title":"Demo Driver","version":"1.2.3","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{"navbar":[{"id":"nav","title":"Demo Nav","route":"/demo/board","priority":5}],"statusbar":[{"id":"st","title":"Demo status","route":"/demo/board"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","description":"The board","queries":[{"name":"items","op":"query"},{"name":"counts","op":"query"}],"root":{"kind":"column","title":"Board","children":[{"kind":"kv","query":"counts","pairs":[]},{"kind":"table","title":"Items","query":"items","columns":[{"key":"0","title":"ID"},{"key":"1","title":"Title"},{"key":"2","title":"Status"}],"rows":[]},{"kind":"markdown","text":"footer note"}]}},{"id":"deps","title":"Deps","route":"/demo/deps","queries":[],"root":{"kind":"graph","nodes":[{"id":"a","label":"Alpha"},{"id":"b","label":"Beta"},{"id":"c","label":"Gamma"}],"edges":[{"from":"a","to":"b","label":"uses"},{"from":"b","to":"c"}]}}]}'
+  printf '%s\n' '{"name":"demo","title":"Demo Driver","version":"1.2.3","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{"navbar":[{"id":"nav","title":"Demo Nav","route":"/demo/board","priority":5}],"statusbar":[{"id":"st","title":"Demo status","route":"/demo/board"}],"sidebar":[{"id":"side","title":"Side","route":"/demo/side"}],"headerActions":[{"id":"act","title":"Act","route":"/demo/board"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}],"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","description":"The board","queries":[{"name":"items","op":"query"},{"name":"counts","op":"query"}],"root":{"kind":"column","title":"Board","children":[{"kind":"kv","query":"counts","pairs":[]},{"kind":"table","title":"Items","query":"items","columns":[{"key":"0","title":"ID"},{"key":"1","title":"Title"},{"key":"2","title":"Status"}],"rows":[]},{"kind":"markdown","text":"footer note"}]}},{"id":"deps","title":"Deps","route":"/demo/deps","queries":[],"root":{"kind":"graph","nodes":[{"id":"a","label":"Alpha"},{"id":"b","label":"Beta"},{"id":"c","label":"Gamma"}],"edges":[{"from":"a","to":"b","label":"uses"},{"from":"b","to":"c"}]}}]}'
   exit 0
 fi
 if [ "$1" = serve ]; then
@@ -28,8 +28,12 @@ if [ "$1" = serve ]; then
         printf '%s\n' '{"ok":false,"error":"unknown view"}';;
       *'"op":"query"'*)
         printf '%s\n' '{"ok":true,"result":{"query":"items","data":[["T-1","Alpha","done"],["T-2","Beta","wip"]]}}';;
+      *'"op":"jobs"'*)
+        printf '%s\n' '{"ok":true,"result":[{"id":"j1","title":"Build","status":"running","detail":"step 2/5"}]}';;
+      *'"op":"notifications"'*)
+        printf '%s\n' '{"ok":true,"result":[{"id":"n1","title":"Heads up","severity":"warning","read":false}]}';;
       *'"op":"manifest"'*)
-        printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo Driver","version":"1.2.3","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}';;
+        printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo Driver","version":"1.2.3","verbs":["serve"],"capabilities":["pavo"],"contributes":{"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}';;
     esac
   done
   exit 0
@@ -178,6 +182,44 @@ fn chrome_merges_contributions() {
     let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
     assert_eq!(v["navbar"][0]["id"], "demo:nav");
     assert_eq!(v["statusbar"][0]["id"], "demo:st");
+    assert_eq!(v["sidebar"][0]["id"], "demo:side");
+    assert_eq!(v["headerActions"][0]["id"], "demo:act");
+    assert_eq!(v["notifications"][0]["id"], "demo:ntf");
+    assert_eq!(v["jobs"][0]["id"], "demo:job");
+}
+
+#[test]
+fn jobs_and_notifications_feeds() {
+    let fx = fixture();
+
+    let o = pavo(&fx, &["jobs"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("j1"), "{out}");
+    assert!(out.contains("Build"), "{out}");
+    assert!(out.contains("running"), "{out}");
+    assert!(out.contains("demo"), "{out}");
+
+    let o = pavo(&fx, &["jobs", "--json"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v[0]["id"], "j1");
+    assert_eq!(v[0]["driver"], "demo");
+    assert_eq!(v[0]["driver_title"], "Demo Driver");
+    assert_eq!(v[0]["status"], "running");
+
+    let o = pavo(&fx, &["notifications"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("n1"), "{out}");
+    assert!(out.contains("unread"), "{out}");
+
+    let o = pavo(&fx, &["notifications", "--json"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v[0]["id"], "n1");
+    assert_eq!(v[0]["severity"], "warning");
+    assert_eq!(v[0]["read"], false);
 }
 
 #[test]
@@ -376,7 +418,15 @@ fn manifest_and_schema_self_description() {
     assert_eq!(v["name"], "pavo");
     let verbs = v["verbs"].as_array().unwrap();
     for verb in [
-        "drivers", "views", "chrome", "view", "query", "manifest", "schema",
+        "drivers",
+        "views",
+        "chrome",
+        "view",
+        "query",
+        "jobs",
+        "notifications",
+        "manifest",
+        "schema",
     ] {
         assert!(verbs.iter().any(|x| x == verb), "missing verb {verb}");
     }

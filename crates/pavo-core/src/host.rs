@@ -10,9 +10,22 @@
 //!   host can show — namespaced `<driver>:<view>` ids included.
 //! - [`Host::resolve_view`] turns a deep link (`"myco:board"`, or a
 //!   bare `"myco"` for the driver's first view) into a
-//!   [`ViewResult`] by spawning/using that driver's `serve` client.
+//!   [`ViewResult`] by spawning/using that driver's `serve` client —
+//!   including **cross-driver query bindings** (`QueryBinding.driver`),
+//!   which the host resolves against the named driver's `serve`.
 //! - [`Host::query`] / [`Host::client`] are the escape hatches for
 //!   view-model ops and form submits.
+//! - [`Host::jobs`] / [`Host::notifications`] fan the platform-feed
+//!   ops out to every provider driver (manifests declaring the
+//!   matching `contributes` slot).
+//!
+//! Drivers are kept in **dependency order** ([`crate::deps`]): a
+//! driver's `deps.requires`/`deps.optional` sort it after the drivers
+//! it names. Drivers whose manifests arrive lazily are unordered
+//! until fetched — their `requires` are validated on first
+//! [`Host::manifest`] call, and offenders are quarantined: they stay
+//! in [`Host::drivers`] but every manifest/view/feed access surfaces
+//! the [`PavoError::Deps`] error.
 //!
 //! View results are cached in a [`TtlCache`] (default 10s,
 //! [`Host::with_view_cache_ttl`]) keyed by `driver:view` + canonical
@@ -39,11 +52,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pavo_protocol::wire::{QueryResult, SubmitResult, ViewResult, ViewSummary};
-use pavo_protocol::{DriverManifest, RenderModel};
-use serde_json::Value;
+use pavo_protocol::{
+    DriverDeps, DriverManifest, JobItem, NotificationItem, QueryBinding, RenderModel, Request,
+};
+use serde_json::{json, Value};
 
 use crate::cache::TtlCache;
 use crate::client::{ClientConfig, DriverClient};
+use crate::deps::{self, DepsError};
 use crate::discovery::{self, DiscoveryOptions, DriverInfo};
 use crate::error::PavoError;
 use crate::merge::{merge_chrome, Chrome};
@@ -68,6 +84,10 @@ pub struct Host {
     /// whose `manifest` probe didn't answer eagerly (those stay on
     /// [`DriverInfo::manifest`]).
     manifest_cache: Mutex<HashMap<String, DriverManifest>>,
+    /// Drivers quarantined by dep validation at construction —
+    /// kind → the [`DepsError`] every manifest/view/feed access for
+    /// that driver surfaces. See [`crate::deps`].
+    dep_failures: HashMap<String, DepsError>,
     client_config: ClientConfig,
     view_cache: TtlCache<ViewResult>,
 }
@@ -89,6 +109,20 @@ pub struct ResolvedView {
     pub namespaced: String,
     /// The `view` op's result — spec tree + query data.
     pub result: ViewResult,
+}
+
+/// One platform-feed item plus the driver that produced it — the
+/// attribution `pavo_protocol::platform` item types deliberately
+/// leave to the host ("the host knows which driver produced an
+/// item").
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeedEntry<T> {
+    /// Driver kind that serves the item.
+    pub driver: String,
+    /// Driver display title (manifest `title`).
+    pub driver_title: String,
+    /// The feed item itself.
+    pub item: T,
 }
 
 /// One row in [`Host::list_views`] — a view a driver offers.
@@ -155,12 +189,42 @@ impl Host {
 
     /// Build a host from an explicit driver list — for tests and
     /// embedders that did their own discovery.
+    ///
+    /// Drivers are reordered into dependency order (see
+    /// [`crate::deps`]) using the manifests discovery already fetched;
+    /// drivers with lazy manifests sort unconstrained and get their
+    /// `requires` validated on first [`Host::manifest`] fetch.
+    /// Dep-graph failures don't fail construction — the offending
+    /// drivers are quarantined via [`Host::manifest`] errors instead.
     #[must_use]
-    pub fn from_drivers(drivers: Vec<DriverInfo>) -> Self {
+    pub fn from_drivers(mut drivers: Vec<DriverInfo>) -> Self {
+        let dep_input: Vec<(&str, Option<&DriverDeps>)> = drivers
+            .iter()
+            .map(|d| {
+                (
+                    d.kind.as_str(),
+                    d.manifest.as_ref().and_then(|m| m.deps.as_ref()),
+                )
+            })
+            .collect();
+        let mut dep_failures = HashMap::new();
+        match deps::order(dep_input) {
+            Ok(order) => {
+                let pos: HashMap<String, usize> =
+                    order.into_iter().enumerate().map(|(i, k)| (k, i)).collect();
+                drivers.sort_by_key(|d| pos.get(&d.kind).copied().unwrap_or(usize::MAX));
+            }
+            Err(e) => {
+                for offender in e.offenders() {
+                    dep_failures.insert(offender, e.clone());
+                }
+            }
+        }
         Self {
             drivers,
             clients: Mutex::new(HashMap::new()),
             manifest_cache: Mutex::new(HashMap::new()),
+            dep_failures,
             client_config: ClientConfig::default(),
             view_cache: TtlCache::new(DEFAULT_VIEW_CACHE_TTL),
         }
@@ -181,7 +245,10 @@ impl Host {
         self
     }
 
-    /// The discovered drivers, sorted by kind.
+    /// The discovered drivers in dependency order — drivers sort
+    /// after the deps their manifests declare (name ascending as the
+    /// tie-break). Dep-quarantined drivers stay listed; they error on
+    /// use instead.
     #[must_use]
     pub fn drivers(&self) -> &[DriverInfo] {
         &self.drivers
@@ -206,6 +273,11 @@ impl Host {
             .iter()
             .find(|d| d.kind == kind)
             .ok_or_else(|| PavoError::UnknownDriver(kind.to_string()))?;
+        // Dep-quarantined drivers fail loudly here — every consumer
+        // (chrome, views, feeds, resolve) goes through manifest().
+        if let Some(e) = self.dep_failures.get(kind) {
+            return Err(PavoError::Deps(e.clone()));
+        }
         if let Some(manifest) = &info.manifest {
             return Ok(manifest.clone());
         }
@@ -221,6 +293,9 @@ impl Host {
         // Two threads may race the fetch — both answer correctly and
         // the last insert wins; the wire op is idempotent.
         let manifest = self.with_client(kind, DriverClient::manifest)?;
+        // Eager manifests were dep-validated at construction; lazy
+        // ones prove their `requires` now that we can see them.
+        self.check_requires(kind, &manifest)?;
         self.manifest_cache
             .lock()
             .map_err(|_| poisoned("manifest cache"))?
@@ -248,10 +323,41 @@ impl Host {
             .iter()
             .find(|d| d.kind == kind)
             .ok_or_else(|| PavoError::UnknownDriver(kind.to_string()))?;
+        // Dep-quarantined drivers never spawn — every wire op goes
+        // through here.
+        if let Some(e) = self.dep_failures.get(kind) {
+            return Err(PavoError::Deps(e.clone()));
+        }
         let client = DriverClient::spawn(info.path.clone(), self.client_config.clone())?;
         let client = Arc::new(Mutex::new(client));
         map.insert(kind.to_string(), Arc::clone(&client));
         Ok(client)
+    }
+
+    /// Validate a lazily-fetched manifest's `deps.requires` against
+    /// the discovered driver set — the same check
+    /// [`crate::deps::order`] ran at construction for eager manifests.
+    /// A self-requirement is a degenerate cycle.
+    fn check_requires(&self, kind: &str, manifest: &DriverManifest) -> Result<(), PavoError> {
+        let Some(deps) = &manifest.deps else {
+            return Ok(());
+        };
+        for req in &deps.requires {
+            if req == kind {
+                return Err(DepsError::Cycle {
+                    drivers: vec![kind.to_string()],
+                }
+                .into());
+            }
+            if !self.drivers.iter().any(|d| d.kind == *req) {
+                return Err(DepsError::Missing {
+                    driver: kind.to_string(),
+                    dep: req.clone(),
+                }
+                .into());
+            }
+        }
+        Ok(())
     }
 
     /// Run `f` against `kind`'s client under its per-driver lock —
@@ -386,7 +492,11 @@ impl Host {
             });
         }
 
-        let result = self.with_client(&driver, |client| client.view(&view_id, params))?;
+        // params are needed again below for cross-driver bindings —
+        // the view op consumes a clone.
+        let mut result =
+            self.with_client(&driver, |client| client.view(&view_id, params.clone()))?;
+        self.resolve_cross_driver_queries(&driver, &mut result, &params);
         self.view_cache.insert(key, result.clone());
         Ok(ResolvedView {
             driver,
@@ -394,6 +504,86 @@ impl Host {
             namespaced,
             result,
         })
+    }
+
+    /// Resolve `QueryBinding.driver` bindings — the cross-driver half
+    /// of the query contract. The view's own driver can't answer a
+    /// binding that names a *foreign* driver, so the host issues the
+    /// binding's `op` against that driver's `serve` and stores the
+    /// payload in `result.data[binding.name]` — the same map key
+    /// local bindings use, so renderers can't tell the difference.
+    ///
+    /// Params merge like local bindings: the binding's static `params`
+    /// under the caller's view `params` (caller wins — the convention
+    /// `pavo-driver-config` established). The wire `query` name
+    /// follows the rule drivers apply locally: `params["query"]` when
+    /// present, else the binding name.
+    ///
+    /// Failure policy is the wire's partial-degradation convention:
+    /// a foreign driver that errors, times out, or isn't discovered
+    /// puts `{"error": "…"}` in the binding's data slot rather than
+    /// failing the view (see [`ViewResult::data`]). A binding whose
+    /// `driver` equals the view's own driver is left untouched — the
+    /// driver resolves it (or doesn't) as a local binding.
+    fn resolve_cross_driver_queries(&self, owner: &str, result: &mut ViewResult, params: &Params) {
+        for binding in &result.view.queries {
+            let Some(foreign) = binding.driver.as_deref() else {
+                continue;
+            };
+            if foreign == owner {
+                continue;
+            }
+            let payload = self.foreign_query(foreign, binding, params);
+            result.data.insert(binding.name.clone(), payload);
+        }
+    }
+
+    /// Issue one cross-driver binding against `driver`'s `serve` and
+    /// return the payload for `result.data`. Never fails — errors
+    /// become `{"error": "…"}` payloads (see
+    /// [`Host::resolve_cross_driver_queries`]).
+    fn foreign_query(&self, driver: &str, binding: &QueryBinding, params: &Params) -> Value {
+        // Static params under caller params — caller wins, matching
+        // how drivers merge `view` params into bindings.
+        let mut merged = binding.params.clone();
+        for (k, v) in params {
+            merged.insert(k.clone(), v.clone());
+        }
+        // The wire `query` name: `params["query"]` carries the real
+        // product op (pavo-driver-config's convention); absent, the
+        // binding name is the query.
+        let query = binding
+            .params
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or(binding.name.as_str())
+            .to_string();
+        // Build the wire request from the binding's `op`. Only ops
+        // whose required fields we can synthesize parse — `query`
+        // gets `query`+`params`; anything else degrades to an error
+        // payload below.
+        let request = serde_json::from_value::<Request>(json!({
+            "op": binding.op,
+            "query": query,
+            "params": merged,
+        }));
+        let request = match request {
+            Ok(r) => r,
+            Err(e) => {
+                return json!({"error": format!("bad cross-driver binding op '{}': {e}", binding.op)});
+            }
+        };
+        // A `query` op answers QueryResult{query,data} — the data map
+        // wants the payload, not the envelope. Other ops (should a
+        // binding name one) pass their result through verbatim.
+        if matches!(request, Request::Query { .. }) {
+            self.with_client(driver, |client| client.request::<QueryResult>(&request))
+                .map(|qr| qr.data)
+                .unwrap_or_else(|e| json!({"error": e.to_string()}))
+        } else {
+            self.with_client(driver, |client| client.request::<Value>(&request))
+                .unwrap_or_else(|e| json!({"error": e.to_string()}))
+        }
     }
 
     /// `{"op":"query"}` passthrough — one named query/binding (or raw
@@ -578,6 +768,60 @@ impl Host {
             });
         }
         out
+    }
+
+    /// Fan a platform-feed op (`jobs`/`notifications`) out to every
+    /// provider driver. A driver is a provider when its manifest's
+    /// `contributes` declares the matching slot — the slot's entries
+    /// are display metadata; the items themselves come over the wire.
+    ///
+    /// Providers are queried in host (dependency) order; per-driver
+    /// failures — driver `ok:false`, timeout, spawn failure, an
+    /// unfetchable manifest — skip that driver rather than failing
+    /// the aggregation (one broken feed never takes down the rest).
+    fn feed<T>(
+        &self,
+        op: impl Fn(&mut DriverClient) -> Result<Vec<T>, PavoError>,
+        is_provider: impl Fn(&DriverManifest) -> bool,
+    ) -> Vec<FeedEntry<T>> {
+        let mut out = Vec::new();
+        for info in &self.drivers {
+            let Ok(manifest) = self.manifest(&info.kind) else {
+                continue;
+            };
+            if !is_provider(&manifest) {
+                continue;
+            }
+            let Ok(items) = self.with_client(&info.kind, |client| op(client)) else {
+                continue;
+            };
+            for item in items {
+                out.push(FeedEntry {
+                    driver: info.kind.clone(),
+                    driver_title: manifest.title.clone(),
+                    item,
+                });
+            }
+        }
+        out
+    }
+
+    /// `{"op":"jobs"}` across every job-feed provider — each
+    /// [`JobItem`] tagged with its source driver via [`FeedEntry`].
+    /// Per-driver failures are skipped, never fatal.
+    #[must_use]
+    pub fn jobs(&self) -> Vec<FeedEntry<JobItem>> {
+        self.feed(DriverClient::jobs, |m| !m.contributes.jobs.is_empty())
+    }
+
+    /// `{"op":"notifications"}` across every notification provider —
+    /// each [`NotificationItem`] tagged with its source driver.
+    /// Per-driver failures are skipped, never fatal.
+    #[must_use]
+    pub fn notifications(&self) -> Vec<FeedEntry<NotificationItem>> {
+        self.feed(DriverClient::notifications, |m| {
+            !m.contributes.notifications.is_empty()
+        })
     }
 
     /// Drop a cached view result — call after mutations that should
@@ -876,5 +1120,279 @@ exit 1
         assert!(host.list_views().is_empty());
         assert!(host.list_routes().is_empty());
         assert!(host.chrome().navbar.is_empty());
+    }
+
+    // ---------- deps ordering / quarantine ----------
+
+    /// Minimal eager-manifest driver; `extra_manifest` splices extra
+    /// top-level manifest fields (deps, contributes, …) into the JSON.
+    fn dep_driver(name: &str, extra_manifest: &str) -> String {
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{{"name":"{name}","title":"{name}","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"]{extra_manifest}}}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"views"'*) printf '%s\n' '{{"ok":true,"result":[]}}' ;;
+      *'"op":"manifest"'*) printf '%s\n' '{{"ok":true,"result":{{"name":"{name}","title":"{name}","version":"0.1.0","verbs":["serve"],"capabilities":["pavo"]}}}}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#
+        )
+    }
+
+    #[test]
+    fn deps_order_drivers_and_quarantine_missing_requires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        // "aaa" requires "zzz" — dep order beats name order.
+        write_driver(
+            &bin,
+            "tamias-driver-aaa",
+            &dep_driver(
+                "aaa",
+                r#","deps":{"requires":["zzz"],"optional":["ghost"]}"#,
+            ),
+        );
+        write_driver(&bin, "tamias-driver-zzz", &dep_driver("zzz", ""));
+        // "bad" requires a driver that isn't discovered.
+        write_driver(
+            &bin,
+            "tamias-driver-bad",
+            &dep_driver("bad", r#","deps":{"requires":["ghost"]}"#),
+        );
+        let host = Host::discover_with(opts(&bin, tmp.path()));
+
+        let kinds: Vec<&str> = host.drivers().iter().map(|d| d.kind.as_str()).collect();
+        // order() failed wholesale (bad's missing requires), so
+        // drivers keep discovery's name-sorted order — dep ordering
+        // is all-or-nothing per host.
+        assert_eq!(kinds, ["aaa", "bad", "zzz"]);
+
+        // The quarantined driver fails loudly everywhere.
+        assert!(matches!(host.manifest("bad"), Err(PavoError::Deps(_))));
+        assert!(host.chrome().extra.is_empty()); // bad contributes nothing
+        assert!(matches!(
+            host.resolve_view("bad", Params::new()),
+            Err(PavoError::Deps(_))
+        ));
+        assert!(matches!(
+            host.query("bad", "x", Params::new()),
+            Err(PavoError::Deps(_))
+        ));
+        // Healthy drivers are unaffected.
+        assert!(host.manifest("zzz").is_ok());
+        assert!(host.manifest("aaa").is_ok());
+    }
+
+    #[test]
+    fn deps_order_drivers_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        // "aaa" requires "zzz" and optionally uses "mmm" — dep order
+        // beats name order; optional-present also orders.
+        write_driver(
+            &bin,
+            "tamias-driver-aaa",
+            &dep_driver(
+                "aaa",
+                r#","deps":{"requires":["zzz"],"optional":["mmm","ghost"]}"#,
+            ),
+        );
+        write_driver(&bin, "tamias-driver-mmm", &dep_driver("mmm", ""));
+        write_driver(&bin, "tamias-driver-zzz", &dep_driver("zzz", ""));
+        let host = Host::discover_with(opts(&bin, tmp.path()));
+        let kinds: Vec<&str> = host.drivers().iter().map(|d| d.kind.as_str()).collect();
+        // zzz (required) and mmm (optional, present) both precede aaa;
+        // between the two deps, name order: mmm < zzz.
+        assert_eq!(kinds, ["mmm", "zzz", "aaa"]);
+    }
+
+    #[test]
+    fn dep_cycles_quarantine_all_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        write_driver(
+            &bin,
+            "tamias-driver-c1",
+            &dep_driver("c1", r#","deps":{"requires":["c2"]}"#),
+        );
+        write_driver(
+            &bin,
+            "tamias-driver-c2",
+            &dep_driver("c2", r#","deps":{"requires":["c1"]}"#),
+        );
+        write_driver(&bin, "tamias-driver-ok", &dep_driver("ok", ""));
+        let host = Host::discover_with(opts(&bin, tmp.path()));
+
+        for kind in ["c1", "c2"] {
+            match host.manifest(kind) {
+                Err(PavoError::Deps(e)) => {
+                    assert!(e.to_string().contains("cycle"), "{e}");
+                }
+                other => panic!("expected Deps error for {kind}, got {other:?}"),
+            }
+        }
+        assert!(host.manifest("ok").is_ok());
+    }
+
+    // ---------- cross-driver query bindings ----------
+
+    /// View driver `dvq`: one view whose queries bind locally and to
+    /// three foreign drivers — `cfg` (answers), `bad` (ok:false),
+    /// `ghost` (undiscovered).
+    const DVQ: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"dvq","title":"Dvq","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[{"id":"g","title":"G","route":"/dvq/g","queries":[{"name":"local","op":"query"},{"name":"ledger","op":"query","driver":"cfg","params":{"query":"status"}},{"name":"broken","op":"query","driver":"bad"},{"name":"ghost","op":"query","driver":"ghost"}],"root":{"kind":"kv","pairs":[]}}]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"g","title":"G","route":"/dvq/g","queries":["local","ledger","broken","ghost"]}]}' ;;
+      *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"g","title":"G","route":"/dvq/g","queries":[{"name":"local","op":"query"},{"name":"ledger","op":"query","driver":"cfg","params":{"query":"status"}},{"name":"broken","op":"query","driver":"bad"},{"name":"ghost","op":"query","driver":"ghost"}],"root":{"kind":"kv","pairs":[]}},"data":{"local":[1]}}}' ;;
+      *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"local","data":[9]}}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    /// Foreign driver `cfg` — answers `query` ops with a payload.
+    const CFG: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"cfg","title":"Cfg","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"status","data":{"ledger":"L1"}}}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[]}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    /// Foreign driver `bad` — every query answers ok:false.
+    const BADQ: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"bad","title":"Bad","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{},"views":[]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"query"'*) printf '%s\n' '{"ok":false,"error":"query unsupported"}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[]}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    #[test]
+    fn cross_driver_query_bindings_resolve_and_degrade() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        write_driver(&bin, "tamias-driver-dvq", DVQ);
+        write_driver(&bin, "tamias-driver-cfg", CFG);
+        write_driver(&bin, "tamias-driver-bad", BADQ);
+        let host = Host::discover_with(opts(&bin, tmp.path()));
+
+        let resolved = host.resolve_view("dvq:g", Params::new()).unwrap();
+        let data = &resolved.result.data;
+        // Local binding untouched (driver answered it).
+        assert_eq!(data["local"], serde_json::json!([1]));
+        // Foreign binding resolved via cfg's serve — the QueryResult
+        // envelope unwraps to its `data` payload.
+        assert_eq!(data["ledger"], serde_json::json!({"ledger": "L1"}));
+        // ok:false foreign driver → error payload, not a failed view.
+        assert!(data["broken"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("query unsupported"));
+        // Undiscovered foreign driver → error payload too.
+        assert!(data["ghost"]["error"].as_str().is_some());
+    }
+
+    // ---------- platform feeds (jobs / notifications) ----------
+
+    /// Feed provider `feed`: declares both slots, answers both ops.
+    const FEED: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"feed","title":"Feed","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{"jobs":[{"id":"j","title":"Jobs","route":"/feed/jobs"}],"notifications":[{"id":"n","title":"Notes","route":"/feed/n"}]},"views":[]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"jobs"'*) printf '%s\n' '{"ok":true,"result":[{"id":"j1","title":"Build","status":"running"}]}' ;;
+      *'"op":"notifications"'*) printf '%s\n' '{"ok":true,"result":[{"id":"n1","title":"Hi","severity":"info"}]}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[]}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    /// Feed provider `feedbad`: declares `jobs` but answers ok:false.
+    const FEEDBAD: &str = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+  printf '%s\n' '{"name":"feedbad","title":"FeedBad","version":"0.1.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{"jobs":[{"id":"j","title":"Jobs","route":"/fb/jobs"}]},"views":[]}'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"op":"jobs"'*) printf '%s\n' '{"ok":false,"error":"no jobs"}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[]}' ;;
+    esac
+  done
+  exit 0
+fi
+exit 1
+"#;
+
+    #[test]
+    fn jobs_and_notifications_fan_out_and_skip_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        write_driver(&bin, "tamias-driver-feed", FEED);
+        write_driver(&bin, "tamias-driver-feedbad", FEEDBAD);
+        let host = Host::discover_with(opts(&bin, tmp.path()));
+
+        // feedbad's ok:false is skipped; only feed's items arrive,
+        // tagged with driver attribution.
+        let jobs = host.jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].driver, "feed");
+        assert_eq!(jobs[0].driver_title, "Feed");
+        assert_eq!(jobs[0].item.id, "j1");
+        assert_eq!(jobs[0].item.status, "running");
+
+        // feedbad declares no notifications slot → not queried;
+        // feed's single item comes through.
+        let notes = host.notifications();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].driver, "feed");
+        assert_eq!(notes[0].item.id, "n1");
+        assert_eq!(notes[0].item.severity.as_deref(), Some("info"));
+
+        // The chrome merge sees the provider slots too.
+        let chrome = host.chrome();
+        assert_eq!(chrome.jobs.len(), 2); // feed:j + feedbad:j
+        assert_eq!(chrome.notifications.len(), 1);
     }
 }

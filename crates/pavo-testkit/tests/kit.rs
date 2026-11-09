@@ -30,6 +30,7 @@ fn spec(id: &str, queries: &[&str]) -> ViewSpec {
             .map(|name| QueryBinding {
                 name: name.to_string(),
                 op: "query".to_string(),
+                driver: None,
                 params: Default::default(),
             })
             .collect(),
@@ -108,6 +109,7 @@ fn non_pavo_manifest_is_detected() {
             version: "1".to_string(),
             verbs: vec!["manifest".to_string()],
             capabilities: vec![],
+            deps: None,
             contributes: Default::default(),
             views: vec![],
             renderers: vec![],

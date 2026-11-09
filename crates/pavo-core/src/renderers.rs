@@ -263,6 +263,7 @@ mod tests {
             version: "0".to_string(),
             verbs: vec!["serve".to_string()],
             capabilities: vec!["pavo".to_string()],
+            deps: None,
             contributes: Default::default(),
             views: vec![],
             renderers,

@@ -4,6 +4,7 @@ members = [
     "crates/pavo-cli",
     "crates/pavo-core",
     "crates/pavo-driver-config",
+    "crates/pavo-driver-kit",
     "crates/pavo-protocol",
     "crates/pavo-testkit",
     "crates/pavo-tui",

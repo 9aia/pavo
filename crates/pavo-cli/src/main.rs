@@ -8,7 +8,8 @@
 //! - `views [--driver <name>]` — every view as a `<driver>:<view>`
 //!   ref with title/route.
 //! - `chrome` — the merged contribution slots (navbar/dashboard/
-//!   statusbar/routes + forward-compat extras).
+//!   statusbar/routes/sidebar/headerActions/notifications/jobs +
+//!   forward-compat extras).
 //! - `view <driver>:<view> [--param k=v …] [--format …]` — resolve a
 //!   deep link and render it: `text` (default) summarizes the
 //!   ViewNode tree + bound data, `json` dumps the raw
@@ -19,6 +20,9 @@
 //!   `submit` wire op: send a form's field values to its driver and
 //!   print the `SubmitResult` (message/errors/data; `--json` dumps
 //!   the full payload including any updated view).
+//! - `jobs` / `notifications` — the aggregated platform feeds: every
+//!   provider driver's `jobs`/`notifications` wire op, tagged with
+//!   its driver (`--json` dumps the flattened rows).
 //! - `serve [--port N]` — the localhost HTTP bridge for the web host:
 //!   `/api/*` JSON endpoints over the same [`Host`] plus static
 //!   serving of the Nuxt build (`web/.output/public`). First stdout
@@ -79,7 +83,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show merged chrome contributions (navbar/dashboard/statusbar/routes).
+    /// Show merged chrome contributions (navbar/dashboard/statusbar/
+    /// routes/sidebar/headerActions/notifications/jobs + extras).
     Chrome {
         /// JSON output.
         #[arg(long)]
@@ -127,6 +132,21 @@ enum Command {
         #[arg(long = "param", value_name = "K=V")]
         params: Vec<String>,
         /// JSON output — dumps the full SubmitResult.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the aggregated job feed — every `contributes.jobs`
+    /// provider driver's `jobs` wire op, tagged with its driver.
+    Jobs {
+        /// JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the aggregated notification feed — every
+    /// `contributes.notifications` provider driver's `notifications`
+    /// wire op, tagged with its driver.
+    Notifications {
+        /// JSON output.
         #[arg(long)]
         json: bool,
     },
@@ -235,6 +255,8 @@ fn run(cli: Cli) -> Result<u8, Fail> {
             params,
             json,
         }) => cmd_submit(&target, form.as_deref(), &params, json).map(|_| 0),
+        Some(Command::Jobs { json }) => cmd_jobs(json).map(|_| 0),
+        Some(Command::Notifications { json }) => cmd_notifications(json).map(|_| 0),
         Some(Command::Serve { port }) => serve::run(port)
             .map(|_| 0)
             .map_err(|e| Fail::err(format!("serve: {e}"))),
@@ -247,7 +269,8 @@ fn run(cli: Cli) -> Result<u8, Fail> {
                     "version": env!("CARGO_PKG_VERSION"),
                     "verbs": [
                         "drivers", "views", "chrome", "view", "query",
-                        "submit", "serve", "open", "manifest", "schema"
+                        "submit", "jobs", "notifications", "serve",
+                        "open", "manifest", "schema"
                     ],
                 })
             );
@@ -282,7 +305,8 @@ fn schema_doc() -> Value {
                 "flags": {"--json": "bool"}
             },
             "chrome": {
-                "summary": "merged contribution slots (navbar/dashboard/statusbar/routes)",
+                "summary": "merged contribution slots (navbar/dashboard/statusbar/routes/\
+                            sidebar/headerActions/notifications/jobs + extras)",
                 "flags": {"--json": "bool"}
             },
             "view": {
@@ -300,6 +324,14 @@ fn schema_doc() -> Value {
                 "args": ["<driver>:<view>", "--form <id>", "--param K=V (repeatable)"],
                 "flags": {"--json": "bool — dump the full SubmitResult"}
             },
+            "jobs": {
+                "summary": "aggregated job feed (contributes.jobs providers' jobs op)",
+                "flags": {"--json": "bool"}
+            },
+            "notifications": {
+                "summary": "aggregated notification feed (contributes.notifications providers)",
+                "flags": {"--json": "bool"}
+            },
             "serve": {
                 "summary": "localhost HTTP bridge for the web host (api + static)",
                 "flags": {"--port": "u16 (0 = free port, printed on stdout)"}
@@ -312,7 +344,10 @@ fn schema_doc() -> Value {
             "manifest": {"summary": "print the pavo capability manifest (JSON)"},
             "schema": {"summary": "print this verb schema (JSON)"}
         },
-        "wire_ops": ["manifest", "views", "view", "query", "render", "submit"],
+        "wire_ops": [
+            "manifest", "views", "view", "query", "render", "submit",
+            "jobs", "notifications"
+        ],
         "exit_codes": {"0": "ok", "1": "view/driver error", "2": "usage"}
     })
 }
@@ -421,12 +456,21 @@ fn cmd_drivers_host(host: &mut Host, json: bool) -> Result<(), Fail> {
             continue;
         }
         let counts = &row["contributes"];
-        let contrib = ["navbar", "dashboard", "statusbar", "routes"]
-            .iter()
-            .filter(|slot| counts.get(**slot).and_then(Value::as_u64).unwrap_or(0) > 0)
-            .map(|slot| format!("{slot}:{}", counts[*slot].as_u64().unwrap_or(0)))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let contrib = [
+            "navbar",
+            "dashboard",
+            "statusbar",
+            "routes",
+            "sidebar",
+            "headerActions",
+            "notifications",
+            "jobs",
+        ]
+        .iter()
+        .filter(|slot| counts.get(**slot).and_then(Value::as_u64).unwrap_or(0) > 0)
+        .map(|slot| format!("{slot}:{}", counts[*slot].as_u64().unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(" ");
         println!(
             "{}  {}  v{}  views:{}  renderers:{}  {}",
             row["driver"].as_str().unwrap_or("?"),
@@ -444,8 +488,30 @@ fn cmd_drivers_host(host: &mut Host, json: bool) -> Result<(), Fail> {
     Ok(())
 }
 
+/// Serialize host feed entries (`jobs`/`notifications`) for `--json`
+/// output and the serve bridge's `/api/jobs` + `/api/notifications`:
+/// each item's fields flattened into one object with `driver` /
+/// `driver_title` attribution — the host fields win over any
+/// same-named item fields (including `extra` catch-all keys).
+pub(crate) fn feed_rows<T: serde::Serialize>(
+    entries: &[pavo_core::FeedEntry<T>],
+) -> Result<Vec<Value>, serde_json::Error> {
+    entries
+        .iter()
+        .map(|e| {
+            let mut v = serde_json::to_value(&e.item)?;
+            if let Value::Object(ref mut map) = v {
+                map.insert("driver".to_string(), json!(e.driver));
+                map.insert("driver_title".to_string(), json!(e.driver_title));
+            }
+            Ok(v)
+        })
+        .collect()
+}
+
 /// Per-slot contribution counts for the `drivers` summary (shared
-/// with `serve`'s `/api/drivers`).
+/// with `serve`'s `/api/drivers`). Slot keys use the wire spellings —
+/// `headerActions` is camelCase like the manifest field.
 pub(crate) fn contrib_counts(c: &pavo_protocol::Contributes) -> Value {
     let mut map = Map::new();
     for (name, entries) in [
@@ -453,6 +519,10 @@ pub(crate) fn contrib_counts(c: &pavo_protocol::Contributes) -> Value {
         ("dashboard", &c.dashboard),
         ("statusbar", &c.statusbar),
         ("routes", &c.routes),
+        ("sidebar", &c.sidebar),
+        ("headerActions", &c.header_actions),
+        ("notifications", &c.notifications),
+        ("jobs", &c.jobs),
     ] {
         map.insert(name.to_string(), json!(entries.len()));
     }
@@ -546,6 +616,11 @@ fn cmd_chrome_host(host: &mut Host, json: bool) -> Result<(), Fail> {
             "dashboard": slot(&chrome.dashboard),
             "statusbar": slot(&chrome.statusbar),
             "routes": slot(&chrome.routes),
+            "sidebar": slot(&chrome.sidebar),
+            // Wire spelling — matches `contributes.headerActions`.
+            "headerActions": slot(&chrome.header_actions),
+            "notifications": slot(&chrome.notifications),
+            "jobs": slot(&chrome.jobs),
             "extra": Value::Object(extra),
         });
         println!(
@@ -560,6 +635,10 @@ fn cmd_chrome_host(host: &mut Host, json: bool) -> Result<(), Fail> {
         ("dashboard", &chrome.dashboard),
         ("statusbar", &chrome.statusbar),
         ("routes", &chrome.routes),
+        ("sidebar", &chrome.sidebar),
+        ("headerActions", &chrome.header_actions),
+        ("notifications", &chrome.notifications),
+        ("jobs", &chrome.jobs),
     ] {
         println!("{name}:");
         if entries.is_empty() {
@@ -757,6 +836,70 @@ fn cmd_submit_host(
     Ok(())
 }
 
+fn cmd_jobs(json: bool) -> Result<(), Fail> {
+    let host = Host::discover();
+    cmd_jobs_host(&host, json)
+}
+
+/// [`cmd_jobs`] over an explicit host — split for tests.
+fn cmd_jobs_host(host: &Host, json: bool) -> Result<(), Fail> {
+    let entries = host.jobs();
+    if json {
+        let rows = feed_rows(&entries).map_err(|e| Fail::err(e.to_string()))?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).map_err(|e| Fail::err(e.to_string()))?
+        );
+        return Ok(());
+    }
+    if entries.is_empty() {
+        println!("no jobs");
+        return Ok(());
+    }
+    for e in &entries {
+        let j = &e.item;
+        let mut line = format!("{:<24} {:<28} {}", j.id, j.title, j.status);
+        if let Some(detail) = &j.detail {
+            line.push_str(&format!("  — {detail}"));
+        }
+        line.push_str(&format!("  ({})", e.driver));
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn cmd_notifications(json: bool) -> Result<(), Fail> {
+    let host = Host::discover();
+    cmd_notifications_host(&host, json)
+}
+
+/// [`cmd_notifications`] over an explicit host — split for tests.
+fn cmd_notifications_host(host: &Host, json: bool) -> Result<(), Fail> {
+    let entries = host.notifications();
+    if json {
+        let rows = feed_rows(&entries).map_err(|e| Fail::err(e.to_string()))?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).map_err(|e| Fail::err(e.to_string()))?
+        );
+        return Ok(());
+    }
+    if entries.is_empty() {
+        println!("no notifications");
+        return Ok(());
+    }
+    for e in &entries {
+        let n = &e.item;
+        let severity = n.severity.as_deref().unwrap_or("info");
+        let state = if n.read { "read" } else { "unread" };
+        println!(
+            "{:<24} {:<28} {:<8} {:<6} [{}]",
+            n.id, n.title, severity, state, e.driver
+        );
+    }
+    Ok(())
+}
+
 /// Parse repeated `--param k=v` args into a [`Params`] map. Values
 /// parse as JSON when possible (`k=42`, `k=true`, `k={…}`), else
 /// become strings. Missing `=` or an empty key is a usage error.
@@ -791,7 +934,7 @@ mod tests {
     /// Minimal sh fixture driver (`demo`) answering manifest + serve.
     const DEMO_DRIVER: &str = r#"#!/bin/sh
 if [ "$1" = manifest ]; then
-  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}],"contributes":{"navbar":[{"id":"nav","title":"Nav","route":"/demo/board"}],"extra":{"sidebar":[{"id":"side","title":"Side","route":"/x"}]}}}'
+  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}],"contributes":{"navbar":[{"id":"nav","title":"Nav","route":"/demo/board"}],"extra":{"sidebar":[{"id":"side","title":"Side","route":"/x"}]},"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]}}'
   exit 0
 fi
 if [ "$1" = serve ]; then
@@ -801,6 +944,8 @@ if [ "$1" = serve ]; then
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{"items":[1,2]}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
       *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
+      *'"op":"jobs"'*) printf '%s\n' '{"ok":true,"result":[{"id":"j1","title":"Build","status":"running"}]}' ;;
+      *'"op":"notifications"'*) printf '%s\n' '{"ok":true,"result":[{"id":"n1","title":"Heads up","severity":"info"}]}' ;;
       *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
     esac
   done
@@ -898,6 +1043,10 @@ exit 1
         cmd_views_host(&mut host, Some("ghost"), true).ok().unwrap();
         cmd_chrome_host(&mut host, false).ok().unwrap();
         cmd_chrome_host(&mut host, true).ok().unwrap();
+        cmd_jobs_host(&host, false).ok().unwrap();
+        cmd_jobs_host(&host, true).ok().unwrap();
+        cmd_notifications_host(&host, false).ok().unwrap();
+        cmd_notifications_host(&host, true).ok().unwrap();
     }
 
     #[test]
@@ -907,6 +1056,8 @@ exit 1
         cmd_drivers_host(&mut host, true).ok().unwrap();
         cmd_views_host(&mut host, None, false).ok().unwrap();
         cmd_chrome_host(&mut host, false).ok().unwrap();
+        cmd_jobs_host(&host, false).ok().unwrap();
+        cmd_notifications_host(&host, false).ok().unwrap();
         // Errors propagate as Fail.
         assert!(cmd_views_host(&mut host, Some("x"), false).is_ok()); // empty → "no views"
         assert!(cmd_view_host(&mut host, "ghost:v", Params::new(), "text").is_err());

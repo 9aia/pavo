@@ -1,7 +1,10 @@
 #![allow(clippy::unwrap_used)]
 //! Serde round-trips + fixtures for the whole wire contract.
 
-use pavo_protocol::manifest::{Contributes, Contribution, DriverManifest, ViewSpec};
+use pavo_protocol::manifest::{
+    Contributes, Contribution, DriverDeps, DriverManifest, QueryBinding, ViewSpec,
+};
+use pavo_protocol::platform::{JobItem, NotificationItem};
 use pavo_protocol::view_node::{
     Align, ColumnNode, EmbedNode, FormField, FormFieldKind, FormNode, GraphEdge, GraphNode,
     GraphNodeItem, KvNode, KvPair, MarkdownNode, NodeBase, PanelNode, RowNode, TableColumn,
@@ -183,6 +186,138 @@ fn contribution_priority_defaults() {
         serde_json::from_str(r#"{ "id": "d:e", "title": "T", "route": "/r" }"#).unwrap();
     assert_eq!(c.priority, 100);
     roundtrip(&c);
+}
+
+// ---------- platform slots, deps, cross-driver queries ----------
+
+#[test]
+fn contributes_platform_slots_roundtrip() {
+    // The four new first-class slots reuse the Contribution shape.
+    let c: Contributes = serde_json::from_str(
+        r#"{
+          "sidebar": [ { "id": "myco:nav", "title": "Myco", "route": "/myco/board" } ],
+          "headerActions": [ { "id": "myco:quick", "title": "Quick add", "route": "/myco/new" } ],
+          "notifications": [ { "id": "myco:notify", "title": "Notifications", "route": "/myco/inbox" } ],
+          "jobs": [ { "id": "myco:jobs", "title": "Jobs", "route": "/myco/jobs" } ]
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(c.sidebar.len(), 1);
+    assert_eq!(c.header_actions.len(), 1);
+    assert_eq!(c.notifications.len(), 1);
+    assert_eq!(c.jobs.len(), 1);
+    // `headerActions` serializes under its camelCase wire key.
+    let text = serde_json::to_string(&c).unwrap();
+    assert!(text.contains("\"headerActions\""), "{text}");
+    assert!(text.contains("\"sidebar\""), "{text}");
+    roundtrip(&c);
+
+    // Old manifests that kept these keys inside `extra`… — actually
+    // serde flatten now claims them, which is the intended upgrade:
+    // the typed fields win and parse identically.
+    let old: Contributes = serde_json::from_str(
+        r#"{ "jobs": [ { "id": "a:b", "title": "T", "route": "/x" } ],
+             "future_slot": [ { "id": "a:c", "title": "U", "route": "/y" } ] }"#,
+    )
+    .unwrap();
+    assert_eq!(old.jobs.len(), 1);
+    assert_eq!(old.extra["future_slot"].len(), 1);
+}
+
+#[test]
+fn manifest_deps_roundtrip() {
+    let m: DriverManifest = serde_json::from_str(
+        r#"{ "name": "myco", "title": "Myco", "version": "1",
+             "deps": { "requires": ["config"], "optional": ["kuda"] } }"#,
+    )
+    .unwrap();
+    let deps = m.deps.as_ref().unwrap();
+    assert_eq!(deps.requires, vec!["config".to_string()]);
+    assert_eq!(deps.optional, vec!["kuda".to_string()]);
+    // `deps` absent → None and absent on the wire (skip_serializing_if).
+    let m2: DriverManifest =
+        serde_json::from_str(r#"{ "name": "x", "title": "X", "version": "0" }"#).unwrap();
+    assert!(m2.deps.is_none());
+    assert!(!serde_json::to_string(&m2).unwrap().contains("deps"));
+    // Sparse deps object defaults both lists.
+    let d: DriverDeps = serde_json::from_str(r#"{ "requires": ["a"] }"#).unwrap();
+    assert!(d.optional.is_empty());
+    roundtrip(&m);
+    roundtrip(&d);
+}
+
+#[test]
+fn query_binding_driver_roundtrip() {
+    // Cross-driver binding: `driver` names the target driver's serve.
+    let q: QueryBinding = serde_json::from_str(
+        r#"{ "name": "items", "op": "query", "driver": "myco",
+             "params": { "product_op": "list" } }"#,
+    )
+    .unwrap();
+    assert_eq!(q.driver.as_deref(), Some("myco"));
+    let text = serde_json::to_string(&q).unwrap();
+    assert!(text.contains("\"driver\":\"myco\""), "{text}");
+    roundtrip(&q);
+    // Absent → None, omitted on the wire.
+    let q2: QueryBinding = serde_json::from_str(r#"{ "name": "n", "op": "query" }"#).unwrap();
+    assert!(q2.driver.is_none());
+    assert!(!serde_json::to_string(&q2).unwrap().contains("driver"));
+}
+
+// ---------- platform feeds (jobs / notifications ops) ----------
+
+#[test]
+fn platform_feed_requests_parse() {
+    for (line, name) in [
+        (r#"{"op":"jobs"}"#, "jobs"),
+        (r#"{"op":"notifications"}"#, "notifications"),
+    ] {
+        let req = parse_request(line).unwrap();
+        let back = serde_json::to_string(&req).unwrap();
+        assert_eq!(back, line, "{name} wire shape drifted");
+        assert!(matches!(
+            parse_request(&back).unwrap(),
+            Request::Jobs | Request::Notifications
+        ));
+    }
+}
+
+#[test]
+fn job_and_notification_items_roundtrip() {
+    let job = JobItem {
+        id: "build-42".into(),
+        title: "Build pavo".into(),
+        status: "running".into(),
+        detail: Some("step 3/7".into()),
+        route: Some("/myco/job/build-42".into()),
+        updated_at: Some("2026-01-02T15:04:05Z".into()),
+        extra: Default::default(),
+    };
+    roundtrip(&job);
+    // Sparse shape parses; unknown fields land in `extra`.
+    let j2: JobItem =
+        serde_json::from_str(r#"{ "id": "j", "title": "T", "status": "queued", "progress": 40 }"#)
+            .unwrap();
+    assert_eq!(j2.extra["progress"], json!(40));
+
+    let note = NotificationItem {
+        id: "n-7".into(),
+        title: "Build failed".into(),
+        body: Some("cargo xtask check exited 1".into()),
+        severity: Some("error".into()),
+        route: Some("/myco/job/build-42".into()),
+        created_at: Some("2026-01-02T15:04:05Z".into()),
+        read: false,
+        extra: Default::default(),
+    };
+    roundtrip(&note);
+    let n2: NotificationItem =
+        serde_json::from_str(r#"{ "id": "n", "title": "Hi", "read": true, "x": 1 }"#).unwrap();
+    assert!(n2.read);
+    assert_eq!(n2.extra["x"], json!(1));
+    // Response envelopes carrying feed results round-trip too.
+    roundtrip(&Response::ok_typed(&vec![job]));
+    roundtrip(&Response::ok_typed(&vec![note]));
 }
 
 // ---------- view node ----------

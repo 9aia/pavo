@@ -175,8 +175,17 @@ pub fn build_view_with_plugins(
 
 /// Build the dashboard pseudo-view: every view every driver offers,
 /// plus the merged chrome contributions (dashboard/navbar/statusbar/
-/// routes), grouped under dim section headers. Every entry is
-/// selectable — the app resolves view targets on Enter.
+/// routes/sidebar/headerActions/notifications/jobs), grouped under
+/// dim section headers. Every entry is selectable — the app resolves
+/// view targets on Enter.
+///
+/// The platform slots (`sidebar`, `header_actions`, `notifications`,
+/// `jobs`) get no dedicated TUI chrome — there is no sidebar pane, no
+/// header action bar, and the feed ops (`host.jobs()` /
+/// `host.notifications()`) aren't fetched on the worker — so they
+/// render here as contribution listings like every other slot. Feed
+/// *data* lives behind the `pavo jobs`/`pavo notifications` CLI verbs
+/// (and `/api/jobs`, `/api/notifications` on the web bridge).
 #[must_use]
 pub fn build_dashboard(
     views: &[ViewEntry],
@@ -221,6 +230,17 @@ pub fn build_dashboard(
     section(&mut b, "navbar", &chrome.navbar, route_target);
     section(&mut b, "statusbar", &chrome.statusbar, route_target);
     section(&mut b, "routes", &chrome.routes, route_target);
+    section(&mut b, "sidebar", &chrome.sidebar, route_target);
+    section(
+        &mut b,
+        "header actions",
+        &chrome.header_actions,
+        route_target,
+    );
+    // Provider *metadata* only — the feeds themselves are wire ops
+    // the TUI worker doesn't call (see the fn docs).
+    section(&mut b, "notifications", &chrome.notifications, route_target);
+    section(&mut b, "jobs", &chrome.jobs, route_target);
     b.finish()
 }
 
@@ -1923,6 +1943,56 @@ mod tests {
         // view rows resolve via their Selection title
         let first = m.rows.iter().find(|r| r.sel.is_some()).unwrap();
         assert_eq!(m.selections[first.sel.unwrap()].title, "demo:board");
+    }
+
+    #[test]
+    fn dashboard_lists_platform_slot_contributions() {
+        use pavo_core::merge::SlotEntry;
+        use pavo_protocol::manifest::Contribution;
+
+        let entry = |id: &str, title: &str| SlotEntry {
+            driver: "demo".to_string(),
+            driver_title: "Demo".to_string(),
+            contribution: Contribution {
+                id: format!("demo:{id}"),
+                title: title.to_string(),
+                route: format!("/demo/{id}"),
+                priority: 1,
+                icon: None,
+            },
+        };
+        let chrome = Chrome {
+            sidebar: vec![entry("side", "Side nav")],
+            header_actions: vec![entry("act", "Quick action")],
+            notifications: vec![entry("ntf", "Notify")],
+            jobs: vec![entry("job", "Jobs")],
+            ..Chrome::default()
+        };
+        let m = build_dashboard(&[], &chrome, &|_| None, 80);
+        let t = texts(&m);
+        for want in [
+            "sidebar",
+            "header actions",
+            "notifications",
+            "jobs",
+            "Side nav",
+            "Quick action",
+            "Notify",
+            "Jobs",
+        ] {
+            assert!(t.iter().any(|l| l.contains(want)), "{want} missing: {t:?}");
+        }
+        // Unresolvable routes get the same "driver-owned route" note
+        // as navbar contributions.
+        let sel = m
+            .rows
+            .iter()
+            .find(|r| r.sel.is_some() && r.text.contains("Side nav"))
+            .unwrap();
+        let fields = &m.selections[sel.sel.unwrap()].fields;
+        assert!(fields
+            .iter()
+            .any(|(k, v)| k == "note" && v == "driver-owned route"));
     }
 
     #[test]

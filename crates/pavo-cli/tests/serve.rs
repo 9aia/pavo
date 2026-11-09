@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 /// Same fixture driver as cli.rs — eager manifest + serve wire.
 const DEMO: &str = r#"#!/bin/sh
 if [ "$1" = manifest ]; then
-  printf '%s\n' '{"name":"demo","title":"Demo Driver","version":"1.2.3","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{"navbar":[{"id":"nav","title":"Demo Nav","route":"/demo/board","priority":5}],"statusbar":[{"id":"st","title":"Demo status","route":"/demo/board"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","description":"The board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[]}}]}'
+  printf '%s\n' '{"name":"demo","title":"Demo Driver","version":"1.2.3","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{"navbar":[{"id":"nav","title":"Demo Nav","route":"/demo/board","priority":5}],"statusbar":[{"id":"st","title":"Demo status","route":"/demo/board"}],"sidebar":[{"id":"side","title":"Side","route":"/demo/side"}],"headerActions":[{"id":"act","title":"Act","route":"/demo/board"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}],"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","description":"The board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[]}}]}'
   exit 0
 fi
 if [ "$1" = serve ]; then
@@ -25,8 +25,12 @@ if [ "$1" = serve ]; then
         printf '%s\n' '{"ok":false,"error":"unknown view"}';;
       *'"op":"query"'*)
         printf '%s\n' '{"ok":true,"result":{"query":"items","data":[["T-1","Alpha","done"]]}}';;
+      *'"op":"jobs"'*)
+        printf '%s\n' '{"ok":true,"result":[{"id":"j1","title":"Build","status":"running","detail":"step 2/5"}]}';;
+      *'"op":"notifications"'*)
+        printf '%s\n' '{"ok":true,"result":[{"id":"n1","title":"Heads up","severity":"warning","read":false}]}';;
       *'"op":"manifest"'*)
-        printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo Driver","version":"1.2.3","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}';;
+        printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo Driver","version":"1.2.3","verbs":["serve"],"capabilities":["pavo"],"contributes":{"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}';;
     esac
   done
   exit 0
@@ -160,6 +164,77 @@ fn drivers_views_chrome() {
     let v = json_body(&body);
     assert_eq!(v["result"]["navbar"][0]["id"], "demo:nav");
     assert_eq!(v["result"]["statusbar"][0]["id"], "demo:st");
+    // Platform slots ride the same chrome payload.
+    assert_eq!(v["result"]["sidebar"][0]["id"], "demo:side");
+    assert_eq!(v["result"]["headerActions"][0]["id"], "demo:act");
+    assert_eq!(v["result"]["notifications"][0]["id"], "demo:ntf");
+    assert_eq!(v["result"]["jobs"][0]["id"], "demo:job");
+}
+
+#[test]
+fn feeds_and_call_endpoints() {
+    let srv = serve();
+
+    // Aggregated feeds: item fields + driver attribution, flattened.
+    let (status, _, body) = http_get(srv.port, "/api/jobs");
+    assert_eq!(status, 200);
+    let v = json_body(&body);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["result"][0]["id"], "j1");
+    assert_eq!(v["result"][0]["status"], "running");
+    assert_eq!(v["result"][0]["driver"], "demo");
+    assert_eq!(v["result"][0]["driver_title"], "Demo Driver");
+
+    let (status, _, body) = http_get(srv.port, "/api/notifications");
+    assert_eq!(status, 200);
+    let v = json_body(&body);
+    assert_eq!(v["result"][0]["id"], "n1");
+    assert_eq!(v["result"][0]["severity"], "warning");
+    assert_eq!(v["result"][0]["read"], false);
+
+    // POST /api/call proxies a wire Request to the named driver.
+    let (status, _, body) = http_request(
+        srv.port,
+        "POST",
+        "/api/call?driver=demo",
+        r#"{"op":"query","query":"items","params":{}}"#,
+    );
+    assert_eq!(status, 200);
+    let v = json_body(&body);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["result"]["query"], "items");
+    assert_eq!(v["result"]["data"][0][0], "T-1");
+
+    // Feed ops proxy too.
+    let (status, _, body) = http_request(
+        srv.port,
+        "POST",
+        "/api/call?driver=demo",
+        r#"{"op":"jobs"}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(json_body(&body)["result"][0]["id"], "j1");
+
+    // Error surface: missing driver → 400, bad body → 400,
+    // unknown driver → 404, GET on /api/call → 400 (empty body).
+    let (status, _, _) = http_request(srv.port, "POST", "/api/call", r#"{"op":"jobs"}"#);
+    assert_eq!(status, 400);
+    let (status, _, _) = http_request(srv.port, "POST", "/api/call?driver=demo", "{bad");
+    assert_eq!(status, 400);
+    let (status, _, _) = http_request(
+        srv.port,
+        "POST",
+        "/api/call?driver=ghost",
+        r#"{"op":"jobs"}"#,
+    );
+    assert_eq!(status, 404);
+    let (status, _, _) = http_get(srv.port, "/api/call?driver=demo");
+    assert_eq!(status, 400);
+
+    // POST is still rejected elsewhere.
+    let (status, _, body) = http_request(srv.port, "POST", "/api/jobs", "{}");
+    assert_eq!(status, 405);
+    assert_eq!(json_body(&body)["ok"], false);
 }
 
 #[test]

@@ -29,11 +29,16 @@ Design context: `project/project/proposals/proposal-0003-*` and
 ## The three contracts
 
 1. **Driver manifest** — `{name, title, icon?, version, verbs[],
-   capabilities[], contributes, views[], renderers[]}`.
+   capabilities[], deps?, contributes, views[], renderers[]}`.
    Discoverable without spawning: pavo lists routes and chrome
    contributions straight from the manifest. `renderers[]` declares
    view-kind renderer plugins (below) — a driver may declare
-   renderers with zero views.
+   renderers with zero views. `deps` declares driver dependencies
+   (`requires`/`optional`, below); `contributes` fills the chrome
+   slots — the original four (`navbar`, `dashboard`, `statusbar`,
+   `routes`) plus the platform slots `sidebar`, `headerActions`,
+   `notifications`, and `jobs` (all additive; old manifests that put
+   these keys in the forward-compat `extra` map still parse).
 2. **ViewNode IR** — internally-tagged `"kind"` nodes:
    `panel`, `table`, `tree`, `graph`, `form`, `kv`, `markdown`,
    `embed`, `row`, `column`. Every kind flattens the shared
@@ -41,8 +46,9 @@ Design context: `project/project/proposals/proposal-0003-*` and
    `props`) to the top level. `embed` is the escape hatch for rich
    renderers.
 3. **Wire ops** — one JSON object per line:
-   requests `{"op":"manifest|views|view|query|render|submit", …}`,
-   responses `{"ok":true,"result":…}` / `{"ok":false,"error":"…"}`.
+   requests `{"op":"manifest|views|view|query|render|submit|jobs|
+   notifications", …}`, responses `{"ok":true,"result":…}` /
+   `{"ok":false,"error":"…"}`.
    Same convention as `tamias-serve`, `myco serve`, `cuora serve`,
    `sepia serve`.
 
@@ -77,6 +83,61 @@ answer `ok:false` — unknown ops were already protocol errors, so
 No separate `action` op in v1: buttons/links beyond the single
 submit are deferred — a driver needing them can model them as
 additional forms (each with its own `submit_op`) or `embed` nodes.
+
+## Platform feeds (`jobs` / `notifications`)
+
+Two additive v1 ops let drivers act as **platform-feed providers** —
+the plugin-architecture extension point where "slots are the
+extension point, ops are the capability":
+
+```
+{"op":"jobs"}           → Vec<JobItem>
+{"op":"notifications"} → Vec<NotificationItem>
+```
+
+- A driver opts in by declaring the matching `contributes` slot:
+  `jobs` or `notifications` (entries are display metadata — label,
+  icon, ordering — same `Contribution` shape as every slot).
+- The op returns the feed items (`wire.schema.json` `jobItem` /
+  `notificationItem`; Rust: `pavo_protocol::platform`). Fields are
+  deliberately minimal: stable `id`, `title`, free-form
+  `status`/`severity`, RFC 3339 timestamp strings
+  (`updated_at`/`created_at`), optional `detail`/`body`, optional
+  `route` for "open" navigation, and `read` (notifications only).
+  Unknown fields are ignored — same forward-compat rule as
+  everywhere else.
+- Both ops are **optional capabilities**: a driver without the feed
+  answers `ok:false` (or `[]`); hosts treat either as "no feed".
+
+### Driver deps (`deps`)
+
+`DriverManifest.deps` declares cross-driver dependencies — names are
+driver names (the `<type>` in `tamias-driver-<type>`):
+
+```json
+"deps": { "requires": ["config"], "optional": ["myco"] }
+```
+
+`requires` absent at discovery = **error** (the driver can't
+function); `optional` absent = **degrade gracefully**. This mirrors
+the product `requiredDeps`/`optionalDeps` semantics. Ordering —
+topological sort over the dep graph — is a host concern deferred to
+a later phase; v1 only carries the declaration.
+
+### Cross-driver query bindings (`QueryBinding.driver`)
+
+A `queries[]` binding may name a target driver:
+
+```json
+{ "name": "ledger", "op": "query", "driver": "myco",
+  "params": { "product_op": "status" } }
+```
+
+`driver` set = the host issues the op against *that* driver's
+`serve` (cross-driver data flow — the "host is the bus" half of the
+architecture). Host-side resolution is a later phase; the field is
+data the host understands, and v1 hosts may ignore it (treat the
+binding as local).
 
 ## Renderer plugins
 
@@ -144,6 +205,21 @@ Rules:
 - **No HTML in RenderModel.** Self-contained markup is `svg` only.
 
 Reference implementation: `examples/drivers/viz-graph/`.
+
+## Writing a driver
+
+Rust drivers should not hand-roll the wire: **`pavo-driver-kit`**
+(`crates/pavo-driver-kit`) is the authoring SDK — the ndjson `serve`
+loop every sibling driver duplicates (`serve`/`serve_stdio`), fluent
+builders for `DriverManifest`/`ViewSpec`/`QueryBinding`/`Contribution`
+(including `deps` and cross-driver `QueryBinding.driver`
+bindings), `ViewNode` constructors for every kind, and
+`JobItem`/`NotificationItem` helpers for the platform feeds. Its
+crate-level docs are the reference; this README stays the *contract*.
+
+Non-Rust drivers implement the same contract directly — the Python
+examples under `examples/drivers/` are the reference
+(`tamias-driver-platform` shows the platform slots end-to-end).
 
 ## The config API (driver-level convention)
 

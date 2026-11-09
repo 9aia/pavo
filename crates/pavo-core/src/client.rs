@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use pavo_protocol::platform::{JobItem, NotificationItem};
 use pavo_protocol::wire::{QueryResult, SubmitResult, ViewResult, ViewSummary};
 use pavo_protocol::{DriverManifest, RenderModel, Request, Response};
 use serde::de::DeserializeOwned;
@@ -219,6 +220,28 @@ impl DriverClient {
             form: form.map(str::to_string),
             values,
         })
+    }
+
+    /// `{"op":"jobs"}` → the driver's job/queue feed — meaningful
+    /// only for drivers whose manifest declares `contributes.jobs`;
+    /// others answer `ok:false`/`[]` per the optional-capability
+    /// convention (both surface as `Err`/`Ok(vec![])` here — hosts
+    /// treat either as "no feed").
+    ///
+    /// # Errors
+    /// As [`DriverClient::manifest`].
+    pub fn jobs(&mut self) -> Result<Vec<JobItem>, PavoError> {
+        self.request(&Request::Jobs)
+    }
+
+    /// `{"op":"notifications"}` → the driver's notification feed —
+    /// same optional-capability convention as [`DriverClient::jobs`]
+    /// (`contributes.notifications` marks the provider).
+    ///
+    /// # Errors
+    /// As [`DriverClient::manifest`].
+    pub fn notifications(&mut self) -> Result<Vec<NotificationItem>, PavoError> {
+        self.request(&Request::Notifications)
     }
 
     /// Generic request → typed result. The escape hatch for ops the

@@ -88,6 +88,22 @@
               "default": {}
             }
           }
+        },
+        {
+          "type": "object",
+          "required": ["op"],
+          "properties": {
+            "op": { "const": "jobs" },
+            "description": "Job/queue feed — optional capability; drivers without a feed answer ok:false or []."
+          }
+        },
+        {
+          "type": "object",
+          "required": ["op"],
+          "properties": {
+            "op": { "const": "notifications" },
+            "description": "Notification feed — optional capability; drivers without a feed answer ok:false or []."
+          }
         }
       ]
     },
@@ -199,6 +215,33 @@
         },
         "data": { "description": "Driver-defined result payload, passed through verbatim." },
         "view": { "$ref": "#/$defs/viewResult", "description": "Optional updated view to swap in for the submitted one." }
+      }
+    },
+    "jobItem": {
+      "type": "object",
+      "description": "Result item of the `jobs` op — one job/queue entry. `status` is a driver-owned free-form string; `updated_at` is an RFC 3339 timestamp string. Unknown fields are preserved by forward-compatible consumers.",
+      "required": ["id", "title", "status"],
+      "properties": {
+        "id": { "type": "string", "description": "Stable id within the driver — host dedup key." },
+        "title": { "type": "string", "description": "Display label." },
+        "status": { "type": "string", "description": "Free-form status owned by the driver (\"queued\", \"running\", \"done\", \"failed\", …)." },
+        "detail": { "type": "string", "description": "Optional longer description — progress note, failure reason." },
+        "route": { "type": "string", "description": "Optional route/url for \"open\" navigation." },
+        "updated_at": { "type": "string", "description": "Optional last-updated timestamp — RFC 3339 string." }
+      }
+    },
+    "notificationItem": {
+      "type": "object",
+      "description": "Result item of the `notifications` op — one notification. `severity` is a driver-owned free-form string; `created_at` is an RFC 3339 timestamp string; `read` defaults false (unread badge). Unknown fields are preserved by forward-compatible consumers.",
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "type": "string", "description": "Stable id within the driver — host dedup key." },
+        "title": { "type": "string", "description": "One-line summary." },
+        "body": { "type": "string", "description": "Optional longer detail." },
+        "severity": { "type": "string", "description": "Optional free-form severity (\"info\", \"warning\", \"error\", …)." },
+        "route": { "type": "string", "description": "Optional route/url for \"open\" navigation." },
+        "created_at": { "type": "string", "description": "Optional creation timestamp — RFC 3339 string." },
+        "read": { "type": "boolean", "default": false, "description": "Whether the notification has been read." }
       }
     }
   }

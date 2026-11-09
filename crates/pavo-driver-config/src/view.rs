@@ -22,6 +22,7 @@ fn binding(name: &str, query: &str) -> QueryBinding {
     QueryBinding {
         name: name.to_string(),
         op: "query".to_string(),
+        driver: None,
         params,
     }
 }
@@ -147,6 +148,7 @@ pub fn manifest() -> DriverManifest {
             "serve".to_string(),
         ],
         capabilities: vec!["pavo".to_string(), "config".to_string()],
+        deps: None,
         contributes: Contributes {
             statusbar: vec![Contribution {
                 id: "status".to_string(),

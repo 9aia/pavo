@@ -83,6 +83,13 @@ pub enum PavoError {
     /// Internal: a driver path was expected to exist but doesn't.
     #[error("driver binary not found: {0}")]
     MissingDriver(PathBuf),
+
+    /// A driver's `deps` declaration failed validation — a `requires`
+    /// dep isn't discovered, or the dep graph has a cycle. Offending
+    /// drivers are quarantined: they stay discoverable but every
+    /// manifest/view/feed access surfaces this error.
+    #[error("{0}")]
+    Deps(#[from] crate::deps::DepsError),
 }
 
 impl PavoError {

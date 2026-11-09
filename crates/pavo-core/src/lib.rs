@@ -20,7 +20,11 @@
 //! - [`client`] — [`client::DriverClient`], one spawned `serve`
 //!   process per driver, request/response with timeout + one restart.
 //! - [`merge`] — fold every driver's `contributes` into a single
-//!   [`merge::Chrome`] (navbar/dashboard/statusbar/routes + `extra`).
+//!   [`merge::Chrome`] (navbar/dashboard/statusbar/routes/sidebar/
+//!   headerActions/notifications/jobs + `extra`).
+//! - [`deps`] — topological ordering over `DriverManifest.deps`
+//!   (`requires`/`optional`); [`host::Host`] keeps drivers in dep
+//!   order and quarantines offenders.
 //! - [`host`] — [`host::Host`], the composition root renderers use:
 //!   discovery → manifests → clients → views/routes/chrome.
 //! - [`viewnode`] — walk/evaluate helpers over the ViewNode IR
@@ -37,6 +41,7 @@
 
 pub mod cache;
 pub mod client;
+pub mod deps;
 pub mod discovery;
 pub mod error;
 pub mod host;
@@ -47,9 +52,10 @@ pub mod viewnode;
 
 pub use cache::TtlCache;
 pub use client::{ClientConfig, DriverClient};
+pub use deps::{order as order_drivers, DepsError};
 pub use discovery::{discover, discover_with, DiscoveryOptions, DriverInfo};
 pub use error::PavoError;
-pub use host::{Host, ResolvedView, RouteEntry, RouteKind, ViewEntry};
+pub use host::{FeedEntry, Host, ResolvedView, RouteEntry, RouteKind, ViewEntry};
 pub use merge::{merge_chrome, Chrome, SlotEntry};
 pub use paths::{drivers_dir, tamias_home};
 pub use renderers::{plugin_nodes, PluginNode, RendererBinding, RendererRegistry};

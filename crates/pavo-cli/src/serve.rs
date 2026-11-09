@@ -14,7 +14,15 @@
 //! - `GET /api/health` → `{ok:true}`
 //! - `GET /api/drivers` → per-driver manifest summary
 //! - `GET /api/views` → every `<driver>:<view>` entry
-//! - `GET /api/chrome` → merged chrome slots
+//! - `GET /api/chrome` → merged chrome slots (navbar/dashboard/
+//!   statusbar/routes/sidebar/headerActions/notifications/jobs +
+//!   forward-compat extras)
+//! - `GET /api/jobs` → the aggregated job feed (`contributes.jobs`
+//!   providers' `jobs` op, items tagged with their driver)
+//! - `GET /api/notifications` → the aggregated notification feed
+//! - `POST /api/call?driver=<kind>` → cross-driver wire proxy: the
+//!   JSON body is a wire [`Request`] forwarded verbatim to that
+//!   driver's `serve`; its `result` comes back in the envelope
 //! - `GET /api/view?ref=<driver>:<view>` (+ `param.<k>=<v>`) → ViewResult
 //! - `GET /api/raw?ref=…` → same as `/api/view`
 //! - `GET /api/query?driver=<d>&query=<q>` (+ `param.<k>=<v>`) → QueryResult
@@ -30,7 +38,8 @@
 //!
 //! All `/api/*` responses use the `{"ok":…,"result"/"error"}` envelope
 //! with `Access-Control-Allow-Origin: *` — this is a localhost dev
-//! tool, not a hardened server.
+//! tool, not a hardened server. GET/HEAD everywhere except
+//! `POST /api/call` (the wire proxy needs a body).
 
 use std::io;
 use std::net::TcpListener;
@@ -38,6 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pavo_core::{Host, Params, PavoError};
+use pavo_protocol::Request as WireRequest;
 use serde_json::{json, Value};
 
 use crate::http::{self, ReadError, Request, Response};
@@ -139,15 +149,22 @@ fn route(req: &Request, host: &Arc<Host>, web_root: Option<&Path>) -> (Response,
         return (resp, false);
     }
 
-    // /api/* — JSON envelope, CORS on.
-    if req.method != "GET" && !head_only {
+    // /api/* — JSON envelope, CORS on. POST is accepted only for
+    // /api/call (the cross-driver wire proxy needs a body);
+    // everything else stays GET/HEAD.
+    let post_call = req.method == "POST" && path == "/api/call";
+    if req.method != "GET" && !head_only && !post_call {
         let mut resp = api_error(405, "method not allowed", true);
-        resp.extra
-            .push(("allow".to_string(), "GET, HEAD".to_string()));
+        let allow = if path == "/api/call" {
+            "GET, HEAD, POST"
+        } else {
+            "GET, HEAD"
+        };
+        resp.extra.push(("allow".to_string(), allow.to_string()));
         return (resp, false);
     }
 
-    let resp = api_route(path.as_str(), &pairs, host);
+    let resp = api_route(path.as_str(), &pairs, host, &req.body);
     let resp = if head_only {
         Response {
             body: Vec::new(),
@@ -161,7 +178,7 @@ fn route(req: &Request, host: &Arc<Host>, web_root: Option<&Path>) -> (Response,
 
 // ---------- /api routing ----------
 
-fn api_route(path: &str, pairs: &[(String, String)], host: &Host) -> Response {
+fn api_route(path: &str, pairs: &[(String, String)], host: &Host, body: &[u8]) -> Response {
     let endpoint = path.trim_start_matches("/api/");
 
     let result: Result<Value, ApiFail> = match endpoint {
@@ -169,6 +186,9 @@ fn api_route(path: &str, pairs: &[(String, String)], host: &Host) -> Response {
         "drivers" => api_drivers(host),
         "views" => api_views(host),
         "chrome" => api_chrome(host),
+        "jobs" => api_jobs(host),
+        "notifications" => api_notifications(host),
+        "call" => api_call(host, pairs, body),
         "view" | "raw" => api_view(host, pairs),
         "query" => api_query(host, pairs),
         "submit" => api_submit(host, pairs),
@@ -289,8 +309,50 @@ fn api_chrome(host: &Host) -> Result<Value, ApiFail> {
         "dashboard": slot(&chrome.dashboard),
         "statusbar": slot(&chrome.statusbar),
         "routes": slot(&chrome.routes),
+        "sidebar": slot(&chrome.sidebar),
+        // Wire spelling — matches `contributes.headerActions`.
+        "headerActions": slot(&chrome.header_actions),
+        "notifications": slot(&chrome.notifications),
+        "jobs": slot(&chrome.jobs),
         "extra": Value::Object(extra),
     }))
+}
+
+/// `GET /api/jobs` — the aggregated job feed: every
+/// `contributes.jobs` provider's `jobs` op, each item flattened
+/// with its `driver`/`driver_title` attribution (see
+/// [`crate::feed_rows`]). Per-driver failures are already skipped
+/// by [`Host::jobs`].
+fn api_jobs(host: &Host) -> Result<Value, ApiFail> {
+    let rows = crate::feed_rows(&host.jobs()).map_err(|e| ApiFail::new(500, e.to_string()))?;
+    Ok(json!(rows))
+}
+
+/// `GET /api/notifications` — the aggregated notification feed;
+/// same shape as [`api_jobs`].
+fn api_notifications(host: &Host) -> Result<Value, ApiFail> {
+    let rows =
+        crate::feed_rows(&host.notifications()).map_err(|e| ApiFail::new(500, e.to_string()))?;
+    Ok(json!(rows))
+}
+
+/// `POST /api/call?driver=<kind>` — the cross-driver escape hatch.
+/// The request body is a wire [`WireRequest`] JSON object
+/// (`{"op":"query",…}`, `{"op":"jobs"}`, …) forwarded verbatim to
+/// that driver's `serve` session; the driver's `result` payload
+/// comes back under the usual `{"ok":true,"result":…}` envelope.
+/// The driver name is validated by [`Host::client`] — unknown kinds
+/// 404, dep-quarantined drivers surface their [`PavoError::Deps`].
+fn api_call(host: &Host, pairs: &[(String, String)], body: &[u8]) -> Result<Value, ApiFail> {
+    let driver = http::query_get(pairs, "driver")
+        .ok_or_else(|| ApiFail::new(400, "missing 'driver' param"))?;
+    let request: WireRequest = serde_json::from_slice(body)
+        .map_err(|e| ApiFail::new(400, format!("body isn't a wire Request JSON object: {e}")))?;
+    let client = host.client(driver)?;
+    let mut guard = client
+        .lock()
+        .map_err(|_| ApiFail::new(500, "driver client lock poisoned"))?;
+    guard.request::<Value>(&request).map_err(ApiFail::from)
 }
 
 /// Resolve the `driver:view` target: `?ref=` wins, else `?driver=` +
@@ -544,13 +606,24 @@ fn landing_page() -> Response {
         no Nuxt build found. Build <code>web/</code> for the full UI, or use the API below.</p>",
     );
 
-    if !chrome.navbar.is_empty() || !chrome.dashboard.is_empty() || !chrome.statusbar.is_empty() {
+    if !chrome.navbar.is_empty()
+        || !chrome.dashboard.is_empty()
+        || !chrome.statusbar.is_empty()
+        || !chrome.sidebar.is_empty()
+        || !chrome.header_actions.is_empty()
+        || !chrome.notifications.is_empty()
+        || !chrome.jobs.is_empty()
+    {
         body.push_str("<h2>Chrome</h2><ul>");
         for slot_entries in [
             ("navbar", &chrome.navbar),
             ("dashboard", &chrome.dashboard),
             ("statusbar", &chrome.statusbar),
             ("routes", &chrome.routes),
+            ("sidebar", &chrome.sidebar),
+            ("headerActions", &chrome.header_actions),
+            ("notifications", &chrome.notifications),
+            ("jobs", &chrome.jobs),
         ] {
             for e in slot_entries.1 {
                 body.push_str(&format!(
@@ -882,10 +955,12 @@ mod tests {
     }
 
     /// Minimal sh fixture driver (`demo`) answering manifest + the
-    /// serve wire — kept alive via `TempDir::keep`.
+    /// serve wire — kept alive via `TempDir::keep`. Declares every
+    /// chrome slot (incl. the platform slots) and answers the
+    /// `jobs`/`notifications` feed ops.
     const DEMO_DRIVER: &str = r#"#!/bin/sh
 if [ "$1" = manifest ]; then
-  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}]}'
+  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"contributes":{"navbar":[{"id":"nav","title":"Nav","route":"/demo/board","priority":5}],"sidebar":[{"id":"side","title":"Side","route":"/demo/side"}],"headerActions":[{"id":"act","title":"Act","route":"/demo/board"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}],"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}]}'
   exit 0
 fi
 if [ "$1" = serve ]; then
@@ -895,7 +970,9 @@ if [ "$1" = serve ]; then
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
       *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
-      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
+      *'"op":"jobs"'*) printf '%s\n' '{"ok":true,"result":[{"id":"j1","title":"Build","status":"running","detail":"step 2/5","route":"/demo/job/j1"}]}' ;;
+      *'"op":"notifications"'*) printf '%s\n' '{"ok":true,"result":[{"id":"n1","title":"Heads up","severity":"info","read":false}]}' ;;
+      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"contributes":{"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
     esac
   done
   exit 0
@@ -929,9 +1006,25 @@ exit 1
     }
 
     fn api(host: &Arc<Host>, target: &str) -> Response {
+        api_body(host, target, b"")
+    }
+
+    fn api_body(host: &Arc<Host>, target: &str, body: &[u8]) -> Response {
         let (path, query) = http::split_target(target);
         let pairs = http::parse_query(query);
-        api_route(path, &pairs, host)
+        api_route(path, &pairs, host, body)
+    }
+
+    /// A POST `/api/call` through the real `route` path — exercises
+    /// the method gate + body plumbing, not just `api_route`.
+    fn api_call_post(host: &Arc<Host>, target: &str, body: &str) -> Response {
+        let req = Request {
+            method: "POST".to_string(),
+            target: target.to_string(),
+            headers: vec![],
+            body: body.as_bytes().to_vec(),
+        };
+        route(&req, host, None).0
     }
 
     fn envelope(resp: &Response) -> Value {
@@ -956,6 +1049,101 @@ exit 1
         let body = envelope(&api(&host, "/api/renderers"));
         assert_eq!(body["ok"], true);
         assert_eq!(body["result"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn api_chrome_includes_platform_slots() {
+        let host = fixture_host();
+        let body = envelope(&api(&host, "/api/chrome"));
+        assert_eq!(body["ok"], true, "{body}");
+        let r = &body["result"];
+        assert_eq!(r["navbar"][0]["id"], "demo:nav");
+        assert_eq!(r["sidebar"][0]["id"], "demo:side");
+        assert_eq!(r["headerActions"][0]["id"], "demo:act");
+        assert_eq!(r["notifications"][0]["id"], "demo:ntf");
+        assert_eq!(r["jobs"][0]["id"], "demo:job");
+        // Slot entries keep the shared shape.
+        assert_eq!(r["jobs"][0]["driver"], "demo");
+        assert_eq!(r["jobs"][0]["driver_title"], "Demo");
+        assert!(r["extra"].is_object());
+    }
+
+    #[test]
+    fn api_feeds_aggregate_provider_items() {
+        let host = fixture_host();
+
+        let body = envelope(&api(&host, "/api/jobs"));
+        assert_eq!(body["ok"], true, "{body}");
+        let row = &body["result"][0];
+        // Item fields flatten alongside driver attribution.
+        assert_eq!(row["id"], "j1");
+        assert_eq!(row["title"], "Build");
+        assert_eq!(row["status"], "running");
+        assert_eq!(row["detail"], "step 2/5");
+        assert_eq!(row["driver"], "demo");
+        assert_eq!(row["driver_title"], "Demo");
+
+        let body = envelope(&api(&host, "/api/notifications"));
+        assert_eq!(body["ok"], true, "{body}");
+        let row = &body["result"][0];
+        assert_eq!(row["id"], "n1");
+        assert_eq!(row["severity"], "info");
+        assert_eq!(row["read"], false);
+        assert_eq!(row["driver"], "demo");
+    }
+
+    #[test]
+    fn api_call_proxies_wire_requests() {
+        let host = fixture_host();
+
+        // A query op round-trips through the driver's serve.
+        let resp = api_call_post(
+            &host,
+            "/api/call?driver=demo",
+            r#"{"op":"query","query":"items","params":{}}"#,
+        );
+        let body = envelope(&resp);
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["result"]["query"], "items");
+        assert_eq!(body["result"]["data"], serde_json::json!([1, 2]));
+
+        // Feed ops work too — the proxy is generic over Request.
+        let resp = api_call_post(&host, "/api/call?driver=demo", r#"{"op":"jobs"}"#);
+        let body = envelope(&resp);
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["result"][0]["id"], "j1");
+
+        // Missing driver param → 400; bad JSON → 400; unknown driver
+        // → 404; GET (empty body) → 400.
+        let resp = api_call_post(&host, "/api/call", r#"{"op":"jobs"}"#);
+        assert_eq!(resp.status, 400);
+        let resp = api_call_post(&host, "/api/call?driver=demo", "{bad");
+        assert_eq!(resp.status, 400);
+        let resp = api_call_post(&host, "/api/call?driver=ghost", r#"{"op":"jobs"}"#);
+        assert_eq!(resp.status, 404);
+        let resp = api(&host, "/api/call?driver=demo");
+        assert_eq!(resp.status, 400);
+
+        // POST is still rejected for every other endpoint.
+        let resp = api_call_post(&host, "/api/health", "{}");
+        assert_eq!(resp.status, 405);
+        assert!(resp
+            .extra
+            .iter()
+            .any(|(k, v)| k == "allow" && v == "GET, HEAD"));
+        // …and /api/call advertises POST in its Allow on other methods.
+        let req = Request {
+            method: "PUT".to_string(),
+            target: "/api/call?driver=demo".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        let (resp, _) = route(&req, &host, None);
+        assert_eq!(resp.status, 405);
+        assert!(resp
+            .extra
+            .iter()
+            .any(|(k, v)| k == "allow" && v == "GET, HEAD, POST"));
     }
 
     #[test]

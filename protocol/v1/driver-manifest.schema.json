@@ -34,6 +34,10 @@
       "default": [],
       "description": "Capability tags — \"pavo\", \"config\", \"chrome\", …"
     },
+    "deps": {
+      "$ref": "#/$defs/driverDeps",
+      "description": "Driver dependency declarations — names are driver names (the <type> in tamias-driver-<type>). `requires` absent = discovery error; `optional` absent = degrade gracefully. Ordering/topo-sort is a later host phase; v1 carries the declaration only."
+    },
     "contributes": { "$ref": "#/$defs/contributes" },
     "views": {
       "type": "array",
@@ -50,12 +54,36 @@
   "$defs": {
     "contributes": {
       "type": "object",
-      "description": "Contribution slots — navbar, dashboard, statusbar, routes, plus forward-compat extras.",
+      "description": "Contribution slots — navbar, dashboard, statusbar, routes, sidebar, headerActions, notifications, jobs, plus forward-compat extras.",
       "properties": {
         "navbar": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] },
         "dashboard": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] },
         "statusbar": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] },
-        "routes": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] }
+        "routes": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] },
+        "sidebar": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/contribution" },
+          "default": [],
+          "description": "Grouped nav entries for a left sidebar shell; hosts may cluster later. Same Contribution shape as other slots."
+        },
+        "headerActions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/contribution" },
+          "default": [],
+          "description": "Top-bar actions; `route` points at the view the host renders in a popover/panel."
+        },
+        "notifications": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/contribution" },
+          "default": [],
+          "description": "Marks the driver as a notification provider — display metadata only; item data comes via the `notifications` wire op (NotificationItem)."
+        },
+        "jobs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/contribution" },
+          "default": [],
+          "description": "Marks the driver as a job/queue feed provider — display metadata only; item data comes via the `jobs` wire op (JobItem)."
+        }
       },
       "additionalProperties": {
         "type": "array",
@@ -161,6 +189,24 @@
         }
       }
     },
+    "driverDeps": {
+      "type": "object",
+      "description": "Driver dependency declarations (mirrors requiredDeps/optionalDeps semantics). `requires` entries missing at discovery = error; `optional` entries missing = degrade gracefully.",
+      "properties": {
+        "requires": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Driver names this driver cannot function without — absence is a discovery error."
+        },
+        "optional": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Driver names this driver uses when present — absence degrades gracefully."
+        }
+      }
+    },
     "queryBinding": {
       "type": "object",
       "required": ["name", "op"],
@@ -172,6 +218,10 @@
         "op": {
           "type": "string",
           "description": "Wire op to invoke on the driver's serve."
+        },
+        "driver": {
+          "type": "string",
+          "description": "Optional target driver for cross-driver queries — names the driver (the <type> in tamias-driver-<type>) whose serve answers the op. Host-side resolution is a later phase; absent = the view's own driver."
         },
         "params": {
           "type": "object",

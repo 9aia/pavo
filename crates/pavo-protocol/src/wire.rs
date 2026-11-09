@@ -18,6 +18,15 @@
 //! | `render`  | `kind`, `node`, `data`, `surface`,  | [`RenderModel`]   |
 //! |           | `format?`                           |                   |
 //! | `submit`  | `view`, `form?`, `values`           | [`SubmitResult`]  |
+//! | `jobs`    | —                                   | `Vec<JobItem>`    |
+//! | `notifications` | —                          | `Vec<NotificationItem>` |
+//!
+//! `jobs` and `notifications` are the **platform-feed ops**: drivers
+//! whose manifest declares the matching `contributes` slot
+//! (`jobs`/`notifications`) answer them with item lists — see
+//! [`crate::platform`]. Both are optional capabilities: drivers
+//! without the feed answer `ok:false` (or `[]`) per the usual
+//! convention, and hosts treat either as "no feed".
 //!
 //! `submit` is the form-interaction verb: a renderer collects the
 //! editable [`crate::view_node::FormField`] values of a `form` node
@@ -124,6 +133,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Map::is_empty")]
         values: Map<String, Value>,
     },
+    /// `{"op":"jobs"}` → `Vec<JobItem>` — the job/queue feed op.
+    /// Drivers that declare `contributes.jobs` answer with their
+    /// current job list; drivers without a job feed answer `ok:false`
+    /// (or an empty list) — both mean "no feed" to hosts.
+    Jobs,
+    /// `{"op":"notifications"}` → `Vec<NotificationItem>` — the
+    /// notification feed op. Same optional-capability convention as
+    /// `jobs`: `contributes.notifications` marks the provider, the
+    /// op carries the items.
+    Notifications,
 }
 
 /// A wire response — one JSON object per line.
@@ -308,9 +327,8 @@ pub fn parse_request(line: &str) -> Result<Request, WireError> {
             op: "<missing>".to_string(),
         })?;
     match op {
-        "manifest" | "views" | "view" | "query" | "render" | "submit" => {
-            Ok(serde_json::from_value(value)?)
-        }
+        "manifest" | "views" | "view" | "query" | "render" | "submit" | "jobs"
+        | "notifications" => Ok(serde_json::from_value(value)?),
         other => Err(WireError::UnknownOp {
             op: other.to_string(),
         }),
@@ -389,6 +407,27 @@ mod tests {
         .unwrap();
         assert_eq!(r.errors["theme"], json!("unknown value"));
         assert!(r.view.is_some());
+    }
+
+    /// `jobs`/`notifications` joined the v1 op set.
+    #[test]
+    fn platform_feed_ops_parse() {
+        assert!(matches!(
+            parse_request(r#"{"op":"jobs"}"#).unwrap(),
+            Request::Jobs
+        ));
+        assert!(matches!(
+            parse_request(r#"{"op":"notifications"}"#).unwrap(),
+            Request::Notifications
+        ));
+        assert_eq!(
+            serde_json::to_string(&Request::Jobs).unwrap(),
+            r#"{"op":"jobs"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Notifications).unwrap(),
+            r#"{"op":"notifications"}"#
+        );
     }
 
     /// Unknown ops still fail; `submit` joined the v1 op set.

@@ -138,6 +138,11 @@ fn dispatch(req: &Request, opts: &Options) -> Response {
         Request::Render { .. } => {
             Response::err("config driver ships no renderers — built-in rendering applies")
         }
+        // Optional platform feeds — this driver declares neither
+        // `contributes.jobs` nor `contributes.notifications`, so per
+        // convention it answers ok:false ("no feed").
+        Request::Jobs => Response::err("config driver has no job feed"),
+        Request::Notifications => Response::err("config driver has no notification feed"),
     }
 }
 

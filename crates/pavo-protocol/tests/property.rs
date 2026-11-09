@@ -322,15 +322,35 @@ fn contributes() -> BoxedStrategy<Contributes> {
         prop::collection::vec(contribution(), 0..3),
         prop::collection::vec(contribution(), 0..3),
         prop::collection::vec(contribution(), 0..3),
+        prop::collection::vec(contribution(), 0..3),
+        prop::collection::vec(contribution(), 0..3),
+        prop::collection::vec(contribution(), 0..3),
+        prop::collection::vec(contribution(), 0..3),
         prop::collection::hash_map(text(), prop::collection::vec(contribution(), 0..2), 0..2),
     )
         .prop_map(
-            |(navbar, dashboard, statusbar, routes, extra)| Contributes {
+            |(
                 navbar,
                 dashboard,
                 statusbar,
                 routes,
-                extra: extra.into_iter().collect(),
+                sidebar,
+                header_actions,
+                notifications,
+                jobs,
+                extra,
+            )| {
+                Contributes {
+                    navbar,
+                    dashboard,
+                    statusbar,
+                    routes,
+                    sidebar,
+                    header_actions,
+                    notifications,
+                    jobs,
+                    extra: extra.into_iter().collect(),
+                }
             },
         )
         .boxed()
@@ -343,11 +363,14 @@ fn view_spec() -> BoxedStrategy<ViewSpec> {
         text(),
         prop::option::of(text()),
         prop::collection::vec(
-            (text(), text(), props()).prop_map(|(name, op, params)| QueryBinding {
-                name,
-                op,
-                params,
-            }),
+            (text(), text(), props(), prop::option::of(text())).prop_map(
+                |(name, op, params, driver)| QueryBinding {
+                    name,
+                    op,
+                    driver,
+                    params,
+                },
+            ),
             0..3,
         ),
         view_node(2),
@@ -392,6 +415,17 @@ fn renderer_decl() -> BoxedStrategy<RendererDecl> {
         .boxed()
 }
 
+fn driver_deps() -> BoxedStrategy<Option<DriverDeps>> {
+    prop::option::of(
+        (
+            prop::collection::vec(text(), 0..3),
+            prop::collection::vec(text(), 0..3),
+        )
+            .prop_map(|(requires, optional)| DriverDeps { requires, optional }),
+    )
+    .boxed()
+}
+
 fn manifest() -> BoxedStrategy<DriverManifest> {
     (
         text(),
@@ -400,12 +434,24 @@ fn manifest() -> BoxedStrategy<DriverManifest> {
         text(),
         prop::collection::vec(text(), 0..4),
         prop::collection::vec(text(), 0..4),
+        driver_deps(),
         contributes(),
         prop::collection::vec(view_spec(), 0..3),
         prop::collection::vec(renderer_decl(), 0..3),
     )
         .prop_map(
-            |(name, title, icon, version, verbs, capabilities, contributes, views, renderers)| {
+            |(
+                name,
+                title,
+                icon,
+                version,
+                verbs,
+                capabilities,
+                deps,
+                contributes,
+                views,
+                renderers,
+            )| {
                 DriverManifest {
                     name,
                     title,
@@ -413,6 +459,7 @@ fn manifest() -> BoxedStrategy<DriverManifest> {
                     version,
                     verbs,
                     capabilities,
+                    deps,
                     contributes,
                     views,
                     renderers,
@@ -440,6 +487,58 @@ fn render_model() -> BoxedStrategy<RenderModel> {
             .prop_map(|(component, props)| RenderModel::Placeholder { component, props }),
     ]
     .boxed()
+}
+
+fn job_item() -> BoxedStrategy<pavo_protocol::JobItem> {
+    (
+        text(),
+        text(),
+        text(),
+        prop::option::of(text()),
+        prop::option::of(text()),
+        prop::option::of(text()),
+        props(),
+    )
+        .prop_map(
+            |(id, title, status, detail, route, updated_at, extra)| pavo_protocol::JobItem {
+                id,
+                title,
+                status,
+                detail,
+                route,
+                updated_at,
+                extra,
+            },
+        )
+        .boxed()
+}
+
+fn notification_item() -> BoxedStrategy<pavo_protocol::NotificationItem> {
+    (
+        text(),
+        text(),
+        prop::option::of(text()),
+        prop::option::of(text()),
+        prop::option::of(text()),
+        prop::option::of(text()),
+        any::<bool>(),
+        props(),
+    )
+        .prop_map(
+            |(id, title, body, severity, route, created_at, read, extra)| {
+                pavo_protocol::NotificationItem {
+                    id,
+                    title,
+                    body,
+                    severity,
+                    route,
+                    created_at,
+                    read,
+                    extra,
+                }
+            },
+        )
+        .boxed()
 }
 
 fn response() -> BoxedStrategy<Response> {
@@ -496,6 +595,21 @@ proptest! {
         let v = serde_json::to_value(&m).unwrap();
         let back: RenderModel = serde_json::from_value(v).unwrap();
         prop_assert_eq!(&back, &m);
+    }
+
+    /// Platform feed items round-trip losslessly (extra catch-all
+    /// included).
+    #[test]
+    fn platform_items_roundtrip(
+        job in job_item(),
+        note in notification_item(),
+    ) {
+        let v = serde_json::to_value(&job).unwrap();
+        let back: pavo_protocol::JobItem = serde_json::from_value(v).unwrap();
+        prop_assert_eq!(&back, &job);
+        let v = serde_json::to_value(&note).unwrap();
+        let back: pavo_protocol::NotificationItem = serde_json::from_value(v).unwrap();
+        prop_assert_eq!(&back, &note);
     }
 }
 
@@ -576,6 +690,8 @@ fn request_value() -> BoxedStrategy<Request> {
                 surface,
                 format,
             }),
+        Just(Request::Jobs),
+        Just(Request::Notifications),
     ]
     .boxed()
 }
