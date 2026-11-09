@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Request","WireError"],"fn":["parse_request","response_line"],"struct":["QueryResult","Response","SubmitResult","ViewResult","ViewSummary"],"type":["ManifestResult"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Canvas","Pane"],"fn":["field","field_value_line","in_rect","row_style"],"struct":["App","LayoutRects","Tab"]};

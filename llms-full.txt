@@ -1,0 +1,1780 @@
+---
+url: /pavo/getting-started.md
+---
+# Getting Started
+
+Install pavo, put a driver on `PATH`, and render a view.
+
+## Install pavo
+
+```sh
+cargo install --git https://github.com/9aia/pavo pavo tamias-driver-config
+# or, from a checkout:
+cargo xtask install   # pavo + tamias-driver-config → ~/.cargo/bin
+```
+
+`tamias-driver-config` is the suite's common config API driver — it
+ships with pavo so every install has at least one real driver.
+
+## Install a view driver
+
+Drivers are executables named `tamias-driver-<type>` found on `PATH`
+or in `<tamias-home>/drivers/` (`$TAMIAS_HOME` or
+`~/.local/share/tamias/drivers`). The repo ships reference drivers
+under `examples/drivers/` — Python 3, stdlib only:
+
+```sh
+export PATH="$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PATH"
+```
+
+Real product drivers (`tamias-driver-kuda`, `tamias-driver-myco`,
+`tamias-driver-cuora`, …) install the same way — via tamias or onto
+`PATH`. See [Install a driver](/how-to/install-a-driver).
+
+## Render a view
+
+```sh
+pavo drivers                          # what pavo found
+pavo views                            # every <driver>:<view> ref
+pavo view demo:board                  # text summary of the tree
+pavo view demo:deps --format mermaid  # graph → mermaid
+pavo view demo:deps --format svg      # viz-graph renderer plugin
+pavo query demo items --param status=open
+```
+
+## Open the TUI or web surface
+
+```sh
+pavo open                 # ratatui host, dashboard
+pavo open demo:deps       # straight to a deep link
+
+pavo serve --port 7420    # localhost bridge + web host
+```
+
+## Next
+
+* [Your first view](/tutorials/first-view)
+* [Architecture](/explanation/architecture)
+* [CLI reference](/reference/cli)
+
+---
+
+---
+url: /pavo/tutorials/first-view.md
+---
+# Your first view
+
+This tutorial takes you from a fresh checkout to a rendered view —
+using the `demo` example driver, which exercises the whole ViewNode
+IR (table, kv, markdown, graph, tree) plus navbar/dashboard/statusbar
+contributions.
+
+## 1. Build and install pavo
+
+```sh
+cd pavo
+cargo xtask install
+```
+
+This release-builds `pavo` and `tamias-driver-config` into
+`~/.cargo/bin`.
+
+## 2. Put the demo driver on PATH
+
+```sh
+export PATH="$PWD/examples/drivers/demo:$PATH"
+pavo drivers
+```
+
+Expected output:
+
+```
+config  Config  v0.1.0  views:2  renderers:0  contributes: statusbar:1
+demo  Demo  v0.1.0  views:3  renderers:0  contributes: navbar:2 dashboard:1 statusbar:1
+```
+
+`config` is the config API driver that installed with pavo; `demo`
+is the example you just added. Drivers are discovered by executable
+name — `tamias-driver-demo` — not by registration.
+
+## 3. List and render views
+
+```sh
+pavo views
+```
+
+```
+demo:board      /demo/board     Board
+config:show     /config        Config
+demo:deps       /demo/deps     Dependencies
+…
+```
+
+```sh
+pavo view demo:board
+```
+
+The default `text` format summarizes the ViewNode tree plus the data
+bound to it. Try the other formats:
+
+```sh
+pavo view demo:board --format json       # raw ViewResult
+pavo view demo:deps --format dot         # graph → graphviz
+pavo view demo:deps --format mermaid     # graph → mermaid
+```
+
+## 4. Pass params
+
+Views declare query bindings; callers pass params that merge into
+them:
+
+```sh
+pavo view demo:board --param status=open
+pavo view demo:board --param status=done
+```
+
+`--param k=v` accepts repeated pairs; values parse as JSON when
+possible (`n=42`, `ok=true`).
+
+## 5. See the merged chrome
+
+```sh
+pavo chrome
+```
+
+Lists every driver's contribution slots — navbar entries, dashboard
+panels, statusbar items, routes — merged deterministically. The same
+chrome drives the TUI rail and the web dashboard.
+
+## What just happened
+
+`pavo view demo:board` resolved the deep link `demo:board`, spawned
+`tamias-driver-demo serve`, and spoke the wire:
+
+```
+→ {"op":"view","view":"board","params":{}}
+← {"ok":true,"result":{"view":{…ViewSpec…},"data":{…}}}
+```
+
+The driver returned a declarative tree (`panel` → `kv` + `table` +
+`markdown`) plus query-fed data; pavo's built-in renderers
+interpreted it. No product code ran inside pavo — the driver is a
+separate process, and the IR is the only thing that crossed the
+boundary.
+
+## Next
+
+* [Deep links](/tutorials/deep-links) — stable URLs for views and params
+* [Write a driver](/how-to/write-a-driver) — build your own
+* [The wire protocol](/reference/wire-ops) — the ops in detail
+
+---
+
+---
+url: /pavo/tutorials/deep-links.md
+---
+# Deep links
+
+Every view has a stable `<driver>:<view>` ref. On the CLI it is an
+argument; on the web it is a URL — the same link agents and humans
+can drop into PRs, issues, and handoffs.
+
+## The ref
+
+```
+pavo view demo:board
+demo:board  →  route /demo/board  →  ViewSpec { id: "board" }
+```
+
+`pavo views` lists every ref; `pavo view --help` covers the CLI
+flags (`--param`, `--format`, `--json`).
+
+## Params in URLs
+
+Views take params (`--param k=v` on the CLI). In URLs they can be
+carried three ways — all normalize to the same `param.<k>=<v>`
+pairs the bridge API understands:
+
+```
+/view/myco:item/id=T-001/verbose        path segments: one k=v each
+/view/myco:item?id=T-001&verbose        bare query keys (no prefix)
+/view/myco:item?param.id=T-001          legacy param.* form (still works)
+```
+
+Grammar details (parsed by `web/app/utils/view-link.ts`; the
+no-build `/view/` stub in `pavo serve` speaks the same rules):
+
+* The **first** path segment after `/view/` is the `<driver>:<view>`
+  ref (the colon may be percent-encoded). Every later segment is one
+  param: `key=value`, split at the **first** `=` (values may contain
+  `=`); a bare `key` means an empty-string value; empty keys are
+  dropped. So `/view/myco:item/T-001` sets param `T-001` to `""` —
+  write `/view/myco:item/id=T-001` for a real param.
+* Query keys are params too: bare `?k=v`, plus the legacy
+  `?param.k=v` (prefix stripped).
+* Precedence, lowest → highest: **path segments < bare query keys <
+  `param.*` keys** — the bridge merges last-wins, so later sources
+  override earlier ones on a key collision.
+* Values parse as JSON when possible (`n=42`, `ok=true`, `j={…}`),
+  else strings — identical to `--param` / `/api/view?param.*`.
+
+## Serving the links
+
+`pavo serve` prints `listening http://127.0.0.1:<port>`; open the
+printed URL for the dashboard, or append a deep link directly:
+
+```
+http://127.0.0.1:7420/view/demo%3Aboard
+http://127.0.0.1:7420/view/demo:board/status=open
+```
+
+With `cd web && npm run build` the bridge serves the Nuxt app;
+without a build it serves a built-in landing page that still
+understands `/view/` links.
+
+## CLI equivalents
+
+```sh
+pavo view demo:board --param status=open
+pavo open demo:deps          # TUI deep link (falls back to text off-TTY)
+curl 'localhost:7420/api/view?ref=demo:board&param.status=open'
+```
+
+The `param.*` query convention is what the `/api/view` endpoint
+already speaks — URL path segments and bare query keys are
+normalized into it before the bridge sees them.
+
+---
+
+---
+url: /pavo/how-to/install-a-driver.md
+---
+# Install a driver
+
+Pavo discovers view providers as executables named
+`tamias-driver-<type>` — the same convention tamias uses for content
+drivers. There is no registry lookup and no config file: if the
+binary is findable and answers `manifest`, pavo uses it.
+
+## Discovery locations
+
+1. **`PATH`** — any directory on your shell's `PATH`.
+2. **`<tamias-home>/drivers/`** — `$TAMIAS_HOME` if set, else
+   `$XDG_DATA_HOME/tamias`, else `~/.local/share/tamias`, else
+   `./.tamias`. Symlinks work.
+
+```bash
+# on PATH (development)
+export PATH="$PWD/examples/drivers/demo:$PATH"
+
+# or into the tamias drivers dir (installed)
+mkdir -p "${TAMIAS_HOME:-~/.local/share/tamias}/drivers"
+ln -s "$PWD/examples/drivers/demo/tamias-driver-demo" \
+      "${TAMIAS_HOME:-~/.local/share/tamias}/drivers/tamias-driver-demo"
+```
+
+## What counts as a pavo driver
+
+A `tamias-driver-*` executable is a pavo driver when its `manifest`
+answers a [`DriverManifest`](/reference/driver-manifest) with
+`"serve"` in `verbs` (or `"pavo"` in `capabilities`). Drivers that
+only do tamias install verbs are ignored by pavo.
+
+```bash
+printf '{"op":"manifest"}\n' | tamias-driver-demo serve
+pavo drivers    # confirm discovery
+```
+
+## Installing real product drivers
+
+Product drivers ship from their own repos — `tamias-driver-kuda`
+(kuda), `tamias-driver-myco` (myco), `tamias-driver-cuora` (cuora),
+`tamias-driver-sturn` (sturn), `tamias-driver-tamias` (tamias),
+`tamias-driver-mimus` (mimus), `tamias-driver-sepia` (sepia),
+`tamias-driver-bupha` (bupha). Install them like any tamias package
+(they are `tamias-driver-*` content) or drop the binary on `PATH`:
+
+```bash
+tamias install git:9aia/myco//drivers/myco#v0.4.0   # example ref shape
+# or:
+cargo install --git https://github.com/9aia/myco tamias-driver-myco
+```
+
+Once installed they are discovered exactly like the examples —
+`pavo drivers` lists them, `pavo views` lists their views.
+
+Compiled drivers can also ride inside tamias packages: stage
+prebuilt binaries under `drivers/bin/<rustc-target-triple>/`
+(e.g. `drivers/bin/x86_64-unknown-linux-gnu/tamias-driver-foo`) —
+`tamias install --allow-drivers` picks the host triple, verifies the
+payload digest, and lands an executable in `<tamias-home>/drivers/`.
+See tamias's `examples/README.md` for the publish recipe.
+
+## Verifying
+
+```bash
+./scripts/smoke-examples.sh   # repo root — runs the example set end-to-end
+pavo-testkit                  # conformance: every driver passes the same suite
+```
+
+`pavo-testkit`'s `check_driver` runs the wire contract over any
+driver binary; `FixtureDriver` builds fake drivers for host tests.
+See [Write a driver](/how-to/write-a-driver).
+
+---
+
+---
+url: /pavo/how-to/write-a-driver.md
+---
+# Write a driver
+
+A pavo driver is an executable named `tamias-driver-<type>` that
+answers the ndjson JSON-RPC wire on its `serve` verb — the same
+convention as `myco serve`, `cuora serve`, `sepia serve`. The
+driver owns its manifest and ViewNode trees; product state is only
+needed when a `view`/`query` op actually runs.
+
+## The contract in one paragraph
+
+Spawned as `tamias-driver-<type> serve`, the driver reads one JSON
+request per line on stdin and writes one JSON response per line on
+stdout: `{"op":"manifest"}` → the
+[`DriverManifest`](/reference/driver-manifest), `{"op":"views"}` →
+view summaries, `{"op":"view","view":"…","params":{…}}` → a
+`ViewResult` (tree + bound data), `{"op":"query",…}` → one query's
+data. `{"op":"submit","view":"…","form":"…"?,"values":{…}}` →
+a `SubmitResult` backs interactive `form` nodes (see
+[Wire ops → submit](/reference/wire-ops#submit)). Every response is
+`{"ok":true,"result":…}` or `{"ok":false,"error":"…"}`. Full spec:
+[Wire ops](/reference/wire-ops).
+
+## Minimal shape
+
+```python
+#!/usr/bin/env python3
+# tamias-driver-hello — stdlib only, like examples/drivers/*
+import json, sys
+
+def respond(req):
+    op = req.get("op")
+    if op == "manifest":
+        return {"name": "hello", "title": "Hello", "version": "0.1.0",
+                "verbs": ["manifest", "serve"], "capabilities": ["pavo"],
+                "views": [view_spec()]}
+    if op == "views":
+        return [{"id": "hi", "title": "Hello", "route": "/hello/hi",
+                 "queries": []}]
+    if op == "view" and req.get("view") == "hi":
+        return {"view": view_spec(), "data": {}}
+    return {"ok": False}  # handled below
+
+def view_spec():
+    return {"id": "hi", "title": "Hello", "route": "/hello/hi",
+            "queries": [],
+            "root": {"kind": "markdown",
+                     "text": "Hello from **pavo**!"}}
+
+for line in sys.stdin:
+    try:
+        req = json.loads(line)
+        if req.get("op") == "manifest":
+            out = {"ok": True, "result": respond(req)}
+        elif req.get("op") == "views":
+            out = {"ok": True, "result": respond(req)}
+        elif req.get("op") == "view":
+            out = {"ok": True, "result": respond(req)}
+        else:
+            out = {"ok": False, "error": f"unknown op {req.get('op')!r}"}
+    except Exception as e:
+        out = {"ok": False, "error": str(e)}
+    sys.stdout.write(json.dumps(out) + "\n")
+    sys.stdout.flush()
+```
+
+Save it as `tamias-driver-hello`, `chmod +x`, put it on `PATH`, and
+`pavo view hello:hi` renders the markdown node.
+
+## Adding data: query bindings
+
+Nodes pull data through `NodeBase.query` — a name that references a
+[`QueryBinding`](/reference/driver-manifest) on the enclosing
+`ViewSpec`:
+
+```json
+"queries": [{"name": "items", "op": "query", "params": {"kind": "items"}}],
+"root": {"kind": "table",
+         "query": "items",
+         "columns": [{"key": "id", "title": "ID"},
+                     {"key": "title", "title": "Title"}]}
+```
+
+When pavo resolves the view it calls the binding's `op` on your
+`serve` and puts the result in `ViewResult.data["items"]`. The
+`table` node reads `rows` from it (objects keyed by column `key`,
+or inline `rows` arrays). A binding that fails lands as
+`{"error": "…"}` in `data` — the view still renders (partial
+degradation is the contract).
+
+## Adding chrome: contributes
+
+```json
+"contributes": {
+  "navbar":    [{"id": "hello:home", "title": "Hello", "route": "/hello/hi"}],
+  "dashboard": [{"id": "hello:panel", "title": "Hello", "route": "/hello/hi"}],
+  "statusbar": [{"id": "hello:status", "title": "ok", "route": "/hello/hi"}],
+  "routes":    [{"id": "hello:admin", "title": "Admin", "route": "/hello/admin"}]
+}
+```
+
+Slots merge across drivers by `priority` (lower wins, default
+100\). Unknown slot names round-trip via `contributes.extra` — safe
+to emit slots a given host doesn't know yet.
+
+## Rust drivers
+
+A driver can be any language — the wire is ndjson JSON. For Rust,
+depend on the published contract crate instead of hand-rolling types:
+
+```toml
+pavo-protocol = "0.1"   # crates.io — manifests, ViewNode IR, ops
+```
+
+`pavo-testkit` (conformance suite) is not yet published — depend on it
+by git (`github.com:9aia/pavo`) like the product drivers do. See
+`crates/pavo-driver-config/` for a first-party example.
+
+## The proxy pattern (recommended for real products)
+
+Don't reimplement your product's data layer — translate the wire.
+`examples/drivers/myco/` shows the canonical shape:
+
+* `manifest`, `views`, and capability probes are answered **locally**
+  — pavo discovers the driver even when the product isn't running.
+* `view`/`query` ops resolve each binding through one persistent
+  `myco serve` child speaking **JSON-RPC 2.0** (myco's wire is not
+  pavo's `{"op":…}` envelope — translation is the driver's job).
+* If the product is absent, return `ok:false` with a clear error;
+  the host degrades that binding, not the whole chrome.
+
+The production versions live in each product repo
+(`tamias-driver-kuda`, `tamias-driver-myco`, `tamias-driver-cuora`).
+
+## Stay compatible
+
+* **Additive-only**: new optional fields and new `kind` variants may
+  appear; never change existing spellings. Renderers ignore unknown
+  kinds (they degrade to KV) — but don't rely on that for your own
+  core UX.
+* **`node`/`props` are open**: put renderer hints in `props`; hosts
+  pass them through untouched.
+* **Test against the contract**: `pavo-testkit`'s `check_driver`
+  runs the conformance suite over your binary; `FixtureDriver` can
+  stand in for your driver in host tests. Golden-fixture guidance:
+  `cargo xtask test` runs the example drivers through the suite.
+
+## Reference implementations
+
+| Driver | Shows |
+| --- | --- |
+| `examples/drivers/demo/` | board (table+kv+markdown), deps `graph`, timeline `tree`; all chrome slots |
+| `examples/drivers/myco/` | thin proxy onto `myco serve`'s JSON-RPC wire; degrades when myco is absent |
+| `crates/pavo-driver-config/` | first-party Rust driver — the common config API (see [Use the config API](/how-to/use-config-api)) |
+
+---
+
+---
+url: /pavo/how-to/write-a-renderer-plugin.md
+---
+# Write a renderer plugin
+
+View-kind renderers are themselves tamias drivers — there is no
+separate plugin ecosystem. A driver whose manifest carries
+`renderers[]` claims ViewNode kinds on one or more surfaces and
+answers the `render` wire op with a canonical
+[`RenderModel`](/reference/wire-ops#rendermodel).
+
+Use this when a built-in interpretation isn't good enough —
+`examples/drivers/viz-graph/` claims `graph` and renders SVG,
+ascii edge lists, and mermaid-free layouts the built-ins don't.
+
+## 1. Declare the claim in the manifest
+
+```json
+"renderers": [{
+  "id": "graph",
+  "kinds": ["graph"],
+  "priority": 50,
+  "entry": "graph",
+  "surfaces": {
+    "cli": { "formats": ["svg", "ascii"] },
+    "tui": true,
+    "web": { "component": "viz-graph", "island": true }
+  }
+}]
+```
+
+* `kinds` — ViewNode `kind` strings, or `["*"]` for a catch-all.
+  Explicit kinds beat `"*"`; lower `priority` wins conflicts
+  (default 100); ties break by driver name then renderer id — the
+  same policy chrome contributions use.
+* `surfaces.cli.formats` — the `--format` values you claim;
+  **empty = wildcard** (you handle every format asked, including
+  `text`). Built-in names are claimable: listing `dot`, `mermaid`,
+  or `text` overrides the built-in renderer *for your claimed
+  nodes* — unclaimed nodes keep the built-in output. `json` is
+  never claimable (the raw `ViewResult` dump is host-owned).
+* `surfaces.tui` — `true` to render on the ratatui host.
+* `surfaces.web` — `component` is a hint for rich mounts;
+  `island: true` marks output needing client-side execution.
+
+A driver may declare renderers **with zero views** — a pure plugin
+ships no routes of its own.
+
+## 2. Answer the `render` op
+
+For every node whose kind is claimed on the asking surface, the
+host sends:
+
+```
+{"op":"render","kind":"graph","node":{…ViewNode verbatim…},
+ "data":{…view data map…},"surface":"cli|tui|web","format":"…"?}
+```
+
+* `node` is the raw ViewNode JSON — unknown/future fields reach you
+  untouched.
+* `data` is the view's query-binding map verbatim — resolve
+  `node.query` against it yourself.
+* `surface` is `"cli"`, `"tui"`, or `"web"` (open string — hosts may
+  add surfaces).
+* `format` is the surface's format hint (`"svg"`, `"ascii"`, …)
+  when one applies.
+
+Respond with a `RenderModel` (`{"ok":true,"result":{…}}`):
+
+| variant       | shape                                        | CLI            | TUI          | web              |
+|---------------|----------------------------------------------|----------------|--------------|------------------|
+| `rows`        | `{type,headers,aligns?,rows}`                | aligned table  | table rows   | `<table>`        |
+| `svg`         | `{type,markup}` — self-contained `<svg>`     | raw markup     | `[svg]` hint | `v-html` island  |
+| `text`        | `{type,lines}`                               | lines          | lines        | `<pre>`          |
+| `placeholder` | `{type,component,props?}`                    | `[component]`  | box + detail | named component  |
+
+Rules:
+
+* **Built-ins are not reserved** — claim `graph` (or any kind) and
+  you override built-in rendering on the surfaces you declare.
+* **Fallback is mandatory** — when no plugin claims a kind+surface,
+  or `render` errors/times out, hosts use the built-in
+  interpretation. Plugin failure must never break a view.
+* **No HTML in RenderModel** — self-contained markup is `svg` only.
+* Unknown `type` values degrade like `placeholder` on every
+  surface — keep to the four variants.
+
+## 3. Test it
+
+```bash
+export PATH="$PWD/examples/drivers/viz-graph:$PATH"
+pavo drivers                          # viz-graph … renderers:1
+pavo view demo:deps --format svg      # plugin SVG (claims svg+ascii)
+pavo view demo:deps --format mermaid  # built-in — plugin doesn't claim it
+pavo view demo:deps --format ascii    # plugin edge list
+```
+
+`/api/renderers` on `pavo serve` lists every claim;
+`/api/render` proxies a `render` op for the web surface's plugin
+path. `pavo-testkit` conformance covers drivers that answer
+`render` — see `check_driver`.
+
+## Reference
+
+`examples/drivers/viz-graph/tamias-driver-viz-graph` is the whole
+implementation (~200 lines of Python): manifest claim, `render`
+dispatch on `kind`/`surface`/`format`, three RenderModel shapes.
+Copy it.
+
+---
+
+---
+url: /pavo/how-to/serve-web.md
+---
+# Serve the web surface
+
+`pavo serve` is the localhost HTTP bridge between the browser and
+the driver plane — the only transport the web host uses. It binds
+`127.0.0.1` (localhost dev tool; CORS `*` on `/api/*`), prints
+`listening http://127.0.0.1:<port>` as its first stdout line, and
+serves two things:
+
+* **`/api/*`** — JSON `{"ok":…,"result"/"error"}` envelopes over the
+  same `Host` the CLI uses:
+  `GET /api/health|drivers|views|chrome|view|raw|query|submit|renderers|render`
+* **`/*`** — static files from `web/.output/public`, then `web/dist`,
+  then `$PAVO_WEB_DIR`; with no build present it serves a built-in
+  landing page that still understands `/view/` deep links.
+
+## Dev workflow (two terminals)
+
+```bash
+# 1. the bridge (7420 matches the Nuxt dev proxy default)
+export PATH="$PWD/examples/drivers/demo:$PATH"
+pavo serve --port 7420        # or: cargo run -p pavo -- serve --port 7420
+
+# 2. the app
+cd web && npm install && npm run dev    # http://localhost:3000
+```
+
+`web/server/api/[...].ts` proxies `/api/*` to the bridge in dev —
+target precedence: `PAVO_API_TARGET` > `NUXT_PUBLIC_PAVO_API` >
+`http://127.0.0.1:7420`.
+
+## Production-ish flow
+
+```bash
+cd web && npm run build      # static prerender → .output/public
+pavo serve                   # auto-detects web/.output/public
+```
+
+Open the printed `http://127.0.0.1:<port>/` — the dashboard lists
+drivers, views (deep links `/view/demo%3Aboard`), and chrome
+contributions; `/api/*` is same-origin, no CORS needed.
+
+`npm run generate` is equivalent (`nuxt generate`).
+`NITRO_PRESET=node-server npm run build` produces a standalone SSR
+build instead — then `server/api/*` also works and
+`NUXT_PUBLIC_PAVO_API` points the browser at the bridge directly.
+
+## Environment variables
+
+| Var | Where | Meaning |
+| --- | --- | --- |
+| `NUXT_PUBLIC_PAVO_API` | build/dev | absolute bridge base, e.g. `http://127.0.0.1:7420`. Empty (default) = same-origin `/api/…`. |
+| `PAVO_API_TARGET` | `nuxt dev` only | proxy target for `server/api/[...].ts`. |
+| `NITRO_PRESET` | build | `static` (default) or `node-server`. |
+| `PAVO_WEB_DIR` | `pavo serve` | explicit web-root override for static files. |
+| `PAVO_CONFIG` | `tamias-driver-config` | explicit config file path (see [Use the config API](/how-to/use-config-api)). |
+
+`pavo serve --port 0` picks a free port and prints it.
+
+## What the web app renders
+
+`web/app/components/ViewNode.vue` interprets the ViewNode IR
+recursively — panel/row/column layouts, table, tree, kv, markdown,
+interactive form (`submit_op` → `FormView` island hitting `/api/submit`), embed placeholder, KV degradation for unknown
+kinds. `graph` nodes render in `GraphIsland.vue`, a client-only
+SVG island (deterministic circle/spiral layout) — the *fallback*:
+a renderer plugin claiming `graph` for the `web` surface renders
+its canonical `RenderModel` via `/api/render` instead (placeholder
+while in flight, built-in only if the plugin fails or doesn't
+claim the kind). Driver-contributed `routes` link
+out; only views render natively in v1.
+
+## Security notes
+
+`npm audit` currently reports transitive vulnerabilities inside the
+Nuxt/Nitro build chain (see `web/README.md` for the breakdown);
+exposure is limited to the local dev/build toolchain — the shipped
+artifact is static files served by `pavo serve`. Re-check on Nuxt
+upgrades.
+
+---
+
+---
+url: /pavo/how-to/use-config-api.md
+---
+# Use the config API
+
+`tamias-driver-config` is the suite's **common config API** — a
+first-party pavo driver (Rust, in the workspace) that answers
+namespaced config queries over the `serve` wire. It is a
+convention layered on the `query` op, not part of the v1 wire
+contract itself: drivers that need product or host config spawn it
+and issue queries — they never open config files themselves.
+
+```bash
+printf '%s\n' '{"op":"query","query":"get","params":{"key":"myco.theme"}}' \
+  | tamias-driver-config serve
+# → {"ok":true,"result":{"query":"get","data":{"key":"myco.theme","value":"dark","found":true}}}
+```
+
+Products may later adopt the API natively; until then this driver
+is the one config surface. It installs with pavo
+(`cargo xtask install`) and contributes a `config:show` view plus a
+statusbar entry.
+
+## Queries
+
+| query      | params             | data                                          |
+| ---------- | ------------------ | --------------------------------------------- |
+| `get`      | `key` (dotted)     | `{key, value, found}`                         |
+| `set`      | `key`, `value`     | `{key, value, path, written}` or `{error}`    |
+| `resolve`  | —                  | merged config tree (nested JSON object)       |
+| `config`   | —                  | merged config flattened to dotted keys        |
+| `sources`  | —                  | every contributing layer, in precedence order |
+
+`set` writes the **project-level** file: the `--config`/`PAVO_CONFIG`
+path when one was given, else the nearest `pavo.toml`/`pavo.json`
+found walking up from the cwd, else a fresh `./pavo.toml`. Dotted
+keys are supported (`server.port` creates the `[server]` table);
+TOML writes preserve comments/formatting (`toml_edit`), JSON is
+rewritten pretty-printed. `null` and nested objects can't be stored
+in TOML — use dotted keys for tables.
+
+## Resolution order
+
+Layers merge low → high precedence (later wins per-key, nested
+tables merge recursively):
+
+1. **defaults** — `theme=dark`, `statusbar=true`, `refresh_ms=5000`
+2. **global** — `$XDG_CONFIG_HOME/pavo/pavo.{toml,json}` or
+   `~/.config/pavo/pavo.{toml,json}`
+3. **project** — `pavo.toml` and `pavo.json` in every ancestor of the
+   cwd, filesystem root → cwd (nearest file wins)
+4. **explicit** — `--config <path>` on argv (manual `serve` only —
+   pavo's spawned `serve` can't pass argv) or `$PAVO_CONFIG`
+5. **env** — `PAVO_CONFIG_*` scalar overrides:
+   `PAVO_CONFIG_THEME=light` → `theme`;
+   `PAVO_CONFIG_MYCO__THEME=x` → `myco.theme` (`__` = dot, `_` =
+   literal underscore). Values parse as JSON when possible.
+
+Formats: **TOML** and **JSON**. **YAML is unsupported** — no yaml dep
+in the workspace tree; `.yaml`/`.yml` files surface as `error` rows in
+`sources` rather than being silently misparsed.
+
+## Views
+
+| Deep link          | Route              | Shows                                        |
+| ------------------ | ------------------ | -------------------------------------------- |
+| `config:show`      | `/config`          | resolved KV + sources table + resolution doc |
+| `config:sources`   | `/config/sources`  | provenance table only                        |
+
+Contributes a `statusbar` entry linking to `/config`.
+
+```bash
+pavo view config:show
+pavo view config:sources
+PAVO_CONFIG_THEME=light pavo view config:show   # env override wins
+```
+
+## Keys are namespaced
+
+Callers use dotted paths — `myco.theme`, `kuda.index`, `pavo.refresh_ms`
+— never file paths or raw TOML. `resolve` returns the merged tree;
+`sources` returns every contributing layer so UIs can show
+provenance ("this value came from `~/.config/pavo/pavo.toml`").
+
+---
+
+---
+url: /pavo/reference/cli.md
+---
+# CLI reference
+
+```
+Visualization host for the 9aia tool suite
+
+Usage: pavo [COMMAND]
+
+Commands:
+  drivers     List discovered tamias-driver-* executables that speak pavo
+  views       List every <driver>:<view> ref with title/route
+  chrome      Show the merged contribution slots
+  view        Resolve a deep link and render it
+  query       Raw query-op passthrough to a driver
+  submit      Submit a form's field values (submit wire op)
+  serve       Run the localhost HTTP bridge for the web host
+  open        Hand off to pavo-tui (falls back to `view` text off-TTY)
+  manifest    Print the machine-readable capability manifest
+  schema      Print the verb schema
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+`--json` is a per-subcommand flag on the listing/query verbs;
+`view --format json` is its machine-readable mode. Errors go to
+stderr; exit codes are CI-meaningful: `0` ok, `1` view/driver error,
+`2` usage.
+
+## drivers
+
+```sh
+pavo drivers [--json]
+```
+
+Lists every discovered `tamias-driver-*` that speaks pavo — name,
+title, version, view count, renderer count, contributes summary.
+Discovery scans `PATH` and `<tamias-home>/drivers/`
+(`$TAMIAS_HOME` → `$XDG_DATA_HOME/tamias` → `~/.local/share/tamias`
+→ `./.tamias`).
+
+## views
+
+```sh
+pavo views [--driver <name>] [--json]
+```
+
+Every view as a `<driver>:<view>` ref with title, route, and query
+names. `--driver` filters to one driver.
+
+## chrome
+
+```sh
+pavo chrome [--json]
+```
+
+The merged contribution slots — `navbar`, `dashboard`, `statusbar`,
+`routes`, plus forward-compat `extra` slots — resolved across all
+drivers by priority.
+
+## view
+
+```sh
+pavo view <driver>:<view> [--param k=v …] [--format FMT] [--json]
+```
+
+Resolves the deep link and renders the ViewNode tree plus bound
+data.
+
+| `--format` | Output |
+| --- | --- |
+| `text` (default) | summary of the tree + bound data |
+| `json` | raw `ViewResult` |
+| `dot` | graph nodes → graphviz |
+| `mermaid` | graph nodes → mermaid |
+| `<plugin>` | any format a renderer plugin claims (e.g. `svg`, `ascii`) |
+
+Renderer plugins take precedence per node: a plugin listing a
+built-in format name (`text`/`dot`/`mermaid`) in
+`renderers[].surfaces.cli.formats` overrides it for the kinds it
+claims; unclaimed nodes keep the built-in output. `json` is
+host-owned and never routed to plugins.
+
+`--param k=v` merges caller params into every query binding;
+repeatable, values parse as JSON when possible. `--json` prints the
+machine-readable envelope.
+
+## query
+
+```sh
+pavo query <driver> <query> [--param k=v …] [--json]
+```
+
+Raw `query` op passthrough — `{"op":"query","query":"<query>",
+"params":{…}}` — for probing a driver's data without a view.
+
+## submit
+
+```sh
+pavo submit <driver>:<view> [--form <id>] [--param k=v …] [--json]
+```
+
+Sends the `submit` wire op — the form-interaction verb — with the
+given field values (`--param key=value`, repeatable; values parse as
+JSON when possible). `--form` picks a specific form node when the
+view carries several. Prints the driver's `SubmitResult` message and
+data; per-field validation `errors` exit 1 so CI can gate on them.
+`--json` dumps the full `SubmitResult` (including any updated
+`view`). Example: `pavo submit config:edit --param key=myco.theme --param value=dark`.
+
+## serve
+
+```sh
+pavo serve [--port N]
+```
+
+The localhost HTTP bridge (`127.0.0.1`; `--port 0` picks a free
+port). First stdout line is `listening http://127.0.0.1:<port>`.
+Endpoints and static serving: [Serve the web surface](/how-to/serve-web).
+
+## open
+
+```sh
+pavo open [<driver>:<view>]
+```
+
+Hands off to `pavo-tui` with the deep link, or the bare dashboard
+when no target is given. On a non-TTY it falls back to `pavo view`
+text output.
+
+## manifest / schema
+
+```sh
+pavo manifest   # the CLI's own capability manifest (sibling convention)
+pavo schema     # the verb schema
+```
+
+---
+
+---
+url: /pavo/reference/view-nodes.md
+---
+# ViewNode IR
+
+The declarative UI tree a driver emits and every pavo renderer
+(CLI, TUI, web) interprets. Wire shape: each node is a JSON object
+with a `"kind"` discriminator — internally tagged, no wrapper
+envelope. Rust source of truth:
+`crates/pavo-protocol/src/view_node.rs`;
+`protocol/v1/view-node.schema.json` mirrors it.
+
+```json
+{ "kind": "table", "title": "Board", "query": "items",
+  "columns": [{ "key": "id", "title": "ID" }],
+  "rows": [["T-001", "pavo scaffold"]] }
+```
+
+## Shared fields (NodeBase)
+
+Every kind flattens these to the top level:
+
+| field | type | meaning |
+| --- | --- | --- |
+| `id` | string? | stable id — deep-link target, diffing, expansion state |
+| `title` | string? | heading the renderer may show above the node |
+| `query` | string? | names a `QueryBinding` on the enclosing `ViewSpec`; kind-specific meaning (`table`→`rows`, `kv`→`pairs`, `tree`→`items`, `graph`→`nodes`/`edges`) |
+| `description` | string? | longer help text (tooltips, help panes) |
+| `props` | object | renderer hints (`density`, `direction`, `collapsed`, …); renderers ignore unknown keys |
+
+## Kinds
+
+| `kind` | purpose | key fields |
+| --- | --- | --- |
+| `panel` | titled container grouping children | `children[]` |
+| `row` | horizontal layout | `children[]`, `gap?` |
+| `column` | vertical layout | `children[]`, `gap?` |
+| `table` | tabular data | `columns[]` (`key`,`title`,`align?`,`width?`), `rows?` (inline cell arrays win over query data), `sortable?` |
+| `tree` | hierarchical items | `items[]` (`id?`,`label`,`detail?`,`icon?`,`children[]`,`props`), `expandable?` |
+| `graph` | nodes + edges; layout is the renderer's problem | `nodes[]` (`id`,`label`,`kind?`,`props`), `edges[]` (`from`,`to`,`label?`), `layout?` (`"dot"`,`"mermaid"`,`"layered"`,…) |
+| `form` | input fields + submit op — **interactive** via the `submit` wire op | `fields[]`, `submit_op?`, `submit_label?` |
+| `kv` | key/value pairs — detail panes, metadata, **universal degradation target** | `pairs[]` (`key`,`value`,`kind?`) |
+| `markdown` | free-form markdown | `text` |
+| `embed` | escape hatch for rich renderers | `component` (registry/web-component name); component props ride in `props` |
+
+### Field details
+
+* **`table.columns[].key`** — for query-fed data, rows arrive as
+  objects keyed by `key`; inline `rows` are positional arrays of
+  arbitrary JSON cells (renderers stringify).
+* **`table.rows`** — inline rows ship static previews; when both
+  inline rows and `query` data exist, inline wins.
+* **`tree.items`** — recursive; `id` is required for interactive
+  trees, optional for static previews. Omitted `items` (vs `[]`)
+  matters on the typed round-trip so an empty inline list can't
+  shadow query-bound data.
+* **`graph`** — the IR floor covers structure only. Real layout is
+  an `embed`/renderer-plugin concern; `layout` is a hint renderers
+  may ignore.
+* **`form.fields[].kind`** — `text` (default), `textarea`, `number`,
+  `bool`, `select` (with `options`). `required`, `default`, `value`,
+  `hint`, `editable` (default `true`; `false` renders read-only and
+  is never submitted), and `placeholder` are supported. Submission
+  goes through the [`submit` op](/reference/wire-ops#submit); the
+  form node's `id` is the `form` param when a view has several
+  forms, and `submit_op` names the driver-side action (`"set"`,
+  `"update"`, `"add"`, …).
+* **`embed`** — for visuals no built-in model covers (live graphs,
+  timelines, WASM). `component` resolves against the host's
+  renderer registry and, on web, registered components.
+
+## Degradation is mandatory
+
+Renderers that meet an unknown `kind` must degrade to generic
+key/value rendering rather than failing — forward compatibility is
+a host obligation, and the protocol is additive-only within v1. The
+same applies to `props` keys and enum values.
+
+---
+
+---
+url: /pavo/reference/wire-ops.md
+---
+# Wire ops
+
+The ndjson JSON-RPC convention every pavo driver speaks on its
+`serve` verb — the same framing as `tamias-serve`, `myco serve`,
+`cuora serve`, `sepia serve`. One JSON object per line on stdin,
+one response per line on stdout.
+
+Rust source of truth: `crates/pavo-protocol/src/wire.rs`;
+`protocol/v1/wire.schema.json` mirrors it.
+
+## Envelope
+
+Requests are discriminated by `op` (internally tagged, lowercase):
+
+```json
+{"op":"manifest"}
+{"op":"views"}
+{"op":"view","view":"board","params":{"status":"open"}}
+{"op":"query","query":"items","params":{"limit":5}}
+{"op":"render","kind":"graph","node":{…},"data":{…},
+ "surface":"cli","format":"svg"}
+{"op":"submit","view":"edit","form":"set-config",
+ "values":{"key":"myco.theme","value":"dark"}}
+```
+
+Responses:
+
+```json
+{"ok":true,"result":…}
+{"ok":false,"error":"…"}
+```
+
+Fields for the non-matching arm are absent (not null) — consumers
+match on `ok` alone. A driver must never crash the wire: malformed
+input and serialization failures become `ok:false` responses.
+
+## Ops
+
+### `manifest`
+
+`{"op":"manifest"}` → [`DriverManifest`](/reference/driver-manifest).
+Discovery verb — cheap, must not require product state. This is how
+pavo decides a `tamias-driver-*` is a view driver (`"serve"` in
+`verbs` or `"pavo"` in `capabilities`).
+
+### `views`
+
+`{"op":"views"}` → `Vec<ViewSummary>` — `{id, title, route,
+description?, queries[]}` per view, without the `root` trees.
+Lightweight listing for `pavo views` and picker UIs; full trees come
+from `view`.
+
+### `view`
+
+`{"op":"view","view":"<id>","params":{…}}` →
+[`ViewResult`](/reference/wire-ops#viewresult):
+
+```json
+{"view": { …ViewSpec including root tree… },
+ "data": { "<binding-name>": <payload>, … }}
+```
+
+The host resolves each `QueryBinding` on the spec (calling its `op`
+with static params merged under caller `params`) and puts results
+in `data` keyed by binding name — `data["items"]` feeds every node
+whose `query == "items"`. **Partial degradation**: a binding that
+fails appears as `{"error": "…"}` in `data` rather than failing the
+whole view.
+
+### `query`
+
+`{"op":"query","query":"<name>","params":{…}}` →
+`{"query":"<name>","data":<payload>}` — execute a single named
+query binding, or a raw product op for thin drivers. Powers
+`pavo query` and ad-hoc data probes; also the transport the
+[config API](/how-to/use-config-api) rides (`query` = `get`/`set`/
+`resolve`/`sources`/`config`).
+
+### `render`
+
+`{"op":"render","kind":"<kind>","node":{…ViewNode verbatim…},
+"data":{…view data map…},"surface":"cli|tui|web","format":"…"?}`
+→ [`RenderModel`](/reference/wire-ops#rendermodel) — the
+renderer-plugin verb. Only sent to drivers whose manifest claims
+the node's kind on the asking surface (see
+[Renderer plugins](/explanation/renderer-plugins)).
+
+* `node` — raw ViewNode JSON, passed untyped so unknown/future
+  fields survive.
+* `data` — the same binding map `view` results carry.
+* `surface` — open string; hosts may add surfaces.
+* `format` — the surface's format hint when one applies.
+
+### `submit`
+
+`{"op":"submit","view":"<id>","form":"<id>"?,"values":{…}}` →
+[`SubmitResult`](#submitresult) — the form-submission verb. A
+surface collects the editable fields of a `form` ViewNode and posts
+their `key` → value pairs here.
+
+* `view` — the view the form lives in (same namespace as `view`).
+* `form` — optional form-node `id` when the view carries several
+  forms; absent = the driver's default/first form.
+* `values` — submitted field values keyed by `FormField.key`.
+
+The driver resolves the form node, reads its `submit_op`
+(driver-defined: `"set"`, `"update"`, `"add"`, …), and answers a
+`SubmitResult`. Drivers without form support answer `ok:false`.
+`pavo submit <driver>:<view> --param k=v …` is the CLI face;
+`GET /api/submit?ref=…&values={…}` the web-bridge face.
+
+## Types
+
+### ViewSummary
+
+`{id, title, route, description?, queries[]}` — a `ViewSpec` minus
+`root`, for cheap listing.
+
+### ViewResult
+
+`{view: ViewSpec, data: {<binding>: payload}}` — the resolved view.
+Failed bindings carry `{"error": "…"}` payloads.
+
+### QueryResult
+
+`{query: string, data: any}` — one binding's data payload; shape is
+driver-defined, hosts pass it through verbatim.
+
+### SubmitResult
+
+`{message?, errors?, data?, view?}` — every field optional; a bare
+`{"message":"…"}` is complete. `errors` is a per-field validation
+map keyed by `FormField.key` — non-empty means the driver *rejected*
+the submit (hosts re-render with the messages; `pavo submit` exits
+1\). `view`, when present, is a fresh `ViewResult` to swap in.
+Unknown fields survive typed round-trips.
+
+### RenderModel
+
+The canonical intermediate output a renderer plugin emits —
+internally tagged on `"type"`:
+
+| `type` | shape | CLI | TUI | web |
+| --- | --- | --- | --- | --- |
+| `rows` | `{type, headers[], aligns?[], rows[][]}` | aligned table | table rows | `<table>` |
+| `svg` | `{type, markup}` — self-contained `<svg>` | raw markup | `[svg]` hint | `v-html` island |
+| `text` | `{type, lines[]}` | lines | lines | `<pre>` |
+| `placeholder` | `{type, component, props?}` | `[component]` | box + detail | named component |
+
+Rules: no HTML in RenderModel (self-contained markup is `svg`
+only); unknown `type` degrades like `placeholder`; plugins needing
+richer output use `placeholder` or `svg`.
+
+## Versioning
+
+**Additive-only within v1**: new optional fields, new `op`s, new
+`kind`/`type` variants may appear at any time; existing fields and
+spellings never change meaning. Unknown ops are protocol errors —
+hosts surface the driver's raw error text. Breaking changes bump the
+version directory (`protocol/v2/`) with a migration note; v1 stays
+frozen for existing drivers.
+
+---
+
+---
+url: /pavo/reference/driver-manifest.md
+---
+# Driver manifest
+
+What `tamias-driver-<type> manifest` (or `{"op":"manifest"}` on the
+`serve` wire) answers — the discovery contract. Pavo reads it
+without spawning `serve`, so routes and chrome contributions are
+listable even when the product isn't running.
+
+Rust source of truth: `crates/pavo-protocol/src/manifest.rs`;
+`protocol/v1/driver-manifest.schema.json` mirrors it.
+
+```json
+{
+  "name": "myco",
+  "title": "Myco",
+  "icon": "🗂️",
+  "version": "0.4.0",
+  "verbs": ["manifest", "serve"],
+  "capabilities": ["pavo"],
+  "contributes": { "navbar": [...], "routes": [...] },
+  "views": [ { "id": "board", "route": "/myco/board", "root": {…} } ],
+  "renderers": [ { "id": "graph", "kinds": ["graph"], "surfaces": {…} } ]
+}
+```
+
+## Fields
+
+| field | type | meaning |
+| --- | --- | --- |
+| `name` | string | the `<type>` in `tamias-driver-<type>`; namespaces routes (`/<name>/<view>`) |
+| `title` | string | human-facing title for chrome (navbar, window titles) |
+| `icon` | string? | emoji, icon name, or renderer-resolvable path |
+| `version` | string | semver |
+| `verbs` | string\[] | wire verbs beyond tamias install verbs; pavo treats a driver as a view driver iff `"serve"` is listed (or `capabilities` contains `"pavo"`) |
+| `capabilities` | string\[] | free-form role tags (`"pavo"`, `"config"`, `"chrome"`) |
+| `contributes` | object | chrome slots — see below |
+| `views` | ViewSpec\[] | views the driver renders |
+| `renderers` | RendererDecl\[] | view-kind renderer plugins — may appear with zero views |
+
+## contributes
+
+Named places in pavo's chrome where drivers register entries. The
+four built-in slots:
+
+| slot | lands in |
+| --- | --- |
+| `navbar` | top navigation bar (web/TUI chrome) |
+| `dashboard` | the shared dashboard route — composable panels from many drivers |
+| `statusbar` | bottom status bar — one-line summaries |
+| `routes` | standalone routes the driver owns outside its views |
+
+Unknown slots are preserved via `contributes.extra` (serde
+flatten) — newer drivers degrade gracefully on older hosts.
+
+### Contribution
+
+```json
+{"id": "demo:board", "title": "Board", "route": "/demo/board",
+ "priority": 100, "icon": "📋"}
+```
+
+`id` is namespaced `<driver>:<id>` by convention so contributions
+never collide; `route` is host-relative; `priority` orders entries
+within a slot (lower wins, default 100, ties by discovery order).
+
+## views — ViewSpec
+
+```json
+{"id": "board", "title": "Board", "route": "/demo/board",
+ "description": "…",
+ "queries": [{"name": "items", "op": "query",
+              "params": {"kind": "items"}}],
+ "root": { "kind": "panel", "children": [ …ViewNode… ] }}
+```
+
+* `id` — unique within the driver; `<driver>:<id>` is the deep link.
+* `route` — the host-relative path the view answers.
+* `queries` — named data sources the tree references via
+  `NodeBase.query`. Each `QueryBinding` has `name` (what nodes
+  reference), `op` (the wire op the host calls — typically
+  `"query"`), and static `params` merged under caller-supplied view
+  params.
+* `root` — the declarative [`ViewNode`](/reference/view-nodes) tree.
+
+## renderers — RendererDecl
+
+```json
+{"id": "graph", "kinds": ["graph"], "priority": 50,
+ "entry": "graph",
+ "surfaces": {
+   "cli":  {"formats": ["svg", "ascii"]},
+   "tui":  true,
+   "web":  {"component": "viz-graph", "island": true}}}
+```
+
+| field | meaning |
+| --- | --- |
+| `id` | renderer id — namespaced `<driver>:<id>` by convention |
+| `kinds` | node kinds claimed — ViewNode `kind` strings or `"*"` catch-all; explicit beats `"*"`, lower `priority` wins, ties by driver name then renderer id |
+| `surfaces` | per-surface support; absent surface = unsupported |
+| `surfaces.cli.formats` | `--format` values claimed; **empty = wildcard** (all formats incl. `text`) |
+| `surfaces.tui` | `true` renders plugin nodes on the ratatui host |
+| `surfaces.web.component` / `.island` | component hint; `island: true` = needs client-side execution |
+| `priority` | ordering hint, default 100 |
+| `entry` | optional entry-point hint (reserved; hosts currently always use the wire) |
+
+Claims are canonical per node on their declared surfaces — a plugin
+listing a built-in `--format` name (`text`/`dot`/`mermaid`) overrides
+it for claimed nodes (`json` stays host-owned); unclaimed
+kinds/surfaces keep built-in rendering, and plugin failure degrades
+to it. See [Write a renderer plugin](/how-to/write-a-renderer-plugin)
+and [Renderer plugins](/explanation/renderer-plugins).
+
+---
+
+---
+url: /pavo/reference/config.md
+---
+# Config
+
+Host/product configuration for the pavo suite flows through the
+**config API** — `tamias-driver-config`, a first-party driver that
+answers namespaced `query` ops over the `serve` wire. There is no
+`pavo.toml` read directly by the host; drivers and products query
+the config driver (or adopt the API natively later).
+
+Full contract: `crates/pavo-driver-config/README.md`; usage:
+[Use the config API](/how-to/use-config-api).
+
+## Queries
+
+| query | params | returns |
+| --- | --- | --- |
+| `get` | `key` (dotted) | `{key, value, found}` |
+| `set` | `key`, `value` | `{key, value, path, written}` |
+| `resolve` | — | merged config tree (nested JSON) |
+| `config` | — | merged config flattened to dotted keys |
+| `sources` | — | every contributing layer, in precedence order |
+
+Keys are namespaced dotted paths (`myco.theme`, `kuda.index`) —
+callers never read config files directly.
+
+## Layers (low → high precedence)
+
+1. **defaults** — `theme=dark`, `statusbar=true`, `refresh_ms=5000`
+2. **global** — `$XDG_CONFIG_HOME/pavo/pavo.{toml,json}` or
+   `~/.config/pavo/pavo.{toml,json}`
+3. **project** — `pavo.toml` and `pavo.json` in every ancestor of the
+   cwd, filesystem root → cwd (nearest file wins)
+4. **explicit** — `--config <path>` on argv (manual `serve` only) or
+   `$PAVO_CONFIG`
+5. **env** — `PAVO_CONFIG_*` scalar overrides
+
+## Environment variables
+
+| Var | Meaning |
+| --- | --- |
+| `TAMIAS_HOME` | tamias home override — also the default drivers dir parent (`$TAMIAS_HOME/drivers`) |
+| `XDG_DATA_HOME` | fallback parent for `<tamias-home>` (`$XDG_DATA_HOME/tamias`) |
+| `XDG_CONFIG_HOME` | fallback parent for global config (`$XDG_CONFIG_HOME/pavo/`) |
+| `PAVO_CONFIG` | explicit config file path for `tamias-driver-config` |
+| `PAVO_CONFIG_*` | env overrides — `PAVO_CONFIG_THEME=light` → `theme`; `PAVO_CONFIG_MYCO__THEME=x` → `myco.theme` (`__` = dot, `_` = literal underscore); values parse as JSON when possible |
+| `PAVO_WEB_DIR` | `pavo serve` static web-root override |
+| `NUXT_PUBLIC_PAVO_API` | web app: absolute bridge base (empty = same-origin `/api`) |
+| `PAVO_API_TARGET` | `nuxt dev` only: `/api/*` proxy target |
+| `NITRO_PRESET` | web build: `static` (default) or `node-server` |
+
+## Formats
+
+**TOML** and **JSON** only — no YAML dependency in the workspace
+tree. `.yaml`/`.yml` files surface as `error` rows in `sources`
+rather than being silently misparsed.
+
+`set` writes the project-level file (explicit path → nearest
+`pavo.toml`/`pavo.json` → fresh `./pavo.toml`); TOML writes preserve
+comments via `toml_edit`. `null` and nested objects can't be stored
+in TOML — use dotted keys for tables.
+
+---
+
+---
+url: /pavo/reference/crate-api.md
+---
+# Crate API
+
+Rustdoc for every workspace crate — public APIs are
+documented at source (doc comments).
+
+* [pavo-protocol](/pavo/api/pavo_protocol/index.html) — domain
+* [pavo-core](/pavo/api/pavo_core/index.html) — host
+* [pavo-driver-config](/pavo/api/pavo_driver_config/index.html) — adapter
+* [pavo-testkit](/pavo/api/pavo_testkit/index.html) — adapter
+* [pavo-tui](/pavo/api/pavo_tui/index.html) — adapter
+* [pavo](/pavo/api/pavo/index.html) — binary
+
+---
+
+---
+url: /pavo/explanation/architecture.md
+---
+# Architecture
+
+Pavo is the visualization **host** for the 9aia org's tool suite —
+the factory's screen. Named for *Pavo* — the peafowl genus; the
+display animal.
+
+The core idea: **products ship drivers, not UIs.** A product
+(kuda, myco, cuora, …) ships a `tamias-driver-<type>` executable
+that speaks an ndjson JSON-RPC wire and emits a declarative
+**ViewNode IR** — a tree of typed nodes (`panel`, `table`, `tree`,
+`graph`, `form`, `kv`, `markdown`, `embed`, `row`, `column`) plus
+view-model data. Pavo's renderers — CLI, TUI, web — interpret those
+trees natively. There is no `<product> ui` per product; pavo is the
+single entry point, and a driver installed once visualizes on every
+surface.
+
+```
+tamias-driver-* (serve, stdio)          pavo host
+┌──────────────────────────┐      ┌─────────────────────────────┐
+│ manifest → routes+chrome │ ───▶ │ pavo-core Host              │
+│ view    → ViewNode + data│ ◀─── │  discovery → manifests      │
+│ query   → data payload   │      │  → DriverClient (1 proc/    │
+│ render  → RenderModel    │      │    driver, timeout+restart) │
+└──────────────────────────┘      │  → merge chrome, resolve     │
+                                  │    <driver>:<view> links     │
+        renderers: CLI · TUI · web│  → view-model cache          │
+                                  └─────────────────────────────┘
+```
+
+## The layers
+
+* **`pavo-protocol`** — the public wire contract: driver manifests,
+  ViewNode IR, RenderModel, ndjson ops. Pure serde, no I/O. The
+  JSON Schemas in `protocol/v1/` are hand-maintained mirrors;
+  versioning is additive-only within v1.
+* **`pavo-core`** — host core: driver discovery (PATH +
+  `<tamias-home>/drivers/`), contribution merge, per-driver
+  `DriverClient`s, ViewNode walk/evaluate helpers, the renderer
+  registry, the view-model TTL cache. Sync and std-only.
+* **`pavo-cli`** (`pavo`) — the binary: `drivers`/`views`/`chrome`/
+  `view`/`query`/`serve`/`open` verbs, `--json` everywhere, and the
+  protocol conformance harness. Also `pavo serve`, the localhost
+  HTTP bridge for the web host.
+* **`pavo-tui`** (`pavo-tui`) — the ratatui surface: driver rail,
+  ViewNode canvas, detail pane, contribution-driven chrome.
+* **`pavo-testkit`** — conformance: `FixtureDriver` builds fake
+  `tamias-driver-*` executables, `check_driver` runs the wire
+  contract suite, record/replay transcripts give renderers
+  deterministic sessions.
+* **`pavo-driver-config`** (`tamias-driver-config`) — first-party
+  driver: the common config API (namespaced `query` ops over
+  layered TOML/JSON config).
+* **`web/`** — the Nuxt 4 SSR shell + client-side data islands,
+  served as static files by `pavo serve`.
+* **`examples/drivers/`** — reference drivers: `demo` (full IR +
+  chrome), `myco` (thin proxy pattern), `viz-graph` (renderer
+  plugin).
+
+| crate | layer | purpose |
+|---|---|---|
+| `pavo-protocol` | domain | Wire contract — driver manifests, ViewNode IR, ndjson ops (the public API) |
+| `pavo-core` | host | Host core — tamias driver discovery, contribution merge, per-driver clients, view-model cache |
+| `pavo-driver-config` | adapter | tamias-driver-config — the common config API driver for the 9aia suite (pavo view driver) |
+| `pavo-testkit` | adapter | Recorded driver sessions → conformance fixtures for all pavo surfaces |
+| `pavo-tui` | adapter | ratatui host — chrome slots + ViewNode renderer for pavo |
+| `pavo` | binary | pavo — visualization host: discover tamias drivers, render their views (CLI/TUI/web) |
+
+## The wire
+
+Drivers are spawned per surface need: pavo keeps one `serve`
+process per driver (`DriverClient`), speaks `{"op":…}` →
+`{"ok":…}` ndjson, and caches view models briefly. Discovery is
+cheap — `manifest` answers without product state, so `pavo drivers`
+and `pavo views` work even when the underlying product isn't
+running. Full contract: [Wire ops](/reference/wire-ops),
+[Driver manifest](/reference/driver-manifest).
+
+## Deep links are the UI
+
+A view is a `<driver>:<view>` ref plus optional params. On the CLI
+it's an argument; on the web it's a URL
+(`/view/myco:item/id=T-001`) that agents and humans can drop into
+PRs, issues, and handoffs. The TUI takes the same ref via
+`pavo open`. See [Deep links](/tutorials/deep-links).
+
+## Why this shape
+
+See [Why declarative views](/explanation/why-declarative) and
+[Boundaries](/explanation/boundaries).
+
+---
+
+---
+url: /pavo/explanation/why-declarative.md
+---
+# Why declarative views
+
+Pavo could have let every product ship its own TUI, its own web
+app, its own CLI flags. Instead drivers emit a **declarative**
+tree — data, not code — and hosts interpret it. The reasons:
+
+## One driver, every surface
+
+A `ViewNode` tree is surface-agnostic JSON. The same `myco:board`
+spec renders as an aligned table on the CLI, ratatui widgets in the
+TUI, and DOM in the web app — with zero per-surface driver code.
+When a fifth surface appears (a chat bridge, an editor panel), it
+interprets the same IR.
+
+## Drivers stay dumb and safe
+
+A driver is a separate process speaking a narrow wire. It can't
+inject HTML, run host code, or touch renderer internals — the worst
+a buggy driver can do is emit a malformed tree, which degrades to
+KV. That boundary is what lets pavo host *untrusted-ish* product
+drivers discovered on `PATH`.
+
+## Degradation is a feature, not a fallback
+
+The protocol is **additive-only within v1**: new optional fields,
+new `kind` variants, new ops may appear at any time; existing
+spellings never change meaning. Every consumer obligation follows:
+
+* Renderers meeting an unknown `kind` degrade to generic KV.
+* `props` is an open map — renderers ignore keys they don't know.
+* `contributes.extra` round-trips unknown chrome slots.
+* Plugin `render` failures fall back to built-in interpretation.
+
+A driver written today keeps working as the IR grows; a renderer
+written today keeps working as drivers grow. Forward compatibility
+is mandatory, not optional — it's what makes "install a driver,
+get visualization everywhere" true across versions.
+
+## Data binding, not data copying
+
+Nodes don't embed data — they name a `query` binding, and the host
+resolves bindings to view-model data before rendering (cached,
+with partial degradation per binding). Drivers declare *what* data
+a view needs; hosts decide *when* to fetch it. That split is what
+lets `pavo view --param` and deep-link params flow through one
+mechanism, and lets the web surface hydrate panels independently.
+
+## Escape hatches where they belong
+
+Declarative doesn't mean lowest-common-denominator. `embed` names a
+component for rich visuals; `renderers[]` + the `render` op let a
+driver claim a whole kind and answer with a canonical
+`RenderModel`; `graph`'s IR floor covers structure while layout is
+explicitly the renderer's problem. The IR covers the 90%; plugins
+cover the 10% — and fallback is mandatory so plugins can fail
+softly. See [Renderer plugins](/explanation/renderer-plugins).
+
+## The cost
+
+Honest trade-offs: the IR can't express everything (rich
+interaction beyond single-form submit — buttons, wizards — is v2),
+renderer plugins add a second contract to keep
+honest, and every driver pays the manifest+wire ceremony even for a
+trivial view. The bet is that uniform surfaces + safe degradation
+outweigh per-product UI silos — the same bet the org's other tools
+(sturn's WAL, tamias's ref grammar, cuora's refs) already make.
+
+---
+
+---
+url: /pavo/explanation/renderer-plugins.md
+---
+# Renderer plugins
+
+Built-in rendering is the floor, not the ceiling. A driver can ship
+a **renderer plugin** — a claim on ViewNode *kinds* plus a `render`
+op that returns a canonical `RenderModel` — and pavo routes matching
+nodes to it instead of interpreting them natively.
+
+There is no separate plugin ecosystem: plugins are tamias drivers.
+`examples/drivers/viz-graph/` claims `graph` on all three surfaces
+and renders SVG/ascii the built-ins don't; its manifest declares
+**zero views** — it renders other drivers' trees.
+
+## The two halves
+
+**Manifest half** — `renderers[]` declares the claim:
+
+```json
+{"id": "graph", "kinds": ["graph"], "priority": 50,
+ "surfaces": {
+   "cli": {"formats": ["svg", "ascii"]},
+   "tui": true,
+   "web": {"component": "viz-graph", "island": true}}}
+```
+
+`kinds` lists ViewNode kinds (or `"*"` for catch-all); `surfaces`
+says where the claim holds and which `--format` values it takes
+(empty `formats` = wildcard). Absent surface = unsupported there.
+
+**Wire half** — the `render` op:
+
+```
+→ {"op":"render","kind":"graph","node":{…ViewNode verbatim…},
+   "data":{…view bindings…},"surface":"cli","format":"svg"}
+← {"ok":true,"result":{"type":"svg","markup":"<svg>…"}}
+```
+
+`node` arrives untyped so unknown/future fields survive;
+`data` is the same binding map `view` returns, so the plugin
+resolves `node.query` itself.
+
+## Claim resolution
+
+Deterministic, same policy as chrome contributions:
+
+1. Explicit kinds beat `"*"`.
+2. Lower `priority` wins (default 100).
+3. Ties break by driver name, then renderer id.
+
+`pavo`'s `RendererRegistry` (pavo-core `renderers` module) folds
+all manifests into this order once at discovery; `/api/renderers`
+on `pavo serve` exposes the resolved claims to the web surface.
+
+## Precedence over built-ins
+
+Plugin claims are **canonical per node** on every surface: a node
+whose kind+surface is claimed renders via `render` → RenderModel;
+built-ins are the fallback for unclaimed kinds *and* for plugin
+failures. On `cli` this includes `--format` names that collide with
+built-ins — `text`, `dot`, and `mermaid` are claimable via
+`cli.formats` (empty = wildcard), and a claim wins for the nodes it
+covers while unclaimed nodes keep the built-in output. `json` is the
+one exception: the raw `ViewResult` dump is host-owned and never
+routed to plugins. On `web` the same rule makes the plugin
+RenderModel canonical for claimed kinds — `GraphIsland.vue` is the
+`graph` fallback when no plugin claims it (and while the render op
+is in flight a placeholder shows, never the built-in).
+
+## RenderModel — the canonical output
+
+Plugins don't ship surface code; they answer one of four tagged
+models and each surface maps it natively:
+
+| variant | CLI | TUI | web |
+| --- | --- | --- | --- |
+| `rows` | aligned table | table rows | `<table>` |
+| `svg` | raw markup | `[svg]` hint | `v-html` island |
+| `text` | lines | lines | `<pre>` |
+| `placeholder` | `[component]` | box + detail | named component |
+
+The set is deliberately small — plugins needing richer output use
+`placeholder` (web components) or `svg` (self-contained markup).
+**No HTML in RenderModel**: self-contained markup is `svg` only.
+
+## The fallback contract
+
+* **Built-ins are not reserved.** A plugin may claim `graph` (or
+  any kind) and override built-in rendering on the surfaces it
+  declares.
+* **Fallback is mandatory.** When no plugin claims a kind+surface,
+  or `render` errors/times out, hosts use the built-in
+  interpretation — unknown kinds still degrade to KV. Plugin failure
+  must never break a view; that's what makes plugins safe to
+  discover on `PATH` alongside everything else.
+* **`web.component` is a hint.** v1 renders every RenderModel
+  generically; `component`/`island` name rich mounts for hosts that
+  resolve them (dynamic-imported components are a v2 concern).
+
+## Why plugins instead of `embed`
+
+`embed` names a component for *one node*; a renderer plugin claims
+a *kind* — every `graph` node in every view, from every driver.
+Plugins are how `graph` itself migrated: the IR keeps the
+structure, the plugin owns the rendering. `table`/`list` plugins
+are the expected next migrations.
+
+---
+
+---
+url: /pavo/explanation/boundaries.md
+---
+# Boundaries
+
+Pavo owns **visualization hosting** — driver discovery, ViewNode
+interpretation, contribution-slot merge, renderer-plugin dispatch,
+and the three renderers (CLI, TUI, web). Neighbors own theirs:
+
+* **tamias** — distribution. Drivers are tamias content packages:
+  executables named `tamias-driver-<type>` found on `PATH` or in
+  `<tamias-home>/drivers/`. Pavo never re-implements transport or
+  content types; it only *executes* what tamias installed.
+* **products** (myco, kuda, sturn, mimus, cuora, …) — state owners.
+  They ship drivers that proxy their existing `serve` wires (see
+  the [proxy pattern](/how-to/write-a-driver#the-proxy-pattern-recommended-for-real-products)).
+  Pavo never reads product internals — no myco files, no kuda
+  sqlite, no store schemas. If a driver needs product state, the
+  product's own `serve` is the API.
+* **cuora** — secrets. Driver credentials via `cuora://` refs;
+  pavo never sees values.
+* **rampho** — the `SceneNode → ViewNode` precedent: media render
+  pipelines are rampho's, UI trees are pavo's.
+* **peregrin** — orchestration. Multi-actor concerns (who may view
+  what, from where) are policy; pavo serves one localhost user.
+  Note: peregrin's `tamias-driver-peregrin` is a tamias *content*
+  driver for bundle install/deploy — it does not yet serve pavo
+  views.
+* **sepia** — session lifecycle; unrelated to rendering.
+
+## What pavo deliberately doesn't do
+
+* **No plugin system beyond drivers.** "Files, not frameworks" —
+  a driver is an executable on `PATH`; renderer plugins are the
+  same mechanism with a `renderers[]` manifest claim.
+* **No product semantics.** ViewNode kinds are generic
+  (`table`, not `issue-list`); meaning lives in the driver's
+  queries and labels. The config API is namespaced dotted keys,
+  never file paths.
+* **No host-side writes.** `form` nodes submit through the
+  driver's own `submit` wire op — pavo hosts collect field values
+  and display the `SubmitResult`, but every mutation semantic
+  (what `submit_op` means, what gets written) belongs to the
+  driver. Drivers stay proxies; pavo never touches product state.
+* **No daemon.** `pavo serve` is a per-user localhost bridge bound
+  to `127.0.0.1`, not a service. Multi-user or remote hosting
+  would be a different tool.
+* **No HTML from drivers.** The IR is declarative; `svg` is the
+  only self-contained markup a plugin may emit. Anything richer is
+  `placeholder`/`embed` resolved host-side.
+
+---
+
+---
+url: /pavo/public/api/static.files/SourceSerif4-LICENSE-a2cfd9d5.md
+---
+Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'. All Rights Reserved. Source is a trademark of Adobe in the United States and/or other countries.
+Copyright 2014 - 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’. All Rights Reserved. Source is a trademark of Adobe in the United States and/or other countries.
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+This license is copied below, and is also available with a FAQ at: http://scripts.sil.org/OFL
+
+***
+
+## SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1. Neither the Font Software nor any of its individual components,
+   in Original or Modified Versions, may be sold by itself.
+
+2. Original or Modified Versions of the Font Software may be bundled,
+   redistributed and/or sold with any software, provided that each copy
+   contains the above copyright notice and this license. These can be
+   included either as stand-alone text files, human-readable headers or
+   in the appropriate machine-readable metadata fields within text or
+   binary files as long as those fields can be easily viewed by the user.
+
+3. No Modified Version of the Font Software may use the Reserved Font
+   Name(s) unless explicit written permission is granted by the corresponding
+   Copyright Holder. This restriction only applies to the primary font name as
+   presented to the users.
+
+4. The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+   Software shall not be used to promote, endorse or advertise any
+   Modified Version, except to acknowledge the contribution(s) of the
+   Copyright Holder(s) and the Author(s) or with their explicit written
+   permission.
+
+5. The Font Software, modified or unmodified, in part or in whole,
+   must be distributed entirely under this license, and must not be
+   distributed under any other license. The requirement for fonts to
+   remain under this license does not apply to any document created
+   using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.

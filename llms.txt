@@ -1,0 +1,44 @@
+# pavo
+
+> visualization host for the agent factory
+
+tamias drivers emit declarative ViewNode IR — pavo renders it on CLI, TUI, and web
+
+## Table of Contents
+
+### Getting Started
+
+- [Getting Started](/pavo/getting-started.md)
+
+### Tutorials
+
+- [Your first view](/pavo/tutorials/first-view.md)
+- [Deep links](/pavo/tutorials/deep-links.md)
+
+### How-to
+
+- [Install a driver](/pavo/how-to/install-a-driver.md)
+- [Write a driver](/pavo/how-to/write-a-driver.md)
+- [Write a renderer plugin](/pavo/how-to/write-a-renderer-plugin.md)
+- [Serve the web surface](/pavo/how-to/serve-web.md)
+- [Use the config API](/pavo/how-to/use-config-api.md)
+
+### Reference
+
+- [CLI reference](/pavo/reference/cli.md)
+- [ViewNode IR](/pavo/reference/view-nodes.md)
+- [Wire ops](/pavo/reference/wire-ops.md)
+- [Driver manifest](/pavo/reference/driver-manifest.md)
+- [Config](/pavo/reference/config.md)
+- [Crate API](/pavo/reference/crate-api.md)
+
+### Explanation
+
+- [Architecture](/pavo/explanation/architecture.md)
+- [Why declarative views](/pavo/explanation/why-declarative.md)
+- [Renderer plugins](/pavo/explanation/renderer-plugins.md)
+- [Boundaries](/pavo/explanation/boundaries.md)
+
+### Other
+
+- [Untitled](/pavo/public/api/static.files/SourceSerif4-LICENSE-a2cfd9d5.md)

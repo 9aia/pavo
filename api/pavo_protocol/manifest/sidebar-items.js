@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CliSurface","Contributes","Contribution","DriverManifest","QueryBinding","RendererDecl","RendererSurfaces","ViewSpec","WebSurface"]};
