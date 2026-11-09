@@ -38,6 +38,17 @@ const viewResult = computed(() => {
   const d = data.value as { ok?: boolean; result?: any; error?: string } | null
   return d?.ok ? d.result : null
 })
+
+// Form submits (`/api/submit`) need the view ref; a returned
+// `view` swaps the whole ViewResult in place. Provided to
+// FormView.vue via inject — no prop threading through ViewNode's
+// recursion.
+provide('pavoViewRef', ref)
+provide('pavoApplyView', (vr: any) => {
+  if (data.value) {
+    data.value = { ok: true, result: vr } as typeof data.value
+  }
+})
 const apiError = computed(() => {
   const d = data.value as { ok?: boolean; error?: string } | null
   if (error.value) return error.value.message

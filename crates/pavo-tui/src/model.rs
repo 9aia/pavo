@@ -75,6 +75,71 @@ pub struct Model {
     /// Every `graph` node's DOT dump, concatenated — `g` writes this
     /// to a file. `None` when the view has no graphs.
     pub graph_dot: Option<String>,
+    /// Interactive forms in the view (document order) — forms with a
+    /// `submit_op`. The app opens an edit session from
+    /// [`Model::form_marks`].
+    pub forms: Vec<FormSpec>,
+    /// Rows that belong to an interactive form: field rows
+    /// (`field: Some`) and the submit row (`field: None`). Enter on a
+    /// marked row opens the form editor instead of the detail pane.
+    pub form_marks: Vec<FormMark>,
+}
+
+/// One field of an interactive [`FormSpec`] — everything the editor
+/// needs to render and submit it.
+#[derive(Clone, Debug)]
+pub struct FormFieldSpec {
+    /// Field key — the `values` map key on submit.
+    pub key: String,
+    /// Human-facing label.
+    pub label: String,
+    /// Field kind string (`text`, `textarea`, `number`, `bool`,
+    /// `select`, or a driver extension — unknown kinds edit as text).
+    pub kind: String,
+    /// Must be non-empty on submit.
+    pub required: bool,
+    /// `editable:false` renders read-only and is never submitted.
+    pub editable: bool,
+    /// Options for `select` fields.
+    pub options: Vec<String>,
+    /// Default value (JSON).
+    pub default: Option<Value>,
+    /// Current value when the form renders existing state.
+    pub value: Option<Value>,
+    /// Help text.
+    pub hint: Option<String>,
+    /// Placeholder shown while the field is empty.
+    pub placeholder: Option<String>,
+}
+
+/// An interactive form: `submit_op` present, fields declared. `id`
+/// is the node's `NodeBase.id` — the wire `submit` op's optional
+/// `form` param.
+#[derive(Clone, Debug)]
+pub struct FormSpec {
+    /// Form node id (`NodeBase.id`), when the driver set one.
+    pub id: Option<String>,
+    /// Form title (node `title`, else `"form"`).
+    pub title: String,
+    /// Driver-side action (`"set"`, `"add"`, …) — display only; the
+    /// wire op is always `submit`.
+    pub submit_op: String,
+    /// Submit button label (default `"Submit"`).
+    pub submit_label: String,
+    /// Field declarations in display order.
+    pub fields: Vec<FormFieldSpec>,
+}
+
+/// Binds a canvas row to a spot in [`Model::forms`].
+#[derive(Clone, Copy, Debug)]
+pub struct FormMark {
+    /// Index into [`Model::rows`].
+    pub row: usize,
+    /// Index into [`Model::forms`].
+    pub form: usize,
+    /// Index into [`FormSpec::fields`]; `None` marks the form's
+    /// submit row (opens the editor at the first editable field).
+    pub field: Option<usize>,
 }
 
 /// Build the canvas model for a resolved view. `width` is the canvas
@@ -207,6 +272,8 @@ struct Builder {
     rows: Vec<Row>,
     selections: Vec<Selection>,
     dots: Vec<String>,
+    forms: Vec<FormSpec>,
+    form_marks: Vec<FormMark>,
 }
 
 impl Builder {
@@ -236,6 +303,14 @@ impl Builder {
         });
     }
 
+    /// Mark the most recently pushed row as belonging to an
+    /// interactive form (`field: None` = the submit row).
+    fn mark_form(&mut self, form: usize, field: Option<usize>) {
+        if let Some(row) = self.rows.len().checked_sub(1) {
+            self.form_marks.push(FormMark { row, form, field });
+        }
+    }
+
     fn finish(self) -> Model {
         let selectables = self
             .rows
@@ -252,6 +327,8 @@ impl Builder {
             } else {
                 Some(self.dots.join("\n"))
             },
+            forms: self.forms,
+            form_marks: self.form_marks,
         }
     }
 }
@@ -1016,6 +1093,153 @@ fn dot_block(nodes: &[Value], edges: &[Value]) -> String {
 fn form_json(v: &Value, depth: usize, b: &mut Builder) {
     let ind = "  ".repeat(depth);
     title_row(v, &ind, b);
+    // Interactive = the driver declared a submit action. Forms
+    // without `submit_op` stay a read-only field listing (the
+    // renderer "may only preview" per the protocol docs).
+    let submit_op = v.get("submit_op").and_then(Value::as_str);
+    let Some(submit_op) = submit_op.filter(|s| !s.is_empty()) else {
+        form_readonly(v, &ind, b);
+        return;
+    };
+
+    // Register the spec first so field/submit rows can mark it.
+    let form_idx = b.forms.len();
+    let fields: Vec<FormFieldSpec> = v
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().map(form_field_spec).collect())
+        .unwrap_or_default();
+    let title = v
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("form")
+        .to_string();
+    b.forms.push(FormSpec {
+        id: v.get("id").and_then(Value::as_str).map(str::to_string),
+        title: title.clone(),
+        submit_op: submit_op.to_string(),
+        submit_label: v
+            .get("submit_label")
+            .and_then(Value::as_str)
+            .unwrap_or("Submit")
+            .to_string(),
+        fields,
+    });
+
+    for (fi, f) in b.forms[form_idx].fields.clone().iter().enumerate() {
+        let mut text = format!("{ind}- {}: {} [{}]", f.key, f.label, f.kind);
+        if f.required {
+            text.push_str(" (required)");
+        }
+        // Show the effective value: `value` (existing state) wins
+        // over `default`; placeholder marks an empty editable field.
+        let current = f.value.as_ref().or(f.default.as_ref());
+        match current {
+            Some(val) => text.push_str(&format!(" = {}", cell_str(val))),
+            None if f.editable => {
+                if let Some(p) = &f.placeholder {
+                    text.push_str(&format!(" = {p} (placeholder)"));
+                }
+            }
+            None => {}
+        }
+        if f.editable {
+            text.push_str(" ✎");
+        } else {
+            text.push_str(" (read-only)");
+        }
+        if let Some(options) = (!f.options.is_empty()).then(|| f.options.join("|")) {
+            text.push_str(&format!(" options={options}"));
+        }
+        if let Some(hint) = &f.hint {
+            text.push_str(&format!(" — {hint}"));
+        }
+        let mut detail = vec![
+            ("key".to_string(), f.key.clone()),
+            ("label".to_string(), f.label.clone()),
+            ("kind".to_string(), f.kind.clone()),
+        ];
+        if f.required {
+            detail.push(("required".to_string(), "yes".to_string()));
+        }
+        if !f.editable {
+            detail.push(("editable".to_string(), "no".to_string()));
+        }
+        for (k, val) in [("default", &f.default), ("value", &f.value)] {
+            if let Some(val) = val {
+                detail.push((k.to_string(), cell_str(val)));
+            }
+        }
+        if let Some(hint) = &f.hint {
+            detail.push(("hint".to_string(), hint.clone()));
+        }
+        let style = if f.editable {
+            RowStyle::Normal
+        } else {
+            RowStyle::Dim
+        };
+        b.sel_row(&text, style, f.label.clone(), detail);
+        if f.editable {
+            b.mark_form(form_idx, Some(fi));
+        }
+    }
+
+    // The submit row — Enter opens the editor at the first editable
+    // field; the actual `submit` op fires from inside the session.
+    let label = b.forms[form_idx].submit_label.clone();
+    let op = b.forms[form_idx].submit_op.clone();
+    b.sel_row(
+        &format!("{ind}{label} → {op}"),
+        RowStyle::Dim,
+        format!("{title} submit"),
+        vec![
+            ("form".to_string(), title),
+            ("submit_op".to_string(), op),
+            ("label".to_string(), label),
+        ],
+    );
+    b.mark_form(form_idx, None);
+}
+
+/// Parse one raw field object into a [`FormFieldSpec`]. `editable`
+/// defaults to true per the protocol (`editable:false` opts out).
+fn form_field_spec(f: &Value) -> FormFieldSpec {
+    FormFieldSpec {
+        key: f
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        label: f
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        kind: f
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("text")
+            .to_string(),
+        required: f.get("required").and_then(Value::as_bool) == Some(true),
+        editable: f.get("editable").and_then(Value::as_bool) != Some(false),
+        options: f
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().map(cell_str).collect())
+            .unwrap_or_default(),
+        default: f.get("default").cloned(),
+        value: f.get("value").cloned(),
+        hint: f.get("hint").and_then(Value::as_str).map(str::to_string),
+        placeholder: f
+            .get("placeholder")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+/// The pre-forms-v2 rendering: a read-only field listing for forms
+/// without a `submit_op`.
+fn form_readonly(v: &Value, ind: &str, b: &mut Builder) {
     if let Some(fields) = v.get("fields").and_then(Value::as_array) {
         for f in fields {
             let key = f.get("key").and_then(Value::as_str).unwrap_or("");
@@ -1057,7 +1281,11 @@ fn form_json(v: &Value, depth: usize, b: &mut Builder) {
             b.sel_row(&text, RowStyle::Normal, label.to_string(), detail);
         }
     }
-    if let Some(op) = v.get("submit_op").and_then(Value::as_str) {
+    if let Some(op) = v
+        .get("submit_op")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         let label = v
             .get("submit_label")
             .and_then(Value::as_str)
@@ -1616,7 +1844,12 @@ mod tests {
             t.iter().any(|l| l.contains("name: Name [text] (required)")),
             "{t:?}"
         );
-        assert!(t.iter().any(|l| l.contains("submit → set")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("Submit → set")), "{t:?}");
+        // Interactive form: one FormSpec, editable field + submit row
+        // marked, read-only field unmarked.
+        assert_eq!(m.forms.len(), 1);
+        assert_eq!(m.forms[0].submit_op, "set");
+        assert_eq!(m.form_marks.len(), 2);
         assert!(t.iter().any(|l| l.contains("k: 1")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("hello **world**")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("[embed: timeline]")), "{t:?}");

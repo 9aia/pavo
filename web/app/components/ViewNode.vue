@@ -304,12 +304,10 @@ function fmt(v: any): string {
       </template>
     </ClientOnly>
 
-    <!-- form — read-only field list (v1) -->
+    <!-- form — interactive (submit wire op) when the driver declared
+         submit_op; read-only field list otherwise -->
+    <FormView v-if="kind === 'form' && node.submit_op" :node="node" />
     <div v-else-if="kind === 'form'" class="form">
-      <p v-if="node.submit_op" class="muted">
-        submits via <code>{{ node.submit_op }}</code>
-        {{ node.submit_label ? `(${node.submit_label})` : '' }} — read-only in v1.
-      </p>
       <dl>
         <template v-for="f in formFields" :key="f.key">
           <dt>{{ f.label ?? f.key }} <code class="muted">{{ f.key }}</code></dt>

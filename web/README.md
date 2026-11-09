@@ -58,10 +58,15 @@ browser ──► pavo serve (127.0.0.1) ──► pavo-core Host ──► tami
   browser fetches live data from whatever serves `/api`.
 - **View rendering** — `app/components/ViewNode.vue` interprets the
   ViewNode IR recursively (panel/row/column layouts, table, tree, kv,
-  markdown, read-only form, embed placeholder, KV degradation for
+  markdown, form, embed placeholder, KV degradation for
   unknown kinds). `graph` nodes render in `GraphIsland.vue`, a
   client-only island (deterministic circle/spiral SVG layout — real
-  layout is an `embed` concern).
+  layout is an `embed` concern). Forms with a `submit_op` render as
+  `FormView.vue` — editable inputs honoring `editable`/`options`/
+  `placeholder`/`required`, submitting `GET /api/submit?ref=…&
+  values={json}` and swapping in a returned `view` (message +
+  per-field errors display inline); forms without `submit_op` stay
+  a read-only field list.
 
 ## Dev workflow
 
@@ -124,8 +129,8 @@ Re-check on Nuxt upgrades.
 ## Status
 
 v1: dashboard + view deep links + all ViewNode kinds (graph as a
-client-only SVG island). Not yet: interactive forms (read-only
-field list), `embed` component registry, view params UI (params can
-still be passed in the URL — see "Deep-link params" above), markdown
-rendering (pre-wrap text), driver-contributed `routes` pages (they
-link out but only views render natively).
+client-only SVG island; forms with `submit_op` are interactive via
+`/api/submit`). Not yet: `embed` component registry, view params UI
+(params can still be passed in the URL — see "Deep-link params"
+above), markdown rendering (pre-wrap text), driver-contributed
+`routes` pages (they link out but only views render natively).

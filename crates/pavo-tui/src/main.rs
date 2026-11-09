@@ -16,6 +16,7 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 mod app;
+mod form;
 mod model;
 mod worker;
 
@@ -50,6 +51,8 @@ OPTIONS:
 KEYS:
     j/k arrows navigate · Tab/←/→ switch panes · Enter opens
     r refresh · d dump view JSON · g dump graph DOT · ? help · q quit
+    forms: Enter on a field edits it — type, ↑↓/Tab move, Enter
+    submits (submit wire op), Esc closes
 ";
 
 /// Parsed command line.

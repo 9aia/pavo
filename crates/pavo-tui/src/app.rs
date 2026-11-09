@@ -19,7 +19,7 @@
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton};
-use pavo_core::{Chrome, ResolvedView, RouteEntry, RouteKind, ViewEntry};
+use pavo_core::{Chrome, Params, ResolvedView, RouteEntry, RouteKind, ViewEntry};
 use pavo_protocol::RenderModel;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -28,7 +28,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 use std::collections::HashMap;
 
-use crate::model::{self, Model, RowStyle, Selection};
+use crate::form::{FieldEdit, FormSession, SessionCmd};
+use crate::model::{self, FormMark, Model, RowStyle, Selection};
 use crate::worker::{Cmd, DriverRow, Ev, Worker};
 
 /// Which pane has keyboard focus.
@@ -120,6 +121,10 @@ pub struct App {
     initial: Option<String>,
     /// Rail row armed by a first click — a second click opens it.
     open_armed: Option<usize>,
+    /// Open form-editing session (overlay) — Enter on a form field
+    /// or submit row in the canvas opens one; `submit` wire op
+    /// fires from inside it.
+    form_session: Option<FormSession>,
 }
 
 impl App {
@@ -154,6 +159,7 @@ impl App {
             tab_hits: Vec::new(),
             initial,
             open_armed: None,
+            form_session: None,
         }
     }
 
@@ -216,6 +222,7 @@ impl App {
                         self.sel_pos = 0;
                         self.scroll = (0, 0);
                         self.detail = None;
+                        self.form_session = None;
                         self.pane = Pane::Canvas;
                         self.status = format!("loaded {}", self.last_target);
                     }
@@ -235,6 +242,68 @@ impl App {
                 self.routes = routes;
                 self.rebuild_tabs();
                 self.status = "chrome reloaded".to_string();
+            }
+            Ev::Submit { result } => self.on_submit(result),
+        }
+    }
+
+    /// A `submit` wire-op answer landed. With `result.view` the
+    /// canvas swaps to the fresh ViewResult and the session closes;
+    /// `errors`/messages stay inside the open session (the form
+    /// re-renders with them, per the protocol).
+    fn on_submit(&mut self, result: Result<pavo_protocol::wire::SubmitResult, String>) {
+        let Some(session) = &mut self.form_session else {
+            return; // session closed while in flight — drop the answer
+        };
+        session.busy = false;
+        match result {
+            Ok(res) => {
+                session.errors = res
+                    .errors
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| v.to_string()),
+                        )
+                    })
+                    .collect();
+                session.message = res.message.clone();
+                if let Some(view) = res.view {
+                    // Fresh ViewResult — swap it into the canvas.
+                    // Plugin renders keyed to the old tree are stale;
+                    // built-in rendering covers the new one.
+                    if let Some(Canvas::View(rv)) = &self.current {
+                        let fresh = pavo_core::ResolvedView {
+                            driver: rv.driver.clone(),
+                            view: rv.view.clone(),
+                            namespaced: rv.namespaced.clone(),
+                            result: *view,
+                        };
+                        self.current = Some(Canvas::View(Box::new(fresh)));
+                        self.plugin_renders.clear();
+                        self.sel_pos = 0;
+                        self.scroll = (0, 0);
+                        self.detail = None;
+                        self.form_session = None;
+                        self.pane = Pane::Canvas;
+                        self.status = res
+                            .message
+                            .clone()
+                            .unwrap_or_else(|| "submitted".to_string());
+                    }
+                } else {
+                    self.status = res
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| "submitted".to_string());
+                }
+            }
+            Err(e) => {
+                session.message = Some(format!("submit failed: {e}"));
+                self.status = format!("submit failed: {e}");
             }
         }
     }
@@ -311,6 +380,7 @@ impl App {
     }
 
     fn resolve(&mut self, target: &str) {
+        self.form_session = None;
         if target == "dashboard" {
             self.current = Some(Canvas::Dashboard);
             self.load_error = None;
@@ -375,9 +445,70 @@ impl App {
                 return;
             }
         }
+        // Form field / submit rows open the edit session instead of
+        // the detail pane.
+        if let Some(mark) = model.form_marks.iter().find(|m| m.row == row_idx).copied() {
+            self.open_form_session(mark, &model);
+            return;
+        }
         self.detail = Some(sel);
         self.detail_scroll = 0;
         self.pane = Pane::Detail;
+    }
+
+    /// Enter on a form-marked canvas row: open the edit overlay for
+    /// the marked form, focused on the marked field (or the first
+    /// editable field for the submit row).
+    fn open_form_session(&mut self, mark: FormMark, model: &Model) {
+        let Some(spec) = model.forms.get(mark.form).cloned() else {
+            return;
+        };
+        let Some(Canvas::View(rv)) = &self.current else {
+            return;
+        };
+        let session = FormSession::open(spec, rv.namespaced.clone(), mark.field);
+        self.status = format!("editing {} — Enter submits, Esc closes", session.spec.title);
+        self.form_session = Some(session);
+    }
+
+    /// Enter inside the session → `submit` wire op (after a local
+    /// required-field check).
+    fn submit_session(&mut self, values: Params) {
+        let Some(s) = &mut self.form_session else {
+            return;
+        };
+        let missing = s.required_errors();
+        if !missing.is_empty() {
+            s.errors = missing;
+            s.message = Some("missing required fields".to_string());
+            return;
+        }
+        s.busy = true;
+        s.message = None;
+        s.errors.clear();
+        let target = s.target.clone();
+        let form = s.spec.id.clone();
+        let _ = self.worker.tx.send(Cmd::Submit {
+            target,
+            form,
+            values,
+        });
+        self.status = "submitting…".to_string();
+    }
+
+    /// Keys while the form editor is open — the session owns the
+    /// keyboard (printable chars edit, they never trigger app keys).
+    fn on_form_key(&mut self, code: KeyCode) -> bool {
+        let cmd = match self.form_session.as_mut() {
+            Some(s) => s.key(code),
+            None => return true,
+        };
+        match cmd {
+            SessionCmd::Close => self.form_session = None,
+            SessionCmd::Submit(values) => self.submit_session(values),
+            SessionCmd::None => {}
+        }
+        true
     }
 
     fn model_for_input(&self) -> Option<Model> {
@@ -442,6 +573,11 @@ impl App {
     }
 
     fn on_key(&mut self, code: KeyCode) -> bool {
+        // An open form editor owns the keyboard — printable chars
+        // edit fields, they must never trigger app bindings.
+        if self.form_session.is_some() {
+            return self.on_form_key(code);
+        }
         // Help overlay captures everything except its own dismiss keys.
         if self.help {
             match code {
@@ -665,6 +801,7 @@ impl App {
                 self.sel_pos = 0;
                 self.scroll = (0, 0);
                 self.detail = None;
+                self.form_session = None;
                 self.pane = Pane::Canvas;
                 self.status = tab.label.clone();
             }
@@ -734,6 +871,9 @@ impl App {
         self.draw_status(f, chunks[2]);
         if self.help {
             self.draw_help(f, area);
+        }
+        if self.form_session.is_some() {
+            self.draw_form(f, area);
         }
     }
 
@@ -1004,6 +1144,112 @@ impl App {
         r.render(cols[1], f.buffer_mut());
     }
 
+    /// The form-editing overlay: every field of the open session's
+    /// form with live values — text fields show a cursor line,
+    /// `select`/`bool` show their discrete state, `editable:false`
+    /// fields render read-only. Submit result `message`/`errors`
+    /// surface inline.
+    fn draw_form(&self, f: &mut Frame, area: Rect) {
+        let Some(s) = &self.form_session else {
+            return;
+        };
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} — {} ({}) ",
+                s.spec.title, s.spec.submit_label, s.spec.submit_op
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        for (i, field) in s.fields.iter().enumerate() {
+            let focused = s.focused() == Some(i) && field.spec.editable;
+            let marker = if focused { "▸" } else { " " };
+            let mut head = format!("{marker} {} [{}]", field.spec.label, field.spec.kind);
+            if field.spec.required {
+                head.push('*');
+            }
+            if !field.spec.editable {
+                head.push_str(" (read-only)");
+            }
+            lines.push(Line::from(vec![
+                Span::styled(
+                    head,
+                    if focused {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::styled(
+                    format!("  {}", field.spec.key),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            if field.spec.editable {
+                lines.push(field_value_line(field, focused));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", field.buf.text),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            if let Some(hint) = &field.spec.hint {
+                lines.push(Line::from(Span::styled(
+                    format!("    — {hint}"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            if let Some(err) = s.errors.get(&field.spec.key) {
+                lines.push(Line::from(Span::styled(
+                    format!("    ! {err}"),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
+        lines.push(Line::from(""));
+        if let Some(msg) = &s.message {
+            let bad = !s.errors.is_empty() || msg.contains("fail");
+            lines.push(Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(if bad { Color::Red } else { Color::Green }),
+            )));
+        }
+        let footer = if s.busy {
+            " submitting… (Esc still closes) ".to_string()
+        } else {
+            format!(
+                " Enter {} · ↑↓/j/k/Tab fields · ←→/hl edit · Esc close ",
+                s.spec.submit_label
+            )
+        };
+        lines.push(Line::from(Span::styled(
+            footer,
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let w = 64u16.min(area.width.saturating_sub(4));
+        let h = (lines.len() as u16 + 2)
+            .min(area.height.saturating_sub(2))
+            .max(3);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let rect = Rect::new(x, y, w, h);
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Span::styled(
+                format!(" {} ", s.spec.title),
+                Style::default().fg(Color::Yellow),
+            ));
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .render(rect, f.buffer_mut());
+    }
+
     fn draw_help(&self, f: &mut Frame, area: Rect) {
         let text = Text::from(vec![
             Line::from(Span::styled(
@@ -1013,7 +1259,9 @@ impl App {
             Line::from(""),
             Line::from("  j/k · ↑/↓     navigate selectable rows / rail"),
             Line::from("  Tab · ←/→    switch panes (rail → canvas → detail)"),
-            Line::from("  Enter        open driver view / row detail / jump"),
+            Line::from("  Enter        open driver view / row detail / jump / edit form"),
+            Line::from("  in a form:   type to edit · ↑↓/j/k/Tab fields ·"),
+            Line::from("               ←→/h/l cycle select·bool · Enter submit · Esc"),
             Line::from("  PgUp/PgDn    page through selection"),
             Line::from("  h/l · wheel  horizontal / vertical scroll"),
             Line::from("  r            refresh current view / reload chrome"),
@@ -1024,7 +1272,7 @@ impl App {
             Line::from("  q · Esc      quit (Esc closes detail/help first)"),
         ]);
         let w = 46u16.min(area.width.saturating_sub(4));
-        let h = 15u16.min(area.height.saturating_sub(2));
+        let h = 17u16.min(area.height.saturating_sub(2));
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(h)) / 2;
         let rect = Rect::new(x, y, w, h);
@@ -1041,6 +1289,102 @@ impl App {
 
 fn in_rect(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
+/// The value line under a form field's header in the edit overlay.
+/// Text kinds render the buffer with a reversed-video cursor when
+/// focused (placeholder shows dim while the buffer is empty);
+/// `select`/`bool` render their discrete state.
+fn field_value_line<'a>(field: &'a FieldEdit, focused: bool) -> Line<'a> {
+    match field.spec.kind.as_str() {
+        "select" => {
+            let n = field.spec.options.len();
+            let pos = field.spec.options.iter().position(|o| *o == field.buf.text);
+            let current = if field.buf.text.is_empty() {
+                field
+                    .spec
+                    .placeholder
+                    .clone()
+                    .unwrap_or_else(|| "—".to_string())
+            } else {
+                field.buf.text.clone()
+            };
+            let mut spans = vec![
+                Span::raw(format!("    ‹{current}› ")),
+                Span::styled(
+                    match pos {
+                        Some(i) => format!("({}/{n})", i + 1),
+                        None => "(?)".to_string(),
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ];
+            if !field.spec.options.is_empty() {
+                spans.push(Span::styled(
+                    format!("  options: {}", field.spec.options.join(" | ")),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(spans)
+        }
+        "bool" => {
+            let on = matches!(field.buf.text.trim(), "true" | "1" | "yes" | "on");
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    if on { "[x]" } else { "[ ]" },
+                    if focused {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::raw(format!(" {}", if on { "true" } else { "false" })),
+            ])
+        }
+        _ => {
+            // Text-like: buffer, or the placeholder while empty.
+            let using_placeholder = field.buf.text.is_empty();
+            let display = if using_placeholder {
+                field.spec.placeholder.clone().unwrap_or_default()
+            } else {
+                field.buf.text.clone()
+            };
+            let dim = Style::default().fg(Color::DarkGray);
+            let chars: Vec<char> = display.chars().collect();
+            let cursor = field.buf.cursor.min(chars.len());
+            let mut spans = vec![Span::raw("    ")];
+            if !focused {
+                spans.push(Span::styled(
+                    display,
+                    if using_placeholder {
+                        dim
+                    } else {
+                        Style::default()
+                    },
+                ));
+                return Line::from(spans);
+            }
+            let (before, cur, after) = if cursor < chars.len() {
+                (
+                    chars[..cursor].iter().collect::<String>(),
+                    chars[cursor].to_string(),
+                    chars[cursor + 1..].iter().collect::<String>(),
+                )
+            } else {
+                (display.clone(), " ".to_string(), String::new())
+            };
+            let base = if using_placeholder {
+                dim
+            } else {
+                Style::default()
+            };
+            spans.push(Span::styled(before, base));
+            spans.push(Span::styled(cur, base.add_modifier(Modifier::REVERSED)));
+            spans.push(Span::styled(after, base));
+            Line::from(spans)
+        }
+    }
 }
 
 fn row_style(s: RowStyle) -> Style {
@@ -1430,6 +1774,170 @@ mod tests {
         // Click outside any rect is a no-op.
         app.on_mouse(click(0, 0));
         app.on_mouse(click(u16::MAX, u16::MAX));
+        draw(&mut app, 120, 40);
+    }
+
+    /// A resolved view carrying an interactive form (`demo:new`
+    /// shape): text + select editable, textarea read-only.
+    fn resolved_form() -> ResolvedView {
+        let mut spec = view_spec("new");
+        spec.root = serde_json::from_value(serde_json::json!({
+            "kind": "column",
+            "title": "New item",
+            "children": [
+                {"kind": "form", "id": "add-item", "title": "Add item",
+                 "submit_op": "add", "submit_label": "Add",
+                 "fields": [
+                    {"key": "title", "label": "Title", "kind": "text",
+                     "required": true, "placeholder": "what needs doing?"},
+                    {"key": "status", "label": "Status", "kind": "select",
+                     "options": ["open", "wip", "done"], "default": "open"},
+                    {"key": "note", "label": "Note", "kind": "textarea",
+                     "editable": false, "value": "read-only"}
+                 ]},
+                {"kind": "markdown", "text": "try it"}
+            ]
+        }))
+        .unwrap();
+        ResolvedView {
+            driver: "demo".to_string(),
+            view: "new".to_string(),
+            namespaced: "demo:new".to_string(),
+            result: ViewResult {
+                view: spec,
+                data: Map::new(),
+            },
+        }
+    }
+
+    /// Position `sel_pos` on the canvas row carrying `mark`.
+    fn select_marked_row(app: &mut App, field: Option<usize>) {
+        let m = app.model_for_input().unwrap();
+        let mark = m
+            .form_marks
+            .iter()
+            .copied()
+            .find(|mk| mk.field == field)
+            .expect("form mark");
+        app.sel_pos = m
+            .selectables
+            .iter()
+            .position(|&i| i == mark.row)
+            .expect("selectable row");
+    }
+
+    #[test]
+    fn form_session_edits_and_submits() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        app.on_event(Ev::View {
+            target: "demo:new".to_string(),
+            result: Ok(Box::new(resolved_form())),
+            renders: HashMap::new(),
+        });
+        while rx_cmd.try_recv().is_ok() {} // drain boot Resolve
+                                           // Enter on the 'title' field row opens the editor.
+        select_marked_row(&mut app, Some(0));
+        app.on_key(KeyCode::Enter);
+        let s = app.form_session.as_ref().expect("session open");
+        assert_eq!(s.spec.id.as_deref(), Some("add-item"));
+        assert_eq!(s.target, "demo:new");
+        draw(&mut app, 120, 40);
+        // Type into the focused text field; j is a literal char.
+        for c in "ship".chars() {
+            app.on_key(KeyCode::Char(c));
+        }
+        app.on_key(KeyCode::Char('j'));
+        assert_eq!(
+            app.form_session.as_ref().unwrap().fields[0].buf.text,
+            "shipj"
+        );
+        // Down to 'status' (select), Right cycles open → wip.
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Right);
+        assert_eq!(app.form_session.as_ref().unwrap().fields[1].buf.text, "wip");
+        // Down wraps? order has 2 editable fields — Down wraps to title.
+        app.on_key(KeyCode::Down);
+        assert_eq!(app.form_session.as_ref().unwrap().focused(), Some(0));
+        // Back to status and submit.
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Enter);
+        let cmd = rx_cmd.try_recv().expect("submit cmd");
+        match cmd {
+            Cmd::Submit {
+                target,
+                form,
+                values,
+            } => {
+                assert_eq!(target, "demo:new");
+                assert_eq!(form.as_deref(), Some("add-item"));
+                assert_eq!(values["title"], serde_json::json!("shipj"));
+                assert_eq!(values["status"], serde_json::json!("wip"));
+                assert!(values.get("note").is_none(), "read-only excluded");
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+        assert!(app.form_session.as_ref().unwrap().busy);
+        // Driver rejects with per-field errors → session stays open.
+        let mut errors = Map::new();
+        errors.insert("title".to_string(), serde_json::json!("too short"));
+        app.on_event(Ev::Submit {
+            result: Ok(pavo_protocol::wire::SubmitResult {
+                message: Some("rejected".to_string()),
+                errors,
+                ..Default::default()
+            }),
+        });
+        let s = app.form_session.as_ref().unwrap();
+        assert!(!s.busy);
+        assert_eq!(s.errors.get("title").map(String::as_str), Some("too short"));
+        draw(&mut app, 120, 40);
+        // Second submit succeeds with a fresh view → session closes,
+        // canvas swaps.
+        app.on_key(KeyCode::Enter);
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(Ev::Submit {
+            result: Ok(pavo_protocol::wire::SubmitResult {
+                message: Some("added".to_string()),
+                view: Some(Box::new(ViewResult {
+                    view: view_spec("new"),
+                    data: Map::new(),
+                })),
+                ..Default::default()
+            }),
+        });
+        assert!(app.form_session.is_none());
+        assert!(matches!(app.current, Some(Canvas::View(_))));
+        assert_eq!(app.status, "added");
+        draw(&mut app, 120, 40);
+    }
+
+    #[test]
+    fn form_required_check_and_esc() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        app.on_event(Ev::View {
+            target: "demo:new".to_string(),
+            result: Ok(Box::new(resolved_form())),
+            renders: HashMap::new(),
+        });
+        while rx_cmd.try_recv().is_ok() {}
+        // Submit row (field: None) opens the session at first field.
+        select_marked_row(&mut app, None);
+        app.on_key(KeyCode::Enter);
+        assert!(app.form_session.is_some());
+        // 'title' is required and empty → local rejection, no Cmd.
+        app.on_key(KeyCode::Enter);
+        assert!(rx_cmd.try_recv().is_err());
+        assert!(app
+            .form_session
+            .as_ref()
+            .unwrap()
+            .errors
+            .contains_key("title"));
+        // Esc closes without submitting.
+        app.on_key(KeyCode::Esc);
+        assert!(app.form_session.is_none());
         draw(&mut app, 120, 40);
     }
 

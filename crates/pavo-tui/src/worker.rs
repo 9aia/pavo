@@ -13,6 +13,7 @@ use std::thread;
 
 use pavo_core::discovery::DriverInfo;
 use pavo_core::{host::ViewEntry, Chrome, Host, Params, ResolvedView, RouteEntry};
+use pavo_protocol::wire::SubmitResult;
 use pavo_protocol::RenderModel;
 use std::collections::HashMap;
 
@@ -36,6 +37,17 @@ pub enum Cmd {
     /// Re-fetch manifests → views + chrome (the `r` key on the
     /// dashboard, or a manual refresh of chrome data).
     Reload,
+    /// Submit a form's field values — the `submit` wire op.
+    /// `target` is the namespaced `driver:view`; `form` optionally
+    /// names the form node's `id`.
+    Submit {
+        /// Namespaced view ref (`demo:new`).
+        target: String,
+        /// Form node id when the view has several forms.
+        form: Option<String>,
+        /// Field `key` → JSON value (editable fields only).
+        values: Params,
+    },
 }
 
 /// Events the host worker sends back.
@@ -74,6 +86,12 @@ pub enum Ev {
         chrome: Chrome,
         /// Fresh route list.
         routes: Vec<RouteEntry>,
+    },
+    /// A [`Cmd::Submit`] finished — `Err` carries the display string
+    /// (transport/driver `ok:false`).
+    Submit {
+        /// The submit outcome.
+        result: Result<SubmitResult, String>,
     },
 }
 
@@ -127,6 +145,16 @@ pub fn spawn() -> Worker {
                         chrome,
                         routes,
                     });
+                }
+                Cmd::Submit {
+                    target,
+                    form,
+                    values,
+                } => {
+                    let result = host
+                        .submit(&target, form.as_deref(), values)
+                        .map_err(|e| e.to_string());
+                    let _ = ev_tx.send(Ev::Submit { result });
                 }
             }
         }
