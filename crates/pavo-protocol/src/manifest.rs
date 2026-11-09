@@ -82,8 +82,9 @@ pub struct DriverManifest {
 ///   Missing optional deps never block discovery; the driver/host
 ///   falls back gracefully.
 ///
-/// Ordering (topological sort over the dep graph) is a host concern —
-/// a later phase; v1 only carries the declaration.
+/// Ordering is a host concern — pavo-core topo-sorts discovered
+/// drivers over this graph (`order_drivers`); the manifest only
+/// carries the declaration.
 ///
 /// Wire shape:
 ///
@@ -310,8 +311,9 @@ pub struct QueryBinding {
     /// name, the `<type>` in `tamias-driver-<type>`) and issues the
     /// op against *that* driver's `serve` instead of the view's own.
     /// This is the data half of the cross-driver query contract;
-    /// host-side resolution/ordering is a later phase — v1 hosts may
-    /// ignore the field and treat the binding as local.
+    /// pavo-core resolves it when assembling view data (failures
+    /// degrade to an `{"error": …}` payload in the binding's slot).
+    /// Older hosts may ignore the field and treat the binding as local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
     /// Static params merged into every invocation of this binding.
