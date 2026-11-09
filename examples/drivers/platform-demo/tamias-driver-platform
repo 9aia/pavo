@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""tamias-driver-platform — the platform-features demo driver.
+
+A self-contained Python 3 stdlib-only driver that exercises the
+chrome slots and platform feeds added for the platform-host design:
+
+- `contributes.sidebar` + `headerActions` — the sidebar shell and
+  top-bar actions slots.
+- `contributes.notifications` + `jobs` — provider markers; the item
+  data flows through the `notifications`/`jobs` wire ops.
+- `deps` — an `optional` dependency declaration (ordering is the
+  host's concern; the driver just declares).
+- `QueryBinding.driver` — a **cross-driver** query binding: the
+  board's `config-theme` binding is resolved by the host against
+  `tamias-driver-config`'s `serve`, not by this driver.
+
+Wire surface (ndjson JSON-RPC over `serve`, one JSON object per line):
+
+    {"op":"manifest"}                      -> DriverManifest
+    {"op":"views"}                         -> [ViewSummary, ...]
+    {"op":"view","view":"board"}          -> ViewResult
+    {"op":"query","query":"summary",...}  -> QueryResult
+    {"op":"jobs"}                          -> [JobItem, ...]
+    {"op":"notifications"}                -> [NotificationItem, ...]
+
+`tamias-driver-platform manifest` and `tamias-driver-platform
+capabilities` answer the discovery probes pavo runs before spawning
+`serve`.
+"""
+
+import json
+import sys
+
+NAME = "platform"
+
+# ---------------------------------------------------------------- data
+
+ITEMS = [
+    {"id": "P-001", "title": "sidebar shell", "status": "done"},
+    {"id": "P-002", "title": "header actions", "status": "done"},
+    {"id": "P-003", "title": "jobs feed", "status": "wip"},
+    {"id": "P-004", "title": "notifications bell", "status": "open"},
+]
+
+JOBS = [
+    {"id": "build-7", "title": "cargo xtask check", "status": "running",
+     "detail": "clippy -D warnings", "route": "/platform/jobs",
+     "updated_at": "2026-01-02T15:04:05Z"},
+    {"id": "docs-3", "title": "publish crate docs", "status": "queued",
+     "route": "/platform/jobs"},
+]
+
+NOTIFICATIONS = [
+    {"id": "n-1", "title": "Build finished", "severity": "info",
+     "body": "cargo xtask check exited 0", "route": "/platform/jobs",
+     "created_at": "2026-01-02T15:04:05Z", "read": True},
+    {"id": "n-2", "title": "Driver degraded", "severity": "warning",
+     "body": "myco driver timed out on view myco:board",
+     "route": "/platform/board", "read": False},
+]
+
+
+def summary():
+    counts = {}
+    for item in ITEMS:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    return {
+        "items": len(ITEMS),
+        "by_status": counts,
+        "jobs": len(JOBS),
+        "unread": sum(1 for n in NOTIFICATIONS if not n.get("read")),
+    }
+
+
+QUERIES = {
+    "summary": summary,
+    "items": ITEMS,
+    "jobs": JOBS,
+}
+
+
+def query_data(name, params):
+    fn = QUERIES.get(name)
+    if fn is None:
+        return None
+    return fn() if callable(fn) else fn
+
+
+# ---------------------------------------------------------------- views
+
+def q(name):
+    return {"name": name, "op": "query", "params": {}}
+
+
+VIEWS = [
+    {
+        "id": "board",
+        "title": "Platform board",
+        "route": "/platform/board",
+        "description": "The platform-features demo: sidebar/headerActions "
+                       "chrome, jobs + notifications feeds, a deps "
+                       "declaration, and a cross-driver query binding.",
+        "queries": [
+            q("summary"),
+            q("items"),
+            # Cross-driver binding: the host resolves `driver: "config"`
+            # and issues this `query` op against tamias-driver-config's
+            # serve — `params.query` is the product op (`get`), the rest
+            # are its params. This driver never answers it locally.
+            {"name": "config-theme", "op": "query", "driver": "config",
+             "params": {"query": "get", "key": "platform.theme"}},
+        ],
+        "root": {
+            "kind": "column",
+            "title": "Platform",
+            "children": [
+                {"kind": "kv", "title": "Snapshot", "query": "summary",
+                 "pairs": []},
+                {"kind": "kv", "title": "Config (via config driver)",
+                 "query": "config-theme", "pairs": []},
+                {
+                    "kind": "table",
+                    "title": "Items",
+                    "query": "items",
+                    "sortable": True,
+                    "columns": [
+                        {"key": "id", "title": "ID", "width": 8},
+                        {"key": "title", "title": "Title"},
+                        {"key": "status", "title": "Status", "width": 8},
+                    ],
+                },
+                {"kind": "markdown", "text":
+                    "*tamias-driver-platform* — the platform-host demo. "
+                    "This driver declares `sidebar`, `headerActions`, "
+                    "`notifications`, and `jobs` contributions plus an "
+                    "`optional` dep on `config`; the board's "
+                    "`config-theme` binding is answered by the *config* "
+                    "driver through the host's cross-driver resolution. "
+                    "Try `pavo chrome`, `pavo jobs`, `pavo notifications`."},
+            ],
+        },
+    },
+    {
+        "id": "jobs",
+        "title": "Jobs",
+        "route": "/platform/jobs",
+        "description": "The driver's job feed as a table — same data the "
+                       "`jobs` wire op returns for the host's /jobs page.",
+        "queries": [q("jobs")],
+        "root": {
+            "kind": "table",
+            "title": "Jobs",
+            "query": "jobs",
+            "columns": [
+                {"key": "id", "title": "ID", "width": 10},
+                {"key": "title", "title": "Title"},
+                {"key": "status", "title": "Status", "width": 10},
+                {"key": "detail", "title": "Detail"},
+            ],
+        },
+    },
+]
+
+MANIFEST = {
+    "name": NAME,
+    "title": "Platform",
+    "icon": "🧭",
+    "version": "0.1.0",
+    "verbs": ["manifest", "serve"],
+    "capabilities": ["pavo"],
+    # Driver dependency declarations — `optional` means the host may
+    # run without `config`; the foreign query binding then degrades
+    # to an {"error": …} payload (partial degradation, per the wire
+    # contract). `requires` would make a missing dep a discovery error.
+    "deps": {"requires": [], "optional": ["config"]},
+    "contributes": {
+        "sidebar": [
+            {"id": "side-board", "title": "Platform board",
+             "route": "/platform/board", "priority": 10},
+            {"id": "side-jobs", "title": "Platform jobs",
+             "route": "/platform/jobs", "priority": 20},
+        ],
+        "headerActions": [
+            {"id": "act-jobs", "title": "Jobs",
+             "route": "/platform/jobs", "priority": 10},
+            {"id": "act-board", "title": "Board",
+             "route": "/platform/board", "priority": 20},
+        ],
+        "notifications": [
+            {"id": "alerts", "title": "Platform alerts",
+             "route": "/platform/board", "priority": 50},
+        ],
+        "jobs": [
+            {"id": "feed", "title": "Platform jobs",
+             "route": "/platform/jobs", "priority": 50},
+        ],
+        "statusbar": [
+            {"id": "status", "title": "platform", "route": "/platform/board",
+             "priority": 95},
+        ],
+    },
+    "views": VIEWS,
+}
+
+
+def summary_of(spec):
+    return {
+        "id": spec["id"],
+        "title": spec["title"],
+        "route": spec["route"],
+        "description": spec.get("description"),
+        "queries": [b["name"] for b in spec.get("queries", [])],
+    }
+
+
+def view_result(view_id, params):
+    for spec in VIEWS:
+        if spec["id"] == view_id:
+            data = {}
+            for binding in spec.get("queries", []):
+                # Foreign bindings (`driver` set) are the host's job —
+                # it issues the op against that driver's serve and
+                # overwrites data[name]. Emit the degradation payload
+                # anyway: conformance wants every binding keyed, and a
+                # host that ignores `driver` (pre-resolution) shows the
+                # error rather than silence.
+                if binding.get("driver"):
+                    data[binding["name"]] = {
+                        "error": "cross-driver binding — resolved by the host "
+                                 "against driver '%s'" % binding["driver"],
+                    }
+                    continue
+                data[binding["name"]] = query_data(
+                    binding["name"], params
+                )
+            return {"view": spec, "data": data}
+    return None
+
+
+# ---------------------------------------------------------------- wire
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def respond_ok(result):
+    emit({"ok": True, "result": result})
+
+
+def respond_err(msg):
+    emit({"ok": False, "error": str(msg)})
+
+
+def dispatch(obj):
+    op = obj.get("op")
+    if op == "manifest":
+        respond_ok(MANIFEST)
+    elif op == "views":
+        respond_ok([summary_of(v) for v in VIEWS])
+    elif op == "view":
+        result = view_result(obj.get("view"), obj.get("params") or {})
+        if result is None:
+            respond_err("unknown view: %s" % obj.get("view"))
+        else:
+            respond_ok(result)
+    elif op == "query":
+        name = obj.get("query")
+        respond_ok({"query": name, "data": query_data(name, obj.get("params") or {})})
+    elif op == "jobs":
+        respond_ok(JOBS)
+    elif op == "notifications":
+        respond_ok(NOTIFICATIONS)
+    else:
+        respond_err("unknown op: %s" % op)
+
+
+def serve():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            respond_err("invalid JSON request")
+            continue
+        if not isinstance(obj, dict):
+            respond_err("request must be a JSON object")
+            continue
+        dispatch(obj)
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        sys.stderr.write("usage: tamias-driver-platform manifest|capabilities|serve\n")
+        return 1
+    verb = args[0]
+    if verb == "manifest":
+        sys.stdout.write(json.dumps(MANIFEST, indent=2) + "\n")
+        return 0
+    if verb == "capabilities":
+        sys.stdout.write(json.dumps({
+            "capabilities": MANIFEST["capabilities"],
+            "verbs": MANIFEST["verbs"],
+        }) + "\n")
+        return 0
+    if verb == "serve":
+        return serve()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

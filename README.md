@@ -50,6 +50,7 @@ serve pavo views.)
 ```
 crates/    pavo-protocol · pavo-core · pavo-cli · pavo-tui · pavo-testkit
            pavo-driver-config (first-party tamias-driver-config)
+           pavo-driver-kit (driver-authoring SDK)
 web/       Nuxt 4 app — dashboard + ViewNode renderer; `npm run dev`
            (proxied to the bridge) or `npm run build` → static export
 protocol/  driver capability spec · contribution slots · ViewNode IR ·
@@ -63,9 +64,10 @@ speaks. JSON Schemas mirroring it live in `protocol/v1/`.
 
 ## Examples
 
-`examples/drivers/` ships three reference `tamias-driver-*`
+`examples/drivers/` ships four reference `tamias-driver-*`
 executables (Python 3, stdlib only — they run anywhere python3 does),
-plus one **first-party Rust driver** in the workspace:
+plus one **first-party Rust driver** and the **driver-authoring kit**
+in the workspace:
 
 | Driver | Location | Shows |
 | --- | --- | --- |
@@ -73,6 +75,7 @@ plus one **first-party Rust driver** in the workspace:
 | `tamias-driver-demo` | `examples/drivers/demo/` | board (table+kv+markdown), deps `graph`, timeline `tree`; navbar+dashboard+statusbar |
 | `tamias-driver-myco` | `examples/drivers/myco/` | thin proxy: translates pavo ops onto `myco serve`'s JSON-RPC wire; degrades when myco is absent |
 | `tamias-driver-viz-graph` | `examples/drivers/viz-graph/` | renderer plugin — claims `graph` on cli/tui/web via `render` (svg/ascii/rows); zero views |
+| `tamias-driver-platform` | `examples/drivers/platform-demo/` | platform features — `sidebar`/`headerActions`/`notifications`/`jobs` slots + feeds, `deps`, a cross-driver `QueryBinding.driver` |
 
 Put them on `PATH` (or symlink into `$TAMIAS_HOME/drivers/`) and pavo
 discovers them like any installed driver. The config driver installs
@@ -82,7 +85,7 @@ with the workspace — `cargo xtask install` (or
 
 ```bash
 cargo xtask install   # pavo + tamias-driver-config → ~/.cargo/bin
-export PATH="$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PATH"
+export PATH="$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PWD/examples/drivers/platform-demo:$PATH"
 pavo drivers
 pavo view demo:deps --format mermaid   # built-in (plugin doesn't claim mermaid)
 pavo view demo:deps --format svg       # viz-graph plugin SVG
@@ -116,16 +119,25 @@ graph TD
 ```
 
 `./scripts/smoke-examples.sh` runs the whole set end-to-end
-(`pavo drivers`/`views`/`view` over all three drivers).
+(`pavo drivers`/`views`/`view`/`jobs`/`notifications` over the
+drivers).
+
+Rust drivers don't hand-roll the wire: **`pavo-driver-kit`**
+(`crates/pavo-driver-kit`) is the authoring SDK — the ndjson `serve`
+loop every sibling driver duplicates, fluent `DriverManifest`/`ViewSpec`/
+`QueryBinding`/`Contribution` builders, `ViewNode` constructors, and
+`JobItem`/`NotificationItem` helpers. Its module docs are the
+driver-authoring reference; `protocol/v1/README.md` → *Writing a
+driver* points at it. Forms are interactive where the surface
+supports it — the `submit` wire op carries `form` values back to the
+driver (`tamias-driver-config`'s `config:edit` and the demo driver's
+`demo:new` are the references).
 
 `pavo-testkit` (`crates/pavo-testkit`) is the conformance harness:
 `FixtureDriver` builds fake `tamias-driver-*` executables,
 `check_driver` runs the wire contract suite, and record/replay
 transcripts give renderers deterministic sessions. The example
 drivers are themselves held to the suite in its tests.
-
-v1 forms are **read-only** — the `form` ViewNode kind renders its
-field list; interactive submit is v2 (same for the web surface).
 
 ## Web
 
@@ -148,6 +160,7 @@ workflow and env vars.
 ## Status
 
 `pavo-protocol`, `pavo-core`, `pavo-cli` (incl. `serve`),
-`pavo-testkit`, `pavo-tui`, `pavo-driver-config`, `web/`, and the
+`pavo-testkit`, `pavo-tui`, `pavo-driver-config`, `pavo-driver-kit`,
+`web/`, and the
 example drivers are implemented and tested (`cargo xtask check` / `cargo xtask test`,
 `cd web && npm run build`).

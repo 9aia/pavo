@@ -64,3 +64,79 @@ export function parseViewLink(refParam: unknown, query: LocationQuery): ViewLink
 
   return { ref, params }
 }
+
+/** One row of `GET /api/views` — only the fields route resolution needs. */
+export interface ViewListEntry {
+  namespaced: string
+  route?: string
+  title?: string
+}
+
+/**
+ * `/view/<ref>` href for a parsed link — params ride as path
+ * segments (`k=v`, key and value encoded separately so a literal
+ * `=` inside a value survives the first-`=` split).
+ */
+export function viewLinkHref(link: ViewLink): string {
+  const segs = link.params.map(
+    ([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`,
+  )
+  return `/view/${encodeURIComponent(link.ref)}${segs.length ? `/${segs.join('/')}` : ''}`
+}
+
+/** Convenience for a bare ref. */
+export function viewHref(ref: string): string {
+  return viewLinkHref({ ref, params: [] })
+}
+
+/** A `driver:view` ref with no slashes/spaces — e.g. `myco:item`. */
+const VIEW_REF_RE = /^[^/\s:]+:[^/\s:]+$/
+
+/**
+ * Resolve a chrome/feed `route` string to a view link, or `null`
+ * when it isn't a view route.
+ *
+ * Contribution `route`s are driver-relative view routes
+ * (`/demo/board` — the `ViewSpec.route` form), `/view/…` deep links,
+ * or bare `driver:view` refs; anything else (host routes like
+ * `/dashboard`, driver-owned `routes[]` pages) returns `null` and
+ * the caller falls back to plain navigation.
+ *
+ * `views` is the `/api/views` list used to map `ViewSpec.route` →
+ * `namespaced` ref; pass `[]` for the synchronous subset
+ * (`/view/…`, `d:v`) and re-check with the full list when async
+ * resolution is available.
+ */
+export function routeToViewLink(
+  route: string,
+  views: ViewListEntry[],
+): ViewLink | null {
+  const r = route.trim()
+  if (!r) return null
+
+  // Already a web deep link — reuse the page grammar verbatim.
+  if (r.startsWith('/view/')) {
+    const rest = r.slice('/view/'.length).split(/[?#]/)[0] ?? ''
+    // vue-router hands the page decoded segments; a raw route string
+    // still carries %XX — decode to match (bad escapes pass through).
+    const segments = rest
+      .split('/')
+      .filter((s) => s !== '')
+      .map((s) => {
+        try {
+          return decodeURIComponent(s)
+        } catch {
+          return s
+        }
+      })
+    if (!segments.length) return null
+    return parseViewLink(segments, {})
+  }
+
+  // Bare `driver:view` ref.
+  if (VIEW_REF_RE.test(r)) return { ref: r, params: [] }
+
+  // ViewSpec.route (`/demo/board`) → namespaced ref via /api/views.
+  const hit = views.find((v) => v.route === r || v.route === r.replace(/\/+$/, ''))
+  return hit ? { ref: hit.namespaced, params: [] } : null
+}

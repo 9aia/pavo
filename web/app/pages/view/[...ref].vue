@@ -5,6 +5,10 @@
 // `app/utils/view-link.ts` for the grammar and precedence; everything
 // is forwarded to the driver's view op as `param.<k>=<v>`, same rule
 // as the CLI's `--param k=v`.
+//
+// Fetching + form-submit context live in `useView` — shared with
+// chrome popovers (ViewPopover.vue) so embedded views behave
+// identically to full pages.
 import { parseViewLink } from '~/utils/view-link'
 
 const route = useRoute()
@@ -12,49 +16,10 @@ const route = useRoute()
 const link = computed(() => parseViewLink(route.params.ref, route.query))
 const ref = computed(() => link.value.ref)
 
-// Normalize every param source into the bridge's `param.<k>=<v>`
-// wire form, in precedence order (path < bare query < `param.*`).
-const paramQs = computed(() => {
-  const parts = link.value.params.map(
-    ([k, v]) => `${encodeURIComponent(`param.${k}`)}=${encodeURIComponent(v)}`,
-  )
-  return parts.length ? `&${parts.join('&')}` : ''
-})
-
-const apiUrl = computed(
-  () => `/api/view?ref=${encodeURIComponent(ref.value)}${paramQs.value}`,
+const { pending, apiError, viewResult, refresh } = useView(
+  ref,
+  computed(() => link.value.params),
 )
-
-const { data, pending, error, refresh } = await useFetch(apiUrl, {
-  server: false,
-  watch: [apiUrl],
-  // The bridge answers domain errors (unknown driver/view) with a
-  // non-2xx status AND an `{ok:false,error}` envelope — don't throw,
-  // let the envelope message render.
-  ignoreResponseError: true,
-})
-
-const viewResult = computed(() => {
-  const d = data.value as { ok?: boolean; result?: any; error?: string } | null
-  return d?.ok ? d.result : null
-})
-
-// Form submits (`/api/submit`) need the view ref; a returned
-// `view` swaps the whole ViewResult in place. Provided to
-// FormView.vue via inject — no prop threading through ViewNode's
-// recursion.
-provide('pavoViewRef', ref)
-provide('pavoApplyView', (vr: any) => {
-  if (data.value) {
-    data.value = { ok: true, result: vr } as typeof data.value
-  }
-})
-const apiError = computed(() => {
-  const d = data.value as { ok?: boolean; error?: string } | null
-  if (error.value) return error.value.message
-  if (d && d.ok === false) return d.error || 'request failed'
-  return null
-})
 </script>
 
 <template>
@@ -76,6 +41,8 @@ const apiError = computed(() => {
       </p>
       <ViewNode :node="viewResult.view.root" :data="viewResult.data || {}" />
     </template>
+    <p v-else class="muted">no view.</p>
+    <button class="refresh" @click="refresh()">refresh</button>
   </div>
 </template>
 
@@ -91,5 +58,20 @@ const apiError = computed(() => {
   font-weight: normal;
   opacity: 0.7;
   margin-left: 0.5rem;
+}
+.refresh {
+  margin-top: 1rem;
+  background: none;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.2rem 0.6rem;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.refresh:hover {
+  opacity: 1;
 }
 </style>

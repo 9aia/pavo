@@ -2,14 +2,12 @@
 // Dashboard: driver cards + merged chrome contributions + every
 // view as a deep link. All data comes from the `pavo serve` bridge
 // at request time (client-side fetch — the SSR shell streams first).
+import { viewHref } from '~/utils/view-link'
+
 const { data: drivers, pending: driversPending, error: driversError } =
   await useFetch('/api/drivers', { server: false })
 const { data: chrome } = await useFetch('/api/chrome', { server: false })
 const { data: views } = await useFetch('/api/views', { server: false })
-
-function viewHref(namespaced: string) {
-  return `/view/${encodeURIComponent(namespaced)}`
-}
 
 function slotEntries() {
   if (!chrome.value?.ok) return []

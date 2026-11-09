@@ -45,17 +45,46 @@ browser ──► pavo serve (127.0.0.1) ──► pavo-core Host ──► tami
 - **`pavo serve`** (`crates/pavo-cli`) is the only transport. It binds
   `127.0.0.1`, prints `listening http://127.0.0.1:<port>` as its first
   stdout line, and serves:
-  - `GET /api/health|drivers|views|chrome|view|raw|query` — JSON
+  - `GET /api/health|drivers|views|chrome|view|raw|query|submit|
+    renderers|render|jobs|notifications` — JSON
     `{"ok":…,"result"/"error"}` envelopes over the same `Host` the CLI
-    uses (CORS `*` — localhost dev tool).
+    uses (CORS `*` — localhost dev tool). `/api/chrome` carries every
+    contribution slot (`navbar`/`dashboard`/`statusbar`/`routes`/
+    `sidebar`/`headerActions`/`notifications`/`jobs` + `extra`);
+    `/api/jobs` + `/api/notifications` return the aggregated platform
+    feeds (item fields flattened with `driver`/`driver_title`).
+  - `POST /api/call?driver=<kind>` — cross-driver wire proxy: the
+    JSON body is a wire `Request` (`{"op":…}`) forwarded verbatim to
+    that driver's `serve`; its `result` comes back in the same
+    envelope. This is the escape hatch for ops the typed endpoints
+    don't cover (header actions, cross-driver commands).
   - `GET /*` — static files from `web/.output/public`, then
     `web/dist`, then `$PAVO_WEB_DIR`; with no build present it serves
     a built-in landing page listing drivers/views.
-- **This app** fetches `/api/*` **client-side** (`useFetch` with
-  `server: false`): the SSR/prerendered shell streams instantly and
-  each panel hydrates itself — the island model. That also makes the
-  static export work: `npm run build` prerenders shells only, and the
-  browser fetches live data from whatever serves `/api`.
+- **This app** is the platform shell: a left **sidebar** (brand +
+  nav), a **top header** (driver `headerActions` icon buttons,
+  jobs indicator, notifications bell), the page outlet, and an
+  optional **statusbar** footer. It fetches `/api/*` **client-side**
+  (`useFetch` with `server: false`): the SSR/prerendered shell
+  streams instantly and each panel hydrates itself — the island
+  model. That also makes the static export work: `npm run build`
+  prerenders shells only, and the browser fetches live data from
+  whatever serves `/api`.
+- **Chrome IA** — the `sidebar` and `navbar` contribution slots
+  merge into one sidebar nav grouped by `driver_title` (sidebar
+  entries first, then navbar; both arrive priority-sorted), after a
+  built-in `pavo` group (Dashboard, Jobs). Entry `route`s resolve
+  through `/api/views`: view routes (`/demo/board`, `driver:view`,
+  `/view/…`) become `/view/<ref>` deep links; anything else keeps
+  its raw route. `headerActions` entries render as header icon
+  buttons — view routes open a `ViewPopover` panel (a real view,
+  fetched via the shared `useView` composable), plain routes
+  navigate. The bell lists `/api/notifications` (unread badge,
+  severity dots, click-to-navigate; read state is display-only —
+  no write path in v1). `/jobs` is a dedicated page grouping the
+  flat `/api/jobs` feed by status; the header shows an
+  active-count badge (non-terminal heuristic — status vocabularies
+  are driver-owned).
 - **View rendering** — `app/components/ViewNode.vue` interprets the
   ViewNode IR recursively (panel/row/column layouts, table, tree, kv,
   markdown, form, embed placeholder, KV degradation for
@@ -128,9 +157,10 @@ Re-check on Nuxt upgrades.
 
 ## Status
 
-v1: dashboard + view deep links + all ViewNode kinds (graph as a
-client-only SVG island; forms with `submit_op` are interactive via
-`/api/submit`). Not yet: `embed` component registry, view params UI
-(params can still be passed in the URL — see "Deep-link params"
-above), markdown rendering (pre-wrap text), driver-contributed
-`routes` pages (they link out but only views render natively).
+v1: platform shell (sidebar + header actions + notifications +
+jobs page) + dashboard + view deep links + all ViewNode kinds
+(graph as a client-only SVG island; forms with `submit_op` are
+interactive via `/api/submit`, including inside header-action
+popovers). Not yet: `embed` component registry, driver-contributed
+`routes` pages (they link out but only views render natively),
+notification mark-read (display-only in v1).

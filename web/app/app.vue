@@ -1,42 +1,44 @@
 <script setup lang="ts">
-// App shell: header with merged navbar contributions (chrome) +
-// the page outlet. Chrome is fetched client-side like everything
+// App shell — the platform frame: left sidebar (brand + grouped nav
+// merged from the `sidebar`/`navbar` chrome slots), top header bar
+// (headerActions + jobs + notifications), content outlet, optional
+// statusbar footer. Chrome is fetched client-side like everything
 // else — the SSR shell renders instantly, islands hydrate.
-const { data: chrome } = await useFetch('/api/chrome', { server: false })
+import type { ChromeSlots } from '~/composables/platform'
+
+const { data: chrome } = await useChrome()
+const slots = computed<ChromeSlots | null>(() => {
+  const d = chrome.value as { ok?: boolean; result?: ChromeSlots } | null
+  return d?.ok ? (d.result ?? null) : null
+})
+
+const navOpen = ref(false)
 </script>
 
 <template>
-  <div class="shell">
-    <header class="topbar">
-      <NuxtLink to="/" class="brand">pavo</NuxtLink>
-      <nav v-if="chrome?.ok">
-        <NuxtLink
-          v-for="e in chrome.result.navbar"
+  <div class="shell" :class="{ 'nav-open': navOpen }">
+    <AppSidebar
+      :sidebar="slots?.sidebar ?? []"
+      :navbar="slots?.navbar ?? []"
+      :open="navOpen"
+      @close="navOpen = false"
+    />
+    <div class="bodycol">
+      <AppHeader :chrome="slots" @toggle-nav="navOpen = !navOpen" />
+      <main class="content">
+        <NuxtPage />
+      </main>
+      <footer v-if="slots?.statusbar?.length" class="statusbar">
+        <span
+          v-for="e in slots.statusbar"
           :key="e.id"
-          :to="e.route"
-          class="navlink"
+          class="status"
+          :title="`${e.driver} · ${e.id}`"
         >
           {{ e.title }}
-        </NuxtLink>
-      </nav>
-      <span class="spacer" />
-      <nav>
-        <NuxtLink to="/" class="navlink">dashboard</NuxtLink>
-      </nav>
-    </header>
-    <main class="content">
-      <NuxtPage />
-    </main>
-    <footer v-if="chrome?.ok && chrome.result.statusbar.length" class="statusbar">
-      <span
-        v-for="e in chrome.result.statusbar"
-        :key="e.id"
-        class="status"
-        :title="`${e.driver} · ${e.id}`"
-      >
-        {{ e.title }}
-      </span>
-    </footer>
+        </span>
+      </footer>
+    </div>
   </div>
 </template>
 
@@ -50,36 +52,13 @@ body {
 }
 .shell {
   display: flex;
-  flex-direction: column;
   min-height: 100vh;
 }
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.5rem 1rem;
-  border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
-}
-.brand {
-  font-weight: 700;
-  text-decoration: none;
-  color: inherit;
-}
-nav {
-  display: flex;
-  gap: 0.75rem;
-}
-.navlink {
-  color: inherit;
-  text-decoration: none;
-  opacity: 0.8;
-}
-.navlink:hover {
-  opacity: 1;
-  text-decoration: underline;
-}
-.spacer {
+.bodycol {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 .content {
   flex: 1;

@@ -2,7 +2,7 @@
 # smoke-examples.sh — run the example drivers end-to-end through pavo.
 #
 # Puts the built tamias-driver-config (target/debug) plus
-# examples/drivers/{demo,myco} on PATH (the same discovery
+# examples/drivers/{demo,myco,platform-demo} on PATH (the same discovery
 # mechanism a real install uses) and exercises the main verbs. Works
 # from anywhere; builds pavo first if needed.
 #
@@ -19,7 +19,7 @@ if [ ! -x "$PAVO_BIN" ]; then
 fi
 
 cargo build -p pavo-driver-config
-export PATH="$ROOT/target/debug:$ROOT/examples/drivers/demo:$ROOT/examples/drivers/myco:$PATH"
+export PATH="$ROOT/target/debug:$ROOT/examples/drivers/demo:$ROOT/examples/drivers/myco:$ROOT/examples/drivers/platform-demo:$PATH"
 export TAMIAS_HOME="${TAMIAS_HOME:-/tmp/pavo-smoke-home}"
 mkdir -p "$TAMIAS_HOME/drivers"
 
@@ -43,5 +43,12 @@ echo "== pavo view config:show =="
 echo
 echo "== pavo view myco:board (degraded ok if myco absent) =="
 "$PAVO_BIN" view myco:board || true
+echo
+echo "== pavo view platform:board (cross-driver binding via config) =="
+"$PAVO_BIN" view platform:board
+echo
+echo "== pavo jobs / notifications (platform feeds) =="
+"$PAVO_BIN" jobs
+"$PAVO_BIN" notifications
 echo
 echo "smoke-examples: OK"
