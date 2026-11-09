@@ -76,6 +76,12 @@ data.
 | `mermaid` | graph nodes → mermaid |
 | `<plugin>` | any format a renderer plugin claims (e.g. `svg`, `ascii`) |
 
+Renderer plugins take precedence per node: a plugin listing a
+built-in format name (`text`/`dot`/`mermaid`) in
+`renderers[].surfaces.cli.formats` overrides it for the kinds it
+claims; unclaimed nodes keep the built-in output. `json` is
+host-owned and never routed to plugins.
+
 `--param k=v` merges caller params into every query binding;
 repeatable, values parse as JSON when possible. `--json` prints the
 machine-readable envelope.

@@ -103,5 +103,9 @@ within a slot (lower wins, default 100, ties by discovery order).
 | `priority` | ordering hint, default 100 |
 | `entry` | optional entry-point hint (reserved; hosts currently always use the wire) |
 
-See [Write a renderer plugin](/how-to/write-a-renderer-plugin) and
-[Renderer plugins](/explanation/renderer-plugins).
+Claims are canonical per node on their declared surfaces — a plugin
+listing a built-in `--format` name (`text`/`dot`/`mermaid`) overrides
+it for claimed nodes (`json` stays host-owned); unclaimed
+kinds/surfaces keep built-in rendering, and plugin failure degrades
+to it. See [Write a renderer plugin](/how-to/write-a-renderer-plugin)
+and [Renderer plugins](/explanation/renderer-plugins).

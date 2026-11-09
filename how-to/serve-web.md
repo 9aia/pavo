@@ -62,8 +62,11 @@ build instead — then `server/api/*` also works and
 recursively — panel/row/column layouts, table, tree, kv, markdown,
 interactive form (`submit_op` → `FormView` island hitting `/api/submit`), embed placeholder, KV degradation for unknown
 kinds. `graph` nodes render in `GraphIsland.vue`, a client-only
-SVG island (deterministic circle/spiral layout — real layout is an
-`embed`/renderer-plugin concern). Driver-contributed `routes` link
+SVG island (deterministic circle/spiral layout) — the *fallback*:
+a renderer plugin claiming `graph` for the `web` surface renders
+its canonical `RenderModel` via `/api/render` instead (placeholder
+while in flight, built-in only if the plugin fails or doesn't
+claim the kind). Driver-contributed `routes` link
 out; only views render natively in v1.
 
 ## Security notes

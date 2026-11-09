@@ -50,6 +50,21 @@ Deterministic, same policy as chrome contributions:
 all manifests into this order once at discovery; `/api/renderers`
 on `pavo serve` exposes the resolved claims to the web surface.
 
+## Precedence over built-ins
+
+Plugin claims are **canonical per node** on every surface: a node
+whose kind+surface is claimed renders via `render` → RenderModel;
+built-ins are the fallback for unclaimed kinds *and* for plugin
+failures. On `cli` this includes `--format` names that collide with
+built-ins — `text`, `dot`, and `mermaid` are claimable via
+`cli.formats` (empty = wildcard), and a claim wins for the nodes it
+covers while unclaimed nodes keep the built-in output. `json` is the
+one exception: the raw `ViewResult` dump is host-owned and never
+routed to plugins. On `web` the same rule makes the plugin
+RenderModel canonical for claimed kinds — `GraphIsland.vue` is the
+`graph` fallback when no plugin claims it (and while the render op
+is in flight a placeholder shows, never the built-in).
+
 ## RenderModel — the canonical output
 
 Plugins don't ship surface code; they answer one of four tagged

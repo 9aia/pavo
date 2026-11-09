@@ -32,8 +32,10 @@ ascii edge lists, and mermaid-free layouts the built-ins don't.
   same policy chrome contributions use.
 - `surfaces.cli.formats` — the `--format` values you claim;
   **empty = wildcard** (you handle every format asked, including
-  `text`). Built-ins (`text`/`json`/`dot`/`mermaid`) still exist —
-  a plugin that doesn't claim them leaves them built-in.
+  `text`). Built-in names are claimable: listing `dot`, `mermaid`,
+  or `text` overrides the built-in renderer *for your claimed
+  nodes* — unclaimed nodes keep the built-in output. `json` is
+  never claimable (the raw `ViewResult` dump is host-owned).
 - `surfaces.tui` — `true` to render on the ratatui host.
 - `surfaces.web` — `component` is a hint for rich mounts;
   `island: true` marks output needing client-side execution.
