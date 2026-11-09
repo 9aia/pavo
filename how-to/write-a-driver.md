@@ -14,10 +14,14 @@ stdout: `{"op":"manifest"}` → the
 [`DriverManifest`](/reference/driver-manifest), `{"op":"views"}` →
 view summaries, `{"op":"view","view":"…","params":{…}}` → a
 `ViewResult` (tree + bound data), `{"op":"query",…}` → one query's
-data. `{"op":"submit","view":"…","form":"…"?,"values":{…}}` →
+data. `{"op":"submit","view":"…","form":"…"?","values":{…}}` →
 a `SubmitResult` backs interactive `form` nodes (see
-[Wire ops → submit](/reference/wire-ops#submit)). Every response is
-`{"ok":true,"result":…}` or `{"ok":false,"error":"…"}`. Full spec:
+[Wire ops → submit](/reference/wire-ops#submit)). Drivers that feed
+the platform — job queues, notification streams — also answer
+`{"op":"jobs"}` and `{"op":"notifications"}` (see
+[Platform feeds](#platform-feeds-jobs--notifications) below).
+Every response is `{"ok":true,"result":…}` or
+`{"ok":false,"error":"…"}`. Full spec:
 [Wire ops](/reference/wire-ops).
 
 ## Minimal shape
@@ -94,26 +98,134 @@ degradation is the contract).
   "navbar":    [{"id": "hello:home", "title": "Hello", "route": "/hello/hi"}],
   "dashboard": [{"id": "hello:panel", "title": "Hello", "route": "/hello/hi"}],
   "statusbar": [{"id": "hello:status", "title": "ok", "route": "/hello/hi"}],
-  "routes":    [{"id": "hello:admin", "title": "Admin", "route": "/hello/admin"}]
+  "routes":    [{"id": "hello:admin", "title": "Admin", "route": "/hello/admin"}],
+  "sidebar":   [{"id": "hello:nav", "title": "Hello", "route": "/hello/hi"}],
+  "headerActions": [{"id": "hello:quick", "title": "Quick", "route": "/hello/hi"}],
+  "notifications": [{"id": "hello:feed", "title": "Alerts", "route": "/hello/hi"}],
+  "jobs":      [{"id": "hello:queue", "title": "Jobs", "route": "/hello/jobs"}]
 }
 ```
 
-Slots merge across drivers by `priority` (lower wins, default
-100). Unknown slot names round-trip via `contributes.extra` — safe
-to emit slots a given host doesn't know yet.
+The eight built-in slots: `navbar`, `dashboard`, `statusbar`,
+`routes`, `sidebar`, `headerActions`, `notifications`, and `jobs`
+(wire spelling is camelCase for `headerActions`). Slots merge
+across drivers by `priority` (lower wins, default 100). The
+`notifications`/`jobs` entries are *display metadata* — the feed
+data itself flows through the matching wire ops (see
+[Platform feeds](#platform-feeds-jobs--notifications)). Unknown
+slot names round-trip via `contributes.extra` — safe to emit slots
+a given host doesn't know yet. Full field reference:
+[Driver manifest → contributes](/reference/driver-manifest#contributes).
 
-## Rust drivers
+## Platform feeds: jobs + notifications
 
-A driver can be any language — the wire is ndjson JSON. For Rust,
-depend on the published contract crate instead of hand-rolling types:
+Two optional wire ops let a driver publish live feeds the host
+aggregates across all providers:
 
-```toml
-pavo-protocol = "0.1"   # crates.io — manifests, ViewNode IR, ops
+```json
+{"op":"jobs"}           → Vec<JobItem>
+{"op":"notifications"}  → Vec<NotificationItem>
 ```
 
-`pavo-testkit` (conformance suite) is not yet published — depend on it
-by git (`github.com:9aia/pavo`) like the product drivers do. See
-`crates/pavo-driver-config/` for a first-party example.
+Declaring the `contributes.jobs` / `contributes.notifications` slot
+marks the driver as a *provider*; the host calls the matching op on
+every provider and merges the results (each item attributed to its
+driver). Per-driver failures skip that driver — one broken feed
+never takes down the rest.
+
+`JobItem` is `{id, title, status, detail?, route?, updated_at?}`;
+`NotificationItem` is `{id, title, body?, severity?, route?,
+created_at?, read?}`. Timestamps are RFC 3339 strings; `status`/
+`severity` are **driver-owned vocabularies** — hosts render them
+verbatim or degrade to neutral styling. `route` resolves like a
+contribution route (deep link or host path). Drivers without the
+feed may answer `ok:false` or an empty list — hosts tolerate both.
+Full shapes: [Wire ops → Types](/reference/wire-ops#types).
+
+## Declaring deps and cross-driver queries
+
+Two manifest fields let drivers compose with each other:
+
+```json
+"deps": {"requires": ["config"], "optional": ["myco"]}
+```
+
+`deps.requires` names drivers this driver can't function without —
+a missing one quarantines the driver (it errors on every manifest/
+view/feed access rather than half-rendering). `deps.optional` names
+drivers used when present; absence degrades gracefully. The host
+topologically sorts drivers so deps come first; cycles are errors.
+
+A [`QueryBinding`](/reference/driver-manifest) may also name a
+`driver` — a **cross-driver query**: the host resolves the binding
+against *that* driver's `serve` and merges the payload into the
+view's `data` under the binding name, so your tree can't tell the
+difference. Failures degrade to `{"error": "…"}` in that binding's
+slot. `examples/drivers/platform-demo/` exercises all of this.
+
+## Rust drivers — pavo-driver-kit
+
+A driver can be any language — the wire is ndjson JSON. For Rust,
+**`pavo-driver-kit` is the recommended way to write one**: it
+absorbs the boilerplate every driver re-implements — the ndjson
+`serve` loop, `ok`/`err` response plumbing, and fluent builders for
+the manifest, views, query bindings, contributions, ViewNode trees,
+and platform feed items. A driver's UI surface becomes pure
+declaration:
+
+```toml
+pavo-protocol   = "0.1"   # crates.io — the wire contract types
+pavo-driver-kit = { git = "https://github.com/9aia/pavo" }  # not yet on crates.io
+```
+
+```rust
+use pavo_driver_kit as kit;
+use pavo_protocol::wire::{Request, Response};
+
+fn main() {
+    let manifest = kit::Manifest::new("hello", "Hello")
+        .version(env!("CARGO_PKG_VERSION"))
+        .view(kit::view("hi", "Hello", "/hello/hi",
+            kit::markdown(kit::base().title("Hi"), "Hello from **pavo**!")))
+        .sidebar(kit::contribution("home", "Hello", "/hello/hi"))
+        .build();
+    kit::serve_stdio(|req| match req {
+        Request::Manifest => Response::ok_typed(&manifest),
+        Request::Views   => Response::ok(serde_json::json!([])),
+        _                => Response::err("unsupported op"),
+    }).ok();
+}
+```
+
+What the kit covers:
+
+- **`serve::serve` / `serve::serve_stdio`** — the request/response
+  ndjson loop (one `{"op":…}` in, one `{"ok":…}` out per line);
+  `serve` takes any `Read`/`Write` pair for tests.
+- **`Manifest`** — fluent `DriverManifest` builder: `.view(…)`,
+  `.navbar/.dashboard/.statusbar/.routes/.sidebar/
+  .header_actions/.notifications/.jobs(…)` slot pushes,
+  `.requires(…)`/`.optional(…)` dep declarations, `.renderer(…)`.
+- **Query bindings** — `kit::query(name, op)` for own-driver
+  bindings, `kit::foreign_query(driver, name, op)` /
+  `kit::binding_on(driver, …)` for cross-driver ones.
+- **`node`** — `ViewNode` constructors (`panel`, `row`, `column`,
+  `table`, `tree`, `graph`, `form`, `kv`, `markdown`, `embed`, …)
+  plus `kit::base()` for the shared `id`/`title`/`query`/
+  `description`/`props` fields.
+- **`platform::job` / `platform::notification`** — `JobItem` /
+  `NotificationItem` constructors for the feed ops.
+
+All kit types are `pavo-protocol`'s — it adds constructors and the
+loop, never a parallel type hierarchy. Anything the kit doesn't
+cover, write against `pavo-protocol` directly (or hand-roll the
+loop — the wire is the contract, not the kit). `pavo-testkit`
+(conformance suite) is likewise not yet published — depend on it
+by git like the product drivers do. See
+`crates/pavo-driver-config/` for a first-party driver (it predates
+the kit and shows the hand-rolled equivalent) and the product
+drivers (myco, kuda, cuora, sturn, mimus, tamias, bupha, sepia)
+for kit-based examples.
 
 ## The proxy pattern (recommended for real products)
 
@@ -149,5 +261,7 @@ The production versions live in each product repo
 | Driver | Shows |
 | --- | --- |
 | `examples/drivers/demo/` | board (table+kv+markdown), deps `graph`, timeline `tree`; all chrome slots |
+| `examples/drivers/platform-demo/` | the platform host end-to-end — sidebar/headerActions slots, `deps`, a cross-driver `QueryBinding.driver`, and canned `jobs`/`notifications` feeds |
 | `examples/drivers/myco/` | thin proxy onto `myco serve`'s JSON-RPC wire; degrades when myco is absent |
-| `crates/pavo-driver-config/` | first-party Rust driver — the common config API (see [Use the config API](/how-to/use-config-api)) |
+| `crates/pavo-driver-config/` | first-party Rust driver — the common config API (see [Use the config API](/how-to/use-config-api)); predates `pavo-driver-kit` |
+| product repos (`tamias-driver-myco`, `-kuda`, `-cuora`, `-sturn`, `-mimus`, `-tamias`, `-bupha`, `-sepia`) | production drivers migrated onto `pavo-driver-kit` |

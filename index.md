@@ -29,6 +29,11 @@ features:
     details: drivers can claim view kinds outright — a manifest renderers[] declaration plus the render op returning a canonical RenderModel
     link: /explanation/renderer-plugins
     linkText: renderer plugins
+  - icon: 🖥️
+    title: Platform chrome
+    details: eight contribution slots, driver deps, cross-driver queries, and aggregated jobs/notifications feeds compose one shared screen
+    link: /explanation/architecture#platform-host
+    linkText: platform host
   - icon: 🛟
     title: Graceful by contract
     details: additive-only protocol, unknown kinds degrade to KV, plugin failure never breaks a view

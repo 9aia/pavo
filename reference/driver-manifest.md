@@ -16,7 +16,9 @@ Rust source of truth: `crates/pavo-protocol/src/manifest.rs`;
   "version": "0.4.0",
   "verbs": ["manifest", "serve"],
   "capabilities": ["pavo"],
-  "contributes": { "navbar": [...], "routes": [...] },
+  "contributes": { "navbar": [...], "routes": [...],
+                   "sidebar": [...], "jobs": [...] },
+  "deps": { "requires": ["config"], "optional": ["myco"] },
   "views": [ { "id": "board", "route": "/myco/board", "root": {…} } ],
   "renderers": [ { "id": "graph", "kinds": ["graph"], "surfaces": {…} } ]
 }
@@ -32,14 +34,39 @@ Rust source of truth: `crates/pavo-protocol/src/manifest.rs`;
 | `version` | string | semver |
 | `verbs` | string[] | wire verbs beyond tamias install verbs; pavo treats a driver as a view driver iff `"serve"` is listed (or `capabilities` contains `"pavo"`) |
 | `capabilities` | string[] | free-form role tags (`"pavo"`, `"config"`, `"chrome"`) |
+| `deps` | object? | driver dependency declarations — see below |
 | `contributes` | object | chrome slots — see below |
 | `views` | ViewSpec[] | views the driver renders |
 | `renderers` | RendererDecl[] | view-kind renderer plugins — may appear with zero views |
 
+## deps — DriverDeps
+
+```json
+{ "requires": ["config"], "optional": ["myco"] }
+```
+
+Names are driver names — the `<type>` in `tamias-driver-<type>`
+(also `DriverManifest::name`). Both kinds of entry mean the same
+thing for ordering: **the dep sorts before the dependent** (the
+host topologically sorts its driver list).
+
+- `requires` — drivers this driver cannot function without. A
+  missing required dep is a hard error: the host **quarantines**
+  the dependent — it stays discovered but every manifest/view/feed
+  access surfaces the deps error rather than half-rendering.
+- `optional` — drivers used when present. Absent optional deps
+  contribute no edge and never block discovery; features degrade.
+
+Cycles (including a driver requiring itself) are host-side errors
+and quarantine every member. Drivers whose manifests arrive lazily
+are unordered until fetched; their `requires` are validated on
+first manifest access. Ordering is deterministic: among satisfied
+drivers, name ascending.
+
 ## contributes
 
 Named places in pavo's chrome where drivers register entries. The
-four built-in slots:
+eight built-in slots:
 
 | slot | lands in |
 | --- | --- |
@@ -47,6 +74,10 @@ four built-in slots:
 | `dashboard` | the shared dashboard route — composable panels from many drivers |
 | `statusbar` | bottom status bar — one-line summaries |
 | `routes` | standalone routes the driver owns outside its views |
+| `sidebar` | left sidebar shell — grouped nav entries (web host) |
+| `headerActions` | top-bar action buttons — wire spelling is camelCase; icons that open a popover rendering the action's view, or plain navigation (web host) |
+| `notifications` | marks the driver as a notification **provider** — entries are display metadata; item data flows through the `notifications` wire op as `NotificationItem`s |
+| `jobs` | marks the driver as a job/queue feed **provider** — same pattern; data comes from the `jobs` wire op as `JobItem`s |
 
 Unknown slots are preserved via `contributes.extra` (serde
 flatten) — newer drivers degrade gracefully on older hosts.
@@ -78,7 +109,11 @@ within a slot (lower wins, default 100, ties by discovery order).
   `NodeBase.query`. Each `QueryBinding` has `name` (what nodes
   reference), `op` (the wire op the host calls — typically
   `"query"`), and static `params` merged under caller-supplied view
-  params.
+  params. Optional `driver` makes it a **cross-driver binding**:
+  the host issues the op against that driver's `serve` instead of
+  the view's own and stores the payload in `data[name]` — failures
+  degrade to `{"error": "…"}` like local bindings. A `driver`
+  equal to the view's own driver is treated as a local binding.
 - `root` — the declarative [`ViewNode`](/reference/view-nodes) tree.
 
 ## renderers — RendererDecl
