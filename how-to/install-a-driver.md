@@ -37,9 +37,11 @@ pavo drivers    # confirm discovery
 ## Installing real product drivers
 
 Product drivers ship from their own repos — `tamias-driver-kuda`
-(kuda), `tamias-driver-myco` (myco), `tamias-driver-cuora` (cuora).
-Install them like any tamias package (they are `tamias-driver-*`
-content) or drop the binary on `PATH`:
+(kuda), `tamias-driver-myco` (myco), `tamias-driver-cuora` (cuora),
+`tamias-driver-sturn` (sturn), `tamias-driver-tamias` (tamias),
+`tamias-driver-mimus` (mimus), `tamias-driver-sepia` (sepia),
+`tamias-driver-bupha` (bupha). Install them like any tamias package
+(they are `tamias-driver-*` content) or drop the binary on `PATH`:
 
 ```bash
 tamias install git:9aia/myco//drivers/myco#v0.4.0   # example ref shape
@@ -49,6 +51,13 @@ cargo install --git https://github.com/9aia/myco tamias-driver-myco
 
 Once installed they are discovered exactly like the examples —
 `pavo drivers` lists them, `pavo views` lists their views.
+
+Compiled drivers can also ride inside tamias packages: stage
+prebuilt binaries under `drivers/bin/<rustc-target-triple>/`
+(e.g. `drivers/bin/x86_64-unknown-linux-gnu/tamias-driver-foo`) —
+`tamias install --allow-drivers` picks the host triple, verifies the
+payload digest, and lands an executable in `<tamias-home>/drivers/`.
+See tamias's `examples/README.md` for the publish recipe.
 
 ## Verifying
 

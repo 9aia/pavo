@@ -102,6 +102,19 @@ Slots merge across drivers by `priority` (lower wins, default
 100). Unknown slot names round-trip via `contributes.extra` — safe
 to emit slots a given host doesn't know yet.
 
+## Rust drivers
+
+A driver can be any language — the wire is ndjson JSON. For Rust,
+depend on the published contract crate instead of hand-rolling types:
+
+```toml
+pavo-protocol = "0.1"   # crates.io — manifests, ViewNode IR, ops
+```
+
+`pavo-testkit` (conformance suite) is not yet published — depend on it
+by git (`github.com:9aia/pavo`) like the product drivers do. See
+`crates/pavo-driver-config/` for a first-party example.
+
 ## The proxy pattern (recommended for real products)
 
 Don't reimplement your product's data layer — translate the wire.
