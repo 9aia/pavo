@@ -57,8 +57,9 @@ softly. See [Renderer plugins](/explanation/renderer-plugins).
 
 ## The cost
 
-Honest trade-offs: the IR can't express everything (interactive
-forms are v2), renderer plugins add a second contract to keep
+Honest trade-offs: the IR can't express everything (rich
+interaction beyond single-form submit — buttons, wizards — is v2),
+renderer plugins add a second contract to keep
 honest, and every driver pays the manifest+wire ceremony even for a
 trivial view. The bet is that uniform surfaces + safe degradation
 outweigh per-product UI silos — the same bet the org's other tools

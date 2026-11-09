@@ -34,8 +34,11 @@ and the three renderers (CLI, TUI, web). Neighbors own theirs:
   (`table`, not `issue-list`); meaning lives in the driver's
   queries and labels. The config API is namespaced dotted keys,
   never file paths.
-- **No writes in v1.** The `form` kind renders its field list;
-  interactive submit is v2. Drivers stay read-only proxies.
+- **No host-side writes.** `form` nodes submit through the
+  driver's own `submit` wire op — pavo hosts collect field values
+  and display the `SubmitResult`, but every mutation semantic
+  (what `submit_op` means, what gets written) belongs to the
+  driver. Drivers stay proxies; pavo never touches product state.
 - **No daemon.** `pavo serve` is a per-user localhost bridge bound
   to `127.0.0.1`, not a service. Multi-user or remote hosting
   would be a different tool.

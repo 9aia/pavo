@@ -60,7 +60,7 @@ build instead — then `server/api/*` also works and
 
 `web/app/components/ViewNode.vue` interprets the ViewNode IR
 recursively — panel/row/column layouts, table, tree, kv, markdown,
-read-only form, embed placeholder, KV degradation for unknown
+interactive form (`submit_op` → `FormView` island hitting `/api/submit`), embed placeholder, KV degradation for unknown
 kinds. `graph` nodes render in `GraphIsland.vue`, a client-only
 SVG island (deterministic circle/spiral layout — real layout is an
 `embed`/renderer-plugin concern). Driver-contributed `routes` link
