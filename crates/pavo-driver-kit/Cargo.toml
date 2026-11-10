@@ -12,10 +12,20 @@ authors.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 
+[features]
+# Surface-driver layer (surface::*) — the ops-manifest types and
+# spawned-driver client are always compiled; the generated-CLI and
+# MCP surfaces are opt-in so view drivers stay dependency-light.
+default = []
+cli = ["dep:clap"]
+mcp = []
+
 [dependencies]
 pavo-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Generated CLI surface — only when `cli` is enabled.
+clap = { workspace = true, optional = true }
 
 [lints]
 workspace = true

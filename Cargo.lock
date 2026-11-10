@@ -1040,6 +1040,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pavo-driver-cli"
+version = "0.1.0"
+dependencies = [
+ "pavo-driver-kit",
+ "pavo-protocol",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "pavo-driver-config"
 version = "0.1.0"
 dependencies = [
@@ -1054,9 +1064,20 @@ dependencies = [
 name = "pavo-driver-kit"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "pavo-protocol",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "pavo-driver-mcp"
+version = "0.1.0"
+dependencies = [
+ "pavo-driver-kit",
+ "pavo-protocol",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

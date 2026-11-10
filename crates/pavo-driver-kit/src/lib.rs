@@ -21,6 +21,13 @@
 //!   for the shared `id`/`title`/`query`/`description`/`props` fields.
 //! - [`platform`] — [`JobItem`] / [`NotificationItem`] constructors
 //!   for the `jobs`/`notifications` feed ops.
+//! - [`surface`] — the surface-driver layer: an engine's **ops
+//!   manifest** (`ops` verb / `cli.*` wire queries) rendered onto real
+//!   surfaces — a generated clap CLI (feature `cli`), MCP tools over
+//!   stdio (feature `mcp`), and the spawned-driver [`surface::client`]
+//!   both standalone binaries (`tamias-driver-cli`, `-mcp`) are built
+//!   on. Engine drivers may embed the same surfaces behind their own
+//!   features — optional, never required.
 //!
 //! All types are `pavo-protocol`'s — the kit adds constructors and
 //! the loop, never a parallel type hierarchy. Anything the kit doesn't
@@ -56,6 +63,7 @@ pub mod manifest;
 pub mod node;
 pub mod platform;
 pub mod serve;
+pub mod surface;
 
 pub use manifest::{
     binding, binding_on, binding_on_params, binding_params, capabilities_value, contribution,

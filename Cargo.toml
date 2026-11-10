@@ -3,8 +3,10 @@ resolver = "2"
 members = [
     "crates/pavo-cli",
     "crates/pavo-core",
+    "crates/pavo-driver-cli",
     "crates/pavo-driver-config",
     "crates/pavo-driver-kit",
+    "crates/pavo-driver-mcp",
     "crates/pavo-protocol",
     "crates/pavo-testkit",
     "crates/pavo-tui",
@@ -31,6 +33,7 @@ lto = "thin"
 [workspace.dependencies]
 pavo-protocol = { path = "crates/pavo-protocol", version = "0.1.0" }
 pavo-core = { path = "crates/pavo-core", version = "0.1.0" }
+pavo-driver-kit = { path = "crates/pavo-driver-kit", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

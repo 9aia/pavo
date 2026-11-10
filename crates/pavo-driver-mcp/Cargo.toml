@@ -1,0 +1,28 @@
+[package]
+name = "pavo-driver-mcp"
+description = "tamias-driver-mcp — surface driver: exposes an engine driver's ops manifest as MCP tools over stdio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+authors.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[[bin]]
+name = "tamias-driver-mcp"
+path = "src/main.rs"
+
+[dependencies]
+pavo-driver-kit = { workspace = true, features = ["mcp"] }
+pavo-protocol.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
