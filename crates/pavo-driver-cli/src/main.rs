@@ -9,6 +9,9 @@
 //! tamias-driver-cli kuda --help          # generated usage from the manifest
 //! tamias-driver-cli kuda status --root ~/repo
 //! tamias-driver-cli kuda watch           # unbounded surface — argv passthrough
+//! echo '{"token":"…"}' | tamias-driver-cli cuora unlock --params-stdin
+//!                                            # params via stdin — secret values
+//!                                            # never touch argv/shell history
 //! tamias-driver-cli ./target/debug/tamias-driver-kuda find parse   # a path works too
 //! ```
 //!

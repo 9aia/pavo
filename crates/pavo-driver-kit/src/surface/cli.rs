@@ -9,8 +9,15 @@
 //! Every subcommand also accepts `--root <dir>` — the repo/dir hint
 //! wire requests already carry (`params.root`); drivers that resolve
 //! roots from params honor it, others ignore it.
+//!
+//! Every op subcommand also accepts `--params-stdin` — read the op's
+//! params as one JSON object on stdin and merge them **over** the
+//! argv params (stdin wins per key). This is the channel for
+//! secret-bearing params ([`ParamSpec::secret`]): values never touch
+//! argv, shell history, or `/proc`. Required (`arg`) params may come
+//! from either side; a missing one is a usage error either way.
 
-use std::io::Write;
+use std::io::{self, Read, Write};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Map, Value};
@@ -50,11 +57,14 @@ pub fn command(bin: &str, manifest: &OpsManifest) -> Command {
         let mut positional = 0usize;
         for param in &op.params {
             let arg = match param.kind {
+                // Positional but not clap-required: `--params-stdin`
+                // may supply it — presence is validated after the
+                // stdin merge in `run_with_input`.
                 ParamKind::Arg => {
                     positional += 1;
                     Arg::new(s(param.name.clone()))
-                        .required(true)
                         .index(positional)
+                        .value_name("VALUE")
                 }
                 // `--name`, `--name v`, `--name=v` — bare flag spells
                 // `true`, a present value rides as a string.
@@ -67,12 +77,28 @@ pub fn command(bin: &str, manifest: &OpsManifest) -> Command {
                     .long(s(param.name.clone()))
                     .action(ArgAction::SetTrue),
             };
-            let arg = match &param.doc {
-                Some(doc) => arg.help(s(doc.clone())),
-                None => arg,
+            let arg = if param.secret {
+                // The marker steers callers to stdin; the value itself
+                // is never echoed by the surface.
+                let help = match &param.doc {
+                    Some(doc) => format!("{doc} (secret — prefer --params-stdin)"),
+                    None => "secret — prefer --params-stdin".to_string(),
+                };
+                arg.help(s(help))
+            } else {
+                match &param.doc {
+                    Some(doc) => arg.help(s(doc.clone())),
+                    None => arg,
+                }
             };
             sub = sub.arg(arg);
         }
+        sub = sub.arg(
+            Arg::new("params-stdin")
+                .long("params-stdin")
+                .action(ArgAction::SetTrue)
+                .help("read op params as a JSON object on stdin — stdin keys win over argv"),
+        );
         cmd = cmd.subcommand(sub);
     }
     for surface in &manifest.surfaces {
@@ -95,9 +121,23 @@ pub fn command(bin: &str, manifest: &OpsManifest) -> Command {
 /// Parse `argv` (argv[0] included) against [`command`], dispatch the
 /// matched op/surface through `surface`, print captured output, and
 /// return the exit code. clap errors/help print and exit `2`/`0`
-/// through clap's own rendering.
+/// through clap's own rendering. `--params-stdin` reads real stdin.
 #[must_use]
 pub fn run(bin: &str, manifest: &OpsManifest, argv: &[String], surface: &mut dyn Surface) -> i32 {
+    let stdin = io::stdin();
+    run_with_input(bin, manifest, argv, surface, &mut stdin.lock())
+}
+
+/// [`run`] with the stdin channel injectable — tests and embedders
+/// pass a buffer; `tamias-driver-cli` uses [`run`].
+#[must_use]
+pub fn run_with_input(
+    bin: &str,
+    manifest: &OpsManifest,
+    argv: &[String],
+    surface: &mut dyn Surface,
+    input: &mut dyn Read,
+) -> i32 {
     let matches = match command(bin, manifest).try_get_matches_from(argv) {
         Ok(m) => m,
         Err(e) => {
@@ -120,9 +160,49 @@ pub fn run(bin: &str, manifest: &OpsManifest, argv: &[String], surface: &mut dyn
         eprintln!("unknown op: {name}");
         return 2;
     };
-    let params = params_of(sub, op, &matches);
+    let mut params = params_of(sub, op, &matches);
+    if sub.get_flag("params-stdin") {
+        match stdin_params(input) {
+            Ok(stdin_map) => params.extend(stdin_map), // stdin wins per key
+            Err(e) => {
+                eprintln!("{bin} {name}: {e}");
+                return 2;
+            }
+        }
+    }
+    // `arg` params are clap-optional so stdin can satisfy them;
+    // presence is enforced here, after the merge.
+    for param in &op.params {
+        if param.kind == ParamKind::Arg && !params.contains_key(&param.name) {
+            eprintln!(
+                "{bin} {name}: missing required param `{}` (positional or --params-stdin)",
+                param.name
+            );
+            return 2;
+        }
+    }
     let outcome = surface.op(op, &params);
     print_outcome(&outcome)
+}
+
+/// `--params-stdin` payload → params object. Empty/whitespace stdin
+/// is an empty map; anything else must be a JSON object — values may
+/// be any JSON (bools, numbers, nested), not just argv-shaped
+/// strings.
+fn stdin_params(input: &mut dyn Read) -> Result<Map<String, Value>, String> {
+    let mut buf = String::new();
+    input
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("--params-stdin: read: {e}"))?;
+    if buf.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    let value: Value =
+        serde_json::from_str(&buf).map_err(|e| format!("--params-stdin: bad JSON: {e}"))?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "--params-stdin: expected a JSON object".to_string())
 }
 
 /// Subcommand matches → the `cli.<op>` wire params map.
@@ -145,11 +225,24 @@ fn params_of(sub: &ArgMatches, op: &super::OpSpec, top: &ArgMatches) -> Map<Stri
                         "false" => Value::Bool(false),
                         _ => Value::from(v.clone()),
                     };
+                    if param.secret {
+                        // Name only — the value stays out of stderr too.
+                        eprintln!(
+                            "warning: `{}` is secret-bearing — prefer `--params-stdin` to keep it out of argv/shell history",
+                            param.name
+                        );
+                    }
                     params.insert(param.name.clone(), value);
                 }
             }
             ParamKind::Flag => {
                 if sub.get_flag(&param.name) {
+                    if param.secret {
+                        eprintln!(
+                            "warning: `{}` is secret-bearing — prefer `--params-stdin`",
+                            param.name
+                        );
+                    }
                     params.insert(param.name.clone(), Value::Bool(true));
                 }
             }
@@ -185,7 +278,8 @@ mod tests {
                 {"query": "cli.find", "doc": "sym -> loc",
                  "params": [{"name": "symbol", "kind": "arg"},
                             {"name": "workspace", "kind": "flag"},
-                            {"name": "config", "kind": "opt"}]},
+                            {"name": "config", "kind": "opt"},
+                            {"name": "token", "kind": "opt", "secret": true}]},
                 {"query": "cli.status", "doc": "drift"},
             ],
             "surfaces": ["watch"],
@@ -279,6 +373,104 @@ mod tests {
         );
     }
 
+    fn spy() -> Spy {
+        Spy {
+            last: None,
+            surfaced: None,
+        }
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn params_stdin_merges_and_wins_per_key() {
+        let m = manifest();
+        let mut s = spy();
+        // argv supplies symbol/config; stdin overrides both and adds
+        // a non-argv-shaped value (a number) plus the secret param.
+        let mut input: &[u8] =
+            br#"{"symbol":"stdin-sym","config":"stdin.toml","token":"s3cr3t","retries":3}"#;
+        let code = run_with_input(
+            "fx",
+            &m,
+            &argv(&[
+                "fx",
+                "find",
+                "argv-sym",
+                "--config",
+                "argv.toml",
+                "--params-stdin",
+            ]),
+            &mut s,
+            &mut input,
+        );
+        assert_eq!(code, 0);
+        let params = s.last.unwrap().1;
+        assert_eq!(params["symbol"], json!("stdin-sym")); // stdin wins over argv positional
+        assert_eq!(params["config"], json!("stdin.toml")); // stdin wins over argv flag
+        assert_eq!(params["token"], json!("s3cr3t"));
+        assert_eq!(params["retries"], json!(3)); // any JSON value, not just strings
+    }
+
+    #[test]
+    fn params_stdin_satisfies_required_arg() {
+        let m = manifest();
+        let mut s = spy();
+        let mut input: &[u8] = br#"{"symbol":"only-stdin"}"#;
+        let code = run_with_input(
+            "fx",
+            &m,
+            &argv(&["fx", "find", "--params-stdin"]),
+            &mut s,
+            &mut input,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(s.last.unwrap().1["symbol"], json!("only-stdin"));
+    }
+
+    #[test]
+    fn missing_required_arg_is_usage_error() {
+        let m = manifest();
+        let mut s = spy();
+        // no positional, no --params-stdin → `symbol` never arrives
+        let mut input: &[u8] = b"";
+        let code = run_with_input("fx", &m, &argv(&["fx", "find"]), &mut s, &mut input);
+        assert_eq!(code, 2);
+        assert!(s.last.is_none());
+    }
+
+    #[test]
+    fn params_stdin_rejects_bad_payloads() {
+        let m = manifest();
+        for payload in [&b"not json"[..], b"[1,2]", b"\"str\""] {
+            let mut s = spy();
+            let mut input: &[u8] = payload;
+            let code = run_with_input(
+                "fx",
+                &m,
+                &argv(&["fx", "find", "x", "--params-stdin"]),
+                &mut s,
+                &mut input,
+            );
+            assert_eq!(code, 2, "payload {payload:?} must fail");
+            assert!(s.last.is_none());
+        }
+        // empty stdin is an empty map — argv params still dispatch
+        let mut s = spy();
+        let mut input: &[u8] = b"  \n";
+        let code = run_with_input(
+            "fx",
+            &m,
+            &argv(&["fx", "find", "x", "--params-stdin"]),
+            &mut s,
+            &mut input,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(s.last.unwrap().1["symbol"], json!("x"));
+    }
+
     #[test]
     fn unknown_subcommand_is_clap_error() {
         let m = manifest();
@@ -299,6 +491,7 @@ mod tests {
                 name: "p".into(),
                 kind: ParamKind::Flag,
                 doc: None,
+                secret: true,
             }],
             mutates: true,
         };

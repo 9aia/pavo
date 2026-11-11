@@ -19,6 +19,7 @@ ops)
 cat <<'EOF'
 {"engine":"fx","invoke":"query cli.<op>","ops":[
  {"query":"cli.hello","doc":"say hi","params":[{"name":"who","kind":"arg"},{"name":"loud","kind":"flag"}]},
+ {"query":"cli.unlock","doc":"secret op","params":[{"name":"vault","kind":"arg"},{"name":"token","kind":"opt","secret":true}]},
  {"query":"cli.fail","doc":"exit 3","params":[]}],
  "surfaces":["stream"]}
 EOF
@@ -27,6 +28,9 @@ serve)
 while IFS= read -r line; do
   case "$line" in
     *cli.hello*) printf '%s\n' '{"ok":true,"result":{"query":"cli.hello","data":{"op":"hello","code":0,"stdout":"hello world\n","stderr":""}}}' ;;
+    # request JSON sorts keys — `query` (cli.<op>) trails `params`
+    *token*creds*cli.unlock*) printf '%s\n' '{"ok":true,"result":{"query":"cli.unlock","data":{"op":"unlock","code":0,"stdout":"unlocked\n","stderr":""}}}' ;;
+    *cli.unlock*)  printf '%s\n' '{"ok":true,"result":{"query":"cli.unlock","data":{"op":"unlock","code":1,"stdout":"","stderr":"denied\n"}}}' ;;
     *cli.fail*)  printf '%s\n' '{"ok":true,"result":{"query":"cli.fail","data":{"op":"fail","code":3,"stdout":"","stderr":"boom\n"}}}' ;;
     *)           printf '%s\n' '{"ok":false,"error":"unsupported"}' ;;
   esac
@@ -80,6 +84,53 @@ fn engine_exit_code_propagates() {
     let out = cli().arg(&driver).args(["fail"]).output().unwrap();
     assert_eq!(out.status.code(), Some(3));
     assert_eq!(String::from_utf8_lossy(&out.stderr), "boom\n");
+}
+
+#[test]
+fn params_stdin_supplies_secret_params() {
+    let (_d, driver) = fixture();
+    let mut child = cli()
+        .arg(&driver)
+        .args(["unlock", "--params-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"vault":"main","token":"creds"}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "unlocked\n");
+    // no secret warning — nothing secret rode argv
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("secret-bearing"));
+}
+
+#[test]
+fn secret_param_via_argv_warns_without_echoing_value() {
+    let (_d, driver) = fixture();
+    let out = cli()
+        .arg(&driver)
+        .args(["unlock", "main", "--token", "creds"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "unlocked\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("`token` is secret-bearing"), "{stderr}");
+    assert!(!stderr.contains("creds"), "value must never echo: {stderr}");
+}
+
+#[test]
+fn missing_required_param_is_usage_error() {
+    let (_d, driver) = fixture();
+    // `unlock` requires `vault`; argv alone doesn't supply it
+    let out = cli().arg(&driver).args(["unlock"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
 }
 
 #[test]

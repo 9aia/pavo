@@ -33,6 +33,15 @@
 //! ["name"]`) parses each as `opt` — the permissive kind, accepted as
 //! `--name`, `--name v`, or `--name=v`.
 //!
+//! **Secret-bearing params.** A [`ParamSpec`] may set `"secret": true`
+//! to declare that its value must not ride argv (shell history,
+//! `/proc`). Surfaces honor it declaratively: the generated CLI adds
+//! `--params-stdin` to every op — a JSON object on stdin merged over
+//! the argv params (**stdin wins per key**) — and warns on stderr
+//! when a secret param still arrives via argv (the value itself is
+//! never echoed). MCP `tools/call` already carries JSON arguments,
+//! so no argv leak exists there and it needs nothing extra.
+//!
 //! `surfaces` names the engine's *unbounded* surfaces (`watch`,
 //! `mcp`, `acp`, …) — verbs that never return and so can never be
 //! request/response ops. The CLI surface exposes them as streaming
@@ -73,6 +82,11 @@ pub struct ParamSpec {
     /// One-line help (mirrors the engine's own doc).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
+    /// `true` marks the value secret-bearing — it must not ride argv;
+    /// surfaces steer callers to `--params-stdin` and never echo the
+    /// value. Additive within the manifest contract: absent = false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
 }
 
 /// Params deserialize from either the typed object form
@@ -90,6 +104,8 @@ impl<'de> Deserialize<'de> for ParamSpec {
             kind: ParamKind,
             #[serde(default)]
             doc: Option<String>,
+            #[serde(default)]
+            secret: bool,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -102,11 +118,13 @@ impl<'de> Deserialize<'de> for ParamSpec {
                 name,
                 kind: ParamKind::Opt,
                 doc: None,
+                secret: false,
             },
             Repr::Typed(t) => ParamSpec {
                 name: t.name,
                 kind: t.kind,
                 doc: t.doc,
+                secret: t.secret,
             },
         })
     }
@@ -360,10 +378,30 @@ mod tests {
         assert_eq!(find.params[0].kind, ParamKind::Arg);
         assert_eq!(find.params[1].kind, ParamKind::Flag);
         assert_eq!(find.params[1].doc.as_deref(), Some("all roots"));
+        assert!(!find.params[0].secret);
         // bare-string params degrade to the permissive opt
         assert_eq!(m.op("status").unwrap().params[0].kind, ParamKind::Opt);
         assert_eq!(m.surfaces, vec!["watch", "mcp"]);
         assert!(m.op("watch").is_none());
+    }
+
+    #[test]
+    fn secret_param_round_trips_and_defaults_false() {
+        let m = OpsManifest::from_value(&json!({
+            "engine": "cuora",
+            "ops": [{"name": "unlock",
+                     "params": [{"name": "token", "kind": "opt", "secret": true},
+                                {"name": "user"}]}],
+        }))
+        .unwrap();
+        let op = m.op("unlock").unwrap();
+        assert!(op.params[0].secret);
+        assert!(!op.params[1].secret); // absent = false
+                                       // serialization omits the marker when false, keeps it when true
+        let v = serde_json::to_value(&op.params[0]).unwrap();
+        assert_eq!(v["secret"], json!(true));
+        let v = serde_json::to_value(&op.params[1]).unwrap();
+        assert!(v.get("secret").is_none());
     }
 
     #[test]
