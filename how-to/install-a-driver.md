@@ -44,8 +44,8 @@ Product drivers ship from their own repos — `tamias-driver-kuda`
 (they are `tamias-driver-*` content) or drop the binary on `PATH`:
 
 ```bash
-tamias install git:9aia/myco//drivers/myco#v0.4.0   # example ref shape
-# or:
+tamias install git:9aia/myco//libraries/myco   # the pack ships the bundled driver
+# or install just the driver binary:
 cargo install --git https://github.com/9aia/myco tamias-driver-myco
 ```
 
