@@ -75,8 +75,10 @@ tamias-driver-* (serve, stdio)          pavo host
 |---|---|---|
 | `pavo-protocol` | domain | Wire contract — driver manifests, ViewNode IR, ndjson ops (the public API) |
 | `pavo-core` | host | Host core — tamias driver discovery, contribution merge, per-driver clients, view-model cache |
+| `pavo-driver-cli` | adapter | tamias-driver-cli — surface driver: renders an engine driver's ops manifest as a generated CLI |
 | `pavo-driver-config` | adapter | tamias-driver-config — the common config API driver for the 9aia suite (pavo view driver) |
 | `pavo-driver-kit` | adapter | pavo-driver-kit — declarative driver authoring for tamias drivers (manifest builders, ViewNode constructors, ndjson serve loop) |
+| `pavo-driver-mcp` | adapter | tamias-driver-mcp — surface driver: exposes an engine driver's ops manifest as MCP tools over stdio |
 | `pavo-testkit` | adapter | Recorded driver sessions → conformance fixtures for all pavo surfaces |
 | `pavo-tui` | adapter | ratatui host — chrome slots + ViewNode renderer for pavo |
 | `pavo` | binary | pavo — visualization host: discover tamias drivers, render their views (CLI/TUI/web) |

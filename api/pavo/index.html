@@ -22,7 +22,7 @@ the full payload including any updated view).</li>
 provider driver’s <code>jobs</code>/<code>notifications</code> wire op, tagged with
 its driver (<code>--json</code> dumps the flattened rows).</li>
 <li><code>serve [--port N]</code> — the localhost HTTP bridge for the web host:
-<code>/api/*</code> JSON endpoints over the same <a href="../pavo_core/host/struct.Host.html" title="struct pavo_core::host::Host"><code>Host</code></a> plus static
+<code>/api/*</code> JSON endpoints over the same [<code>Host</code>] plus static
 serving of the Nuxt build (<code>web/.output/public</code>). First stdout
 line is <code>listening http://127.0.0.1:&lt;port&gt;</code>.</li>
 <li><code>open [&lt;driver&gt;:&lt;view&gt;]</code> — hand off to <code>pavo-tui</code> (the ratatui
@@ -38,11 +38,11 @@ mode. Errors go to stderr; exit codes are CI-meaningful: <code>0</code> ok,
 <code>1</code> view/driver error, <code>2</code> usage (bad <code>--param</code>, malformed view
 ref, bad format — clap reports the last itself).</p>
 <p>Discovery is environment-driven like pavo-core’s
-<a href="../pavo_core/host/struct.Host.html#method.discover" title="associated function pavo_core::host::Host::discover"><code>Host::discover</code></a>: drivers are found on <code>PATH</code> and under
+[<code>Host::discover</code>]: drivers are found on <code>PATH</code> and under
 <code>$TAMIAS_HOME/drivers</code> — set <code>PATH</code>/<code>TAMIAS_HOME</code> to point the CLI
 at fixture drivers (integration tests do exactly this).</p>
 </div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="http/index.html" title="mod pavo::http">http</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Minimal HTTP/1.1 primitives for <code>pavo serve</code> — a hand-rolled
-localhost server (std-only, no async runtime, no deps).</dd><dt><a class="mod" href="render/index.html" title="mod pavo::render">render</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>ViewNode → text / Graphviz-dot / Mermaid renderers.</dd><dt><a class="mod" href="serve/index.html" title="mod pavo::serve">serve</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd><code>pavo serve</code> — the localhost HTTP bridge: pavo-core’s <a href="../pavo_core/host/struct.Host.html" title="struct pavo_core::host::Host"><code>Host</code></a> on
+localhost server (std-only, no async runtime, no deps).</dd><dt><a class="mod" href="render/index.html" title="mod pavo::render">render</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>ViewNode → text / Graphviz-dot / Mermaid renderers.</dd><dt><a class="mod" href="serve/index.html" title="mod pavo::serve">serve</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd><code>pavo serve</code> — the localhost HTTP bridge: pavo-core’s [<code>Host</code>] on
 one side, the Nuxt web app (or any JSON client) on the other.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Cli.html" title="struct pavo::Cli">Cli</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="struct" href="struct.Fail.html" title="struct pavo::Fail">Fail</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>A CLI failure: exit code + human message (stderr).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Command.html" title="enum pavo::Command">Command</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.BUILTIN_FORMATS.html" title="constant pavo::BUILTIN_FORMATS">BUILTIN_<wbr>FORMATS</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The built-in <code>view --format</code> values — all but <code>json</code> can be
 claimed by renderer plugins (<code>renderers[].surfaces.cli.formats</code>,
 empty = wildcard); a plugin claim substitutes its RenderModel for
@@ -54,7 +54,7 @@ with <code>serve</code>’s <code>/api/drivers</code>). Slot keys use the wire s
 output and the serve bridge’s <code>/api/jobs</code> + <code>/api/notifications</code>:
 each item’s fields flattened into one object with <code>driver</code> /
 <code>driver_title</code> attribution — the host fields win over any
-same-named item fields (including <code>extra</code> catch-all keys).</dd><dt><a class="fn" href="fn.main.html" title="fn pavo::main">main</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.parse_params.html" title="fn pavo::parse_params">parse_<wbr>params</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Parse repeated <code>--param k=v</code> args into a <a href="../pavo_core/type.Params.html" title="type pavo_core::Params"><code>Params</code></a> map. Values
+same-named item fields (including <code>extra</code> catch-all keys).</dd><dt><a class="fn" href="fn.main.html" title="fn pavo::main">main</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.parse_params.html" title="fn pavo::parse_params">parse_<wbr>params</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Parse repeated <code>--param k=v</code> args into a [<code>Params</code>] map. Values
 parse as JSON when possible (<code>k=42</code>, <code>k=true</code>, <code>k={…}</code>), else
 become strings. Missing <code>=</code> or an empty key is a usage error.</dd><dt><a class="fn" href="fn.run.html" title="fn pavo::run">run</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd><code>Ok</code> carries the process exit code (only <code>open</code> can produce a
 non-zero one — it propagates <code>pavo-tui</code>’s status).</dd><dt><a class="fn" href="fn.schema_doc.html" title="fn pavo::schema_doc">schema_<wbr>doc</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The <code>schema</code> verb’s document — a JSON description of the CLI’s

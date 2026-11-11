@@ -298,8 +298,8 @@ Product drivers ship from their own repos — `tamias-driver-kuda`
 (they are `tamias-driver-*` content) or drop the binary on `PATH`:
 
 ```bash
-tamias install git:9aia/myco//drivers/myco#v0.4.0   # example ref shape
-# or:
+tamias install git:9aia/myco//libraries/myco   # the pack ships the bundled driver
+# or install just the driver binary:
 cargo install --git https://github.com/9aia/myco tamias-driver-myco
 ```
 
@@ -1600,8 +1600,10 @@ documented at source (doc comments).
 
 * [pavo-protocol](/pavo/api/pavo_protocol/index.html) — domain
 * [pavo-core](/pavo/api/pavo_core/index.html) — host
+* [pavo-driver-cli](/pavo/api/pavo_driver_cli/index.html) — adapter
 * [pavo-driver-config](/pavo/api/pavo_driver_config/index.html) — adapter
 * [pavo-driver-kit](/pavo/api/pavo_driver_kit/index.html) — adapter
+* [pavo-driver-mcp](/pavo/api/pavo_driver_mcp/index.html) — adapter
 * [pavo-testkit](/pavo/api/pavo_testkit/index.html) — adapter
 * [pavo-tui](/pavo/api/pavo_tui/index.html) — adapter
 * [pavo](/pavo/api/pavo/index.html) — binary
@@ -1685,8 +1687,10 @@ tamias-driver-* (serve, stdio)          pavo host
 |---|---|---|
 | `pavo-protocol` | domain | Wire contract — driver manifests, ViewNode IR, ndjson ops (the public API) |
 | `pavo-core` | host | Host core — tamias driver discovery, contribution merge, per-driver clients, view-model cache |
+| `pavo-driver-cli` | adapter | tamias-driver-cli — surface driver: renders an engine driver's ops manifest as a generated CLI |
 | `pavo-driver-config` | adapter | tamias-driver-config — the common config API driver for the 9aia suite (pavo view driver) |
 | `pavo-driver-kit` | adapter | pavo-driver-kit — declarative driver authoring for tamias drivers (manifest builders, ViewNode constructors, ndjson serve loop) |
+| `pavo-driver-mcp` | adapter | tamias-driver-mcp — surface driver: exposes an engine driver's ops manifest as MCP tools over stdio |
 | `pavo-testkit` | adapter | Recorded driver sessions → conformance fixtures for all pavo surfaces |
 | `pavo-tui` | adapter | ratatui host — chrome slots + ViewNode renderer for pavo |
 | `pavo` | binary | pavo — visualization host: discover tamias drivers, render their views (CLI/TUI/web) |

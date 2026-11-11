@@ -8,8 +8,10 @@ documented at source (doc comments).
 
 * [pavo-protocol](/pavo/api/pavo_protocol/index.html) — domain
 * [pavo-core](/pavo/api/pavo_core/index.html) — host
+* [pavo-driver-cli](/pavo/api/pavo_driver_cli/index.html) — adapter
 * [pavo-driver-config](/pavo/api/pavo_driver_config/index.html) — adapter
 * [pavo-driver-kit](/pavo/api/pavo_driver_kit/index.html) — adapter
+* [pavo-driver-mcp](/pavo/api/pavo_driver_mcp/index.html) — adapter
 * [pavo-testkit](/pavo/api/pavo_testkit/index.html) — adapter
 * [pavo-tui](/pavo/api/pavo_tui/index.html) — adapter
 * [pavo](/pavo/api/pavo/index.html) — binary
