@@ -220,6 +220,18 @@ dialog; submit re-resolves the view with
 exposes `ref_query` data the dialog may upgrade to a fuzzy picker.
 CLI hosts pass the param directly (`--param q=…`).
 
+### Auto-refresh — a per-view timer hint
+
+`ViewSpec.refresh_ms` declares that a view's data goes stale on a
+timer (live feeds, job queues, session lists). Interactive hosts
+re-resolve the view on the interval — the TUI sends the same
+`refresh` resolve a manual refresh sends, paused while an overlay
+is open and surfaced as a countdown in the status bar; the web
+host polls equivalently. Hosts SHOULD ignore values under 1s or
+over 5min. The hint applies to the view only — chrome/dashboard
+slot contributions are not views and do not auto-refresh. CLI
+`view`/`open` renders are one-shot and ignore it.
+
 ### Ops-derived actions (zero-declaration fallback)
 
 Drivers whose ops manifest params carry schemas get actions +

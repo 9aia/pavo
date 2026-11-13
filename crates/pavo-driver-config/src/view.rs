@@ -61,6 +61,7 @@ fn show_view() -> ViewSpec {
         })),
         item_route: None,
         filter_param: None,
+        refresh_ms: None,
     }
 }
 
@@ -101,6 +102,7 @@ fn edit_view() -> ViewSpec {
         })),
         item_route: None,
         filter_param: None,
+        refresh_ms: None,
     }
 }
 
@@ -137,6 +139,7 @@ fn sources_view() -> ViewSpec {
         })),
         item_route: None,
         filter_param: None,
+        refresh_ms: None,
     }
 }
 

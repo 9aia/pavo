@@ -446,6 +446,7 @@ mod tests {
                 root,
                 item_route: None,
                 filter_param: None,
+                refresh_ms: None,
             },
             data: Map::new(),
         }

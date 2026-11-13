@@ -230,6 +230,10 @@
         "filter_param": {
           "type": "string",
           "description": "Names the view's free-text filter query param (convention \"q\") — enables the host.filter builtin; submit re-resolves the view with params[<name>]."
+        },
+        "refresh_ms": {
+          "type": "integer",
+          "description": "Auto-refresh hint in milliseconds — hosts re-resolve the view's data on the timer. Hosts SHOULD ignore values under 1s or over 5min; applies to the view only (chrome slots don't auto-refresh)."
         }
       }
     },

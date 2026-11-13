@@ -107,6 +107,7 @@ fn spec(id: &str) -> ViewSpec {
         }),
         item_route: None,
         filter_param: None,
+        refresh_ms: None,
     }
 }
 

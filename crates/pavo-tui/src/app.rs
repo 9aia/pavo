@@ -2855,6 +2855,7 @@ mod tests {
             root: serde_json::from_value(kv_root()).unwrap(),
             item_route: None,
             filter_param: None,
+            refresh_ms: None,
         }
     }
 
