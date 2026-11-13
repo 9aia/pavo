@@ -197,6 +197,7 @@ mod tests {
             contributes,
             views: vec![],
             renderers: vec![],
+            actions: vec![],
         }
     }
 

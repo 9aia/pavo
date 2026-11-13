@@ -267,6 +267,7 @@ mod tests {
             contributes: Default::default(),
             views: vec![],
             renderers,
+            actions: vec![],
         }
     }
 

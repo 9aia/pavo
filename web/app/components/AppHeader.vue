@@ -15,6 +15,10 @@ const activeJobs = computed(() => {
   const d = jobsData.value as { ok?: boolean; result?: any[] } | null
   return d?.ok && Array.isArray(d.result) ? activeJobCount(d.result) : 0
 })
+
+function openPalette(): void {
+  window.dispatchEvent(new Event('pavo:palette'))
+}
 </script>
 
 <template>
@@ -23,6 +27,14 @@ const activeJobs = computed(() => {
       ☰
     </button>
     <span class="spacer" />
+    <button
+      class="pal-btn"
+      title="command palette (ctrl+k)"
+      aria-label="command palette"
+      @click="openPalette"
+    >
+      ⌘K
+    </button>
     <HeaderActions v-if="chrome?.headerActions?.length" :entries="chrome.headerActions" />
     <NuxtLink to="/jobs" class="jobs-link" title="jobs">
       ⚙<span v-if="activeJobs" class="badge">{{ activeJobs }}</span>
@@ -50,6 +62,20 @@ const activeJobs = computed(() => {
 }
 .spacer {
   flex: 1;
+}
+.pal-btn {
+  background: none;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.pal-btn:hover {
+  opacity: 1;
 }
 .jobs-link {
   position: relative;

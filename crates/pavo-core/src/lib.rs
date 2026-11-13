@@ -39,6 +39,7 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod actions;
 pub mod cache;
 pub mod client;
 pub mod deps;
@@ -50,6 +51,10 @@ pub mod paths;
 pub mod renderers;
 pub mod viewnode;
 
+pub use actions::{
+    collect_actions, dedupe_actions, manifest_actions, menu_entries, ops_actions, param_form_field,
+    validate_params, ActionScope, ScopedAction,
+};
 pub use cache::TtlCache;
 pub use client::{ClientConfig, DriverClient};
 pub use deps::{order as order_drivers, DepsError};

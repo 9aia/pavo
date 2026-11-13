@@ -20,6 +20,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::action::Action;
+
 /// The ViewNode IR — one node of a declarative view tree.
 ///
 /// Internally tagged on `"kind"` with lowercase variant names:
@@ -79,6 +81,12 @@ pub struct NodeBase {
     /// `collapsed`, …). Renderers ignore keys they don't know.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub props: Map<String, Value>,
+    /// Actions scoped to this node — buttons/keys/palette entries
+    /// hosts render for it. Dispatched via the wire `invoke` op
+    /// with this node's context as `target`. See
+    /// [`crate::action`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<Action>,
 }
 
 /// `panel` — a titled container grouping child nodes.
@@ -212,6 +220,11 @@ pub struct TreeItem {
     /// Arbitrary per-item props for rich renderers.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub props: Map<String, Value>,
+    /// Actions scoped to this item — dispatched via `invoke` with
+    /// the item's `id` (or the item itself) as `target`. See
+    /// [`crate::action`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<Action>,
 }
 
 /// `graph` — nodes and edges. The IR floor covers structure only;

@@ -432,6 +432,7 @@ fn typed_nodes_roundtrip() {
             icon: None,
             children: vec![],
             props: Map::new(),
+            actions: vec![],
         }],
         expandable: true,
     });

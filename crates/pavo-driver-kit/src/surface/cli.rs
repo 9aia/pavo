@@ -492,6 +492,7 @@ mod tests {
                 kind: ParamKind::Flag,
                 doc: None,
                 secret: true,
+                schema: None,
             }],
             mutates: true,
         };

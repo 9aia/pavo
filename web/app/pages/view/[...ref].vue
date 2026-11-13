@@ -10,16 +10,52 @@
 // chrome popovers (ViewPopover.vue) so embedded views behave
 // identically to full pages.
 import { parseViewLink } from '~/utils/view-link'
+import { collectActions, dedupeActions } from '~/utils/interactions'
+import { fetchManifest, setPaletteActions } from '~/composables/actions'
 
 const route = useRoute()
 
 const link = computed(() => parseViewLink(route.params.ref, route.query))
 const ref = computed(() => link.value.ref)
+const driver = computed(() => ref.value.split(':')[0] ?? '')
 
 const { pending, apiError, viewResult, refresh } = useView(
   ref,
   computed(() => link.value.params),
 )
+
+// Interaction actions — manifest-global + node/item-scoped,
+// collected from the driver manifest (wire `manifest` op, cached)
+// and the live ViewNode tree. Deduped item > node > manifest; the
+// same list feeds the ActionBar and the command palette.
+const manifest = ref<any>(null)
+watch(
+  driver,
+  async (d) => {
+    manifest.value = d ? await fetchManifest(d) : null
+  },
+  { immediate: true },
+)
+
+const collected = computed(() =>
+  collectActions(manifest.value, viewResult.value),
+)
+const allActions = computed(() => dedupeActions(collected.value))
+// The bar shows view-level verbs only — item-scoped actions render
+// on their tree rows (ItemActions.vue), not as N duplicate buttons.
+// Filter *before* dedupe so an item-scoped declaration can't shadow
+// a same-id manifest/node action here.
+const barActions = computed(() =>
+  dedupeActions(collected.value.filter((s) => s.scope !== 'item')),
+)
+
+// Palette registry — the full deduped set (item actions collapse
+// to one entry per id, first row's target). Cleared on unmount so
+// off-view pages don't offer stale actions.
+watch(allActions, (list) => setPaletteActions(driver.value, list), {
+  immediate: true,
+})
+onBeforeUnmount(() => setPaletteActions('', []))
 </script>
 
 <template>
@@ -39,6 +75,7 @@ const { pending, apiError, viewResult, refresh } = useView(
       <p v-if="viewResult.view?.description" class="muted">
         {{ viewResult.view.description }}
       </p>
+      <ActionBar :actions="barActions" />
       <ViewNode :node="viewResult.view.root" :data="viewResult.data || {}" />
     </template>
     <p v-else class="muted">no view.</p>

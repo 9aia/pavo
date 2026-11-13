@@ -20,6 +20,16 @@
 //!   `submit` wire op: send a form's field values to its driver and
 //!   print the `SubmitResult` (message/errors/data; `--json` dumps
 //!   the full payload including any updated view).
+//! - `actions <driver>:<view>|<driver>` — list the actions a view
+//!   (or a whole driver, manifest scope) offers: declared
+//!   `actions[]` (manifest/node/tree-item) plus ops-manifest derived
+//!   ones, with danger level and param schemas.
+//! - `invoke <driver>:<view> <action>` — dispatch an action through
+//!   the `invoke` wire op. `--param k=v` feeds `ParamSchema` params,
+//!   `--target`/`--target-id` carry the opaque action target,
+//!   `--interactive` prompts for missing params on a TTY, and
+//!   `--yes` bypasses `confirm`/`type-target` confirmations
+//!   (required off-TTY).
 //! - `jobs` / `notifications` — the aggregated platform feeds: every
 //!   provider driver's `jobs`/`notifications` wire op, tagged with
 //!   its driver (`--json` dumps the flattened rows).
@@ -50,7 +60,11 @@ mod render;
 mod serve;
 
 use clap::{Parser, Subcommand};
-use pavo_core::{Host, Params, PavoError, ResolvedView};
+use pavo_core::{
+    collect_actions, manifest_actions, ops_actions, validate_params, ActionScope, Host, Params,
+    PavoError, ResolvedView,
+};
+use pavo_protocol::{Action, DangerLevel, ParamKind, ParamSchema};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -132,6 +146,61 @@ enum Command {
         #[arg(long = "param", value_name = "K=V")]
         params: Vec<String>,
         /// JSON output — dumps the full SubmitResult.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the actions a target offers — declared `actions[]`
+    /// (manifest, view-node, tree-item scopes) plus ops-manifest
+    /// derived actions, with danger level + param schemas.
+    Actions {
+        /// `<driver>:<view>` deep link, or bare `<driver>` for
+        /// manifest-scope actions only.
+        target: String,
+        /// View param, `key=value` (repeatable) — used when
+        /// resolving the view to collect node/item actions.
+        #[arg(long = "param", value_name = "K=V")]
+        params: Vec<String>,
+        /// JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Invoke an action — `pavo invoke myco:board refresh`.
+    /// Dispatches the `invoke` wire op; `--json` dumps the full
+    /// ActionResult.
+    Invoke {
+        /// `<driver>:<view>` deep link the action lives in (bare
+        /// `<driver>` = its first view).
+        target: String,
+        /// Action id — see `pavo actions <driver>:<view>`.
+        action: String,
+        /// Action param, `key=value` (repeatable) — the action's
+        /// `ParamSchema` names. Values parse as JSON when possible,
+        /// else strings.
+        #[arg(long = "param", value_name = "K=V")]
+        params: Vec<String>,
+        /// Opaque action target — JSON (`{"id":"T-1"}`) or a bare
+        /// string. What the action's `target` context calls for
+        /// (selected row, item id, …); the driver interprets it.
+        #[arg(long = "target", value_name = "JSON-OR-STRING")]
+        action_target: Option<String>,
+        /// Shorthand for `--target <id>` as a plain string — also
+        /// the `type-target` confirmation: the id *is* the typed
+        /// confirmation, so `--yes --target-id T-1` is the
+        /// non-interactive spelling.
+        #[arg(long = "target-id", value_name = "ID")]
+        target_id: Option<String>,
+        /// Skip confirmation prompts. `confirm` actions require it
+        /// off-TTY; `type-target` actions still need `--target-id`
+        /// (the id is the confirmation — `--yes` only skips the
+        /// interactive "type it" prompt).
+        #[arg(long)]
+        yes: bool,
+        /// Prompt on a TTY for each action param not given via
+        /// `--param` (uses the ParamSchema: enum lists options,
+        /// bool y/n, defaults on empty input). Errors off-TTY.
+        #[arg(long)]
+        interactive: bool,
+        /// JSON output — dumps the full ActionResult.
         #[arg(long)]
         json: bool,
     },
@@ -255,6 +324,31 @@ fn run(cli: Cli) -> Result<u8, Fail> {
             params,
             json,
         }) => cmd_submit(&target, form.as_deref(), &params, json).map(|_| 0),
+        Some(Command::Actions {
+            target,
+            params,
+            json,
+        }) => cmd_actions(&target, &params, json).map(|_| 0),
+        Some(Command::Invoke {
+            target,
+            action,
+            params,
+            action_target,
+            target_id,
+            yes,
+            interactive,
+            json,
+        }) => cmd_invoke(
+            &target,
+            &action,
+            &params,
+            action_target.as_deref(),
+            target_id.as_deref(),
+            yes,
+            interactive,
+            json,
+        )
+        .map(|_| 0),
         Some(Command::Jobs { json }) => cmd_jobs(json).map(|_| 0),
         Some(Command::Notifications { json }) => cmd_notifications(json).map(|_| 0),
         Some(Command::Serve { port }) => serve::run(port)
@@ -269,8 +363,9 @@ fn run(cli: Cli) -> Result<u8, Fail> {
                     "version": env!("CARGO_PKG_VERSION"),
                     "verbs": [
                         "drivers", "views", "chrome", "view", "query",
-                        "submit", "jobs", "notifications", "serve",
-                        "open", "manifest", "schema"
+                        "submit", "actions", "invoke", "jobs",
+                        "notifications", "serve", "open", "manifest",
+                        "schema"
                     ],
                 })
             );
@@ -324,6 +419,19 @@ fn schema_doc() -> Value {
                 "args": ["<driver>:<view>", "--form <id>", "--param K=V (repeatable)"],
                 "flags": {"--json": "bool — dump the full SubmitResult"}
             },
+            "actions": {
+                "summary": "list actions offered by a view or driver \
+                            (declared actions[] + ops-manifest derived)",
+                "args": ["<driver>:<view> | <driver>", "--param K=V (repeatable)"],
+                "flags": {"--json": "bool"}
+            },
+            "invoke": {
+                "summary": "dispatch an action (invoke wire op)",
+                "args": ["<driver>:<view>", "<action>",
+                         "--param K=V (repeatable)", "--target <json|string>",
+                         "--target-id <id>", "--yes", "--interactive"],
+                "flags": {"--json": "bool — dump the full ActionResult"}
+            },
             "jobs": {
                 "summary": "aggregated job feed (contributes.jobs providers' jobs op)",
                 "flags": {"--json": "bool"}
@@ -346,7 +454,7 @@ fn schema_doc() -> Value {
         },
         "wire_ops": [
             "manifest", "views", "view", "query", "render", "submit",
-            "jobs", "notifications"
+            "invoke", "jobs", "notifications"
         ],
         "exit_codes": {"0": "ok", "1": "view/driver error", "2": "usage"}
     })
@@ -705,11 +813,32 @@ fn view_output(
             // formats) substitute their RenderModel per node; the
             // rest render built-in.
             let renders = host.render_view_plugins(resolved, "cli", Some("text"));
-            Ok(render::render_text_plugins(
+            let mut out = render::render_text_plugins(
                 &resolved.result.view.root,
                 &resolved.result.data,
                 &renders,
-            ))
+            );
+            // Action affordance: one footer line naming the declared
+            // actions (danger-marked) so `pavo invoke` is discoverable.
+            if let Ok(manifest) = host.manifest(&resolved.driver) {
+                let mut seen = std::collections::BTreeSet::new();
+                let hints: Vec<String> = collect_actions(&manifest, &resolved.result)
+                    .iter()
+                    .filter(|s| seen.insert(s.action.id.clone()))
+                    .map(|s| {
+                        let suffix = match s.action.danger {
+                            DangerLevel::None => "",
+                            DangerLevel::Confirm => " (confirm)",
+                            DangerLevel::TypeTarget => " (type-target)",
+                        };
+                        format!("{}{}", s.action.id, suffix)
+                    })
+                    .collect();
+                if !hints.is_empty() {
+                    out.push_str(&format!("\nactions: {}\n", hints.join(", ")));
+                }
+            }
+            Ok(out)
         }
         "dot" => {
             // Plugins claiming `dot` (or wildcard cli formats) take
@@ -836,6 +965,534 @@ fn cmd_submit_host(
     Ok(())
 }
 
+// ---------- actions / invoke ----------
+
+/// One action row for `pavo actions` and invoke's danger/param
+/// lookup — owned clones so they outlive the manifest/view borrows.
+struct ActionRow {
+    /// `manifest` | `node` | `item` | `ops` (ops-manifest derived).
+    scope: &'static str,
+    /// View the action was found in (`driver:view` context).
+    view: Option<String>,
+    /// For item-scoped actions — the tree item's id.
+    item_id: Option<String>,
+    action: Action,
+}
+
+/// Parse `<driver>:<view>` / `<driver>` — same grammar as
+/// `Host::parse_target` (kept local so the CLI can report usage
+/// errors before touching the host).
+fn split_view_ref(target: &str) -> Result<(String, Option<String>), Fail> {
+    let t = target.trim();
+    if t.is_empty() {
+        return Err(Fail::usage("empty view ref"));
+    }
+    match t.split_once(':') {
+        None => Ok((t.to_string(), None)),
+        Some((driver, view)) if !driver.is_empty() && !view.is_empty() && !view.contains(':') => {
+            Ok((driver.to_string(), Some(view.to_string())))
+        }
+        _ => Err(Fail::usage(format!(
+            "malformed view ref '{target}' — expected <driver>:<view> or <driver>"
+        ))),
+    }
+}
+
+/// Collect the action rows visible at `target`: declared actions
+/// (manifest-global always; node/tree-item when the target names a
+/// resolvable view) plus ops-manifest derived actions as a
+/// zero-declaration fallback. `strict_view` propagates view
+/// resolution errors (the `actions` verb); invoke passes `false`
+/// and falls back to manifest scope so undeclared/param-gated views
+/// still dispatch.
+fn action_rows(
+    host: &Host,
+    target: &str,
+    view_params: Params,
+    strict_view: bool,
+) -> Result<Vec<ActionRow>, Fail> {
+    let (driver, view_id) = split_view_ref(target)?;
+    let manifest = host.manifest(&driver)?;
+    let mut rows: Vec<ActionRow> = Vec::new();
+    let mut declared: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // Node/item actions need the resolved view — only attempted when
+    // the target names one (bare <driver> = manifest scope).
+    let resolved = if view_id.is_some() {
+        match host.resolve_view(target, view_params) {
+            Ok(r) => Some(r),
+            Err(e) if strict_view => return Err(e.into()),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    match &resolved {
+        Some(r) => {
+            for s in collect_actions(&manifest, &r.result) {
+                declared.insert(s.action.id.clone());
+                rows.push(ActionRow {
+                    scope: match s.scope {
+                        ActionScope::Manifest => "manifest",
+                        ActionScope::Node => "node",
+                        ActionScope::Item => "item",
+                    },
+                    view: s.view.clone(),
+                    item_id: s.item_id.map(|id| id.into_owned()),
+                    action: s.action.into_owned(),
+                });
+            }
+        }
+        None => {
+            for a in manifest_actions(&manifest) {
+                declared.insert(a.id.clone());
+                rows.push(ActionRow {
+                    scope: "manifest",
+                    view: view_id.clone(),
+                    item_id: None,
+                    action: a.clone(),
+                });
+            }
+        }
+    }
+
+    // Ops-manifest fallback: `query "ops"` answers
+    // `{ops:[{name,doc,params,mutates}]}` on surface drivers — each
+    // op becomes an action when no declaration claimed the id.
+    // Drivers without an ops manifest just error → skipped.
+    if let Ok(q) = host.query(&driver, "ops", Params::new()) {
+        for a in ops_actions(&q.data) {
+            if declared.insert(a.id.clone()) {
+                rows.push(ActionRow {
+                    scope: "ops",
+                    view: view_id.clone(),
+                    item_id: None,
+                    action: a,
+                });
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn danger_label(d: DangerLevel) -> &'static str {
+    match d {
+        DangerLevel::None => "none",
+        DangerLevel::Confirm => "confirm",
+        DangerLevel::TypeTarget => "type-target",
+    }
+}
+
+fn kind_label(k: ParamKind) -> &'static str {
+    match k {
+        ParamKind::String => "string",
+        ParamKind::Text => "text",
+        ParamKind::Number => "number",
+        ParamKind::Integer => "integer",
+        ParamKind::Bool => "bool",
+        ParamKind::Enum => "enum",
+        ParamKind::Date => "date",
+        ParamKind::Ref => "ref",
+        ParamKind::StringList => "string[]",
+    }
+}
+
+fn cmd_actions(target: &str, params: &[String], json: bool) -> Result<(), Fail> {
+    let view_params = parse_params(params)?;
+    let mut host = Host::discover();
+    cmd_actions_host(&mut host, target, view_params, json)
+}
+
+/// [`cmd_actions`] over an explicit host — split for tests.
+fn cmd_actions_host(
+    host: &mut Host,
+    target: &str,
+    view_params: Params,
+    json: bool,
+) -> Result<(), Fail> {
+    let rows = action_rows(host, target, view_params, true)?;
+    if json {
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "scope": r.scope,
+                    "view": r.view,
+                    "item": r.item_id,
+                    "id": r.action.id,
+                    "label": r.action.label,
+                    "danger": r.action.danger,
+                    "keys": r.action.keys,
+                    "target": r.action.target,
+                    "description": r.action.description,
+                    "params": r.action.params,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| Fail::err(e.to_string()))?
+        );
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no actions");
+        return Ok(());
+    }
+    for r in &rows {
+        let a = &r.action;
+        let scope = match r.scope {
+            "item" => format!("item:{}", r.item_id.as_deref().unwrap_or("?")),
+            s => s.to_string(),
+        };
+        println!(
+            "{:<16} {:<28} {:<11} {}",
+            scope,
+            a.id,
+            danger_label(a.danger),
+            a.label
+        );
+        if !a.params.is_empty() {
+            let ps = a
+                .params
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{}:{}{}",
+                        p.name,
+                        kind_label(p.kind),
+                        if p.required { "!" } else { "" }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("    params: {ps}");
+        }
+        if !a.keys.is_empty() {
+            println!("    keys: {}", a.keys.join(", "));
+        }
+        if let Some(t) = &a.target {
+            println!("    target: {t}");
+        }
+        if let Some(d) = &a.description {
+            println!("    {}", d.lines().next().unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
+/// Parse one scalar the way `--param` values parse: JSON when
+/// possible, else a string.
+fn parse_scalar(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+/// Read one line from stdin for `--interactive`/confirm prompts.
+/// Prompts go to stderr so stdout stays machine-clean.
+fn read_tty_line(prompt: &str) -> Result<String, Fail> {
+    use std::io::Write;
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| Fail::err(format!("read stdin: {e}")))?;
+    Ok(line.trim().to_string())
+}
+
+/// Enforce the action's [`DangerLevel`] before dispatch.
+/// `action_target` is the already-parsed `--target`/`--target-id`
+/// value. `--yes` short-circuits everything *except* the
+/// type-target id requirement (the id is the confirmation).
+fn check_danger(
+    action: &str,
+    danger: DangerLevel,
+    action_target: Option<&Value>,
+    yes: bool,
+) -> Result<(), Fail> {
+    match danger {
+        DangerLevel::None => Ok(()),
+        DangerLevel::Confirm => {
+            if yes {
+                return Ok(());
+            }
+            if !std::io::stdin().is_terminal() {
+                return Err(Fail::usage(format!(
+                    "action '{action}' needs confirmation — re-run with --yes \
+                     (non-interactive) or on a TTY"
+                )));
+            }
+            let ans = read_tty_line(&format!("invoke '{action}'? [y/N] "))?;
+            if matches!(ans.to_ascii_lowercase().as_str(), "y" | "yes") {
+                Ok(())
+            } else {
+                Err(Fail {
+                    code: 1,
+                    msg: format!("aborted — '{action}' not invoked"),
+                })
+            }
+        }
+        DangerLevel::TypeTarget => {
+            // The typed id doubles as the action target — it must be
+            // a plain string (`--target-id`, or `--target` carrying a
+            // JSON string).
+            let id = match action_target {
+                Some(Value::String(s)) if !s.is_empty() => s.clone(),
+                Some(_) => {
+                    return Err(Fail::usage(format!(
+                        "type-target action '{action}' needs a string id — \
+                         pass --target-id <id>"
+                    )));
+                }
+                None => {
+                    return Err(Fail::usage(format!(
+                        "type-target action '{action}' needs the target id — \
+                         pass --target-id <id>"
+                    )));
+                }
+            };
+            if yes {
+                return Ok(());
+            }
+            if !std::io::stdin().is_terminal() {
+                return Err(Fail::usage(format!(
+                    "type-target action '{action}' needs confirmation — \
+                     re-run with --yes --target-id {id} (non-interactive) \
+                     or on a TTY"
+                )));
+            }
+            let ans = read_tty_line(&format!("type '{id}' to confirm '{action}': "))?;
+            if ans == id {
+                Ok(())
+            } else {
+                Err(Fail {
+                    code: 1,
+                    msg: format!("aborted — '{action}' not invoked"),
+                })
+            }
+        }
+    }
+}
+
+/// Prompt for one missing param on a TTY, guided by its
+/// [`ParamSchema`]. Returns the coerced JSON value.
+fn prompt_param(p: &ParamSchema) -> Result<Value, Fail> {
+    let label = p.label.clone().unwrap_or_else(|| p.name.clone());
+    let mut prompt = format!("{label}:");
+    if let Some(h) = p.hint.as_deref().or(p.doc.as_deref()) {
+        prompt.push_str(&format!(" ({h})"));
+    }
+    if !p.options.is_empty() {
+        prompt.push_str(&format!(" [{}]", p.options.join("|")));
+    }
+    if let Some(d) = &p.default {
+        prompt.push_str(&format!(" [default: {}]", d));
+    }
+    prompt.push(' ');
+    let raw = read_tty_line(&prompt)?;
+    if raw.is_empty() {
+        if let Some(d) = &p.default {
+            return Ok(d.clone());
+        }
+        return Ok(Value::Null);
+    }
+    let value = match p.kind {
+        ParamKind::Bool => match raw.to_ascii_lowercase().as_str() {
+            "y" | "yes" | "true" | "1" | "on" => Value::Bool(true),
+            "n" | "no" | "false" | "0" | "off" => Value::Bool(false),
+            _ => {
+                return Err(Fail::usage(format!(
+                    "param '{}': expected y/n, got '{raw}'",
+                    p.name
+                )))
+            }
+        },
+        ParamKind::Integer => raw.parse::<i64>().map(Value::from).map_err(|_| {
+            Fail::usage(format!("param '{}': expected integer, got '{raw}'", p.name))
+        })?,
+        ParamKind::Number => raw.parse::<f64>().map(Value::from).map_err(|_| {
+            Fail::usage(format!("param '{}': expected number, got '{raw}'", p.name))
+        })?,
+        ParamKind::Enum => {
+            // Exact option, or 1-based index into options.
+            if p.options.iter().any(|o| o == &raw) {
+                Value::String(raw)
+            } else if let Ok(i) = raw.parse::<usize>() {
+                match p.options.get(i.wrapping_sub(1)) {
+                    Some(o) => Value::String(o.clone()),
+                    None => {
+                        return Err(Fail::usage(format!(
+                            "param '{}': option {i} out of range [{}]",
+                            p.name,
+                            p.options.join("|")
+                        )))
+                    }
+                }
+            } else {
+                return Err(Fail::usage(format!(
+                    "param '{}': expected one of [{}], got '{raw}'",
+                    p.name,
+                    p.options.join("|")
+                )));
+            }
+        }
+        ParamKind::StringList => Value::Array(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| Value::String(s.to_string()))
+                .collect(),
+        ),
+        _ => parse_scalar(&raw),
+    };
+    Ok(value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_invoke(
+    target: &str,
+    action: &str,
+    params: &[String],
+    action_target: Option<&str>,
+    target_id: Option<&str>,
+    yes: bool,
+    interactive: bool,
+    json: bool,
+) -> Result<(), Fail> {
+    let mut params_map = parse_params(params)?;
+    let action_target_json = match (action_target, target_id) {
+        (Some(_), Some(_)) => {
+            return Err(Fail::usage(
+                "--target and --target-id are mutually exclusive",
+            ))
+        }
+        (Some(raw), None) => Some(parse_scalar(raw)),
+        (None, Some(id)) => Some(Value::String(id.to_string())),
+        (None, None) => None,
+    };
+    let mut host = Host::discover();
+    cmd_invoke_host(
+        &mut host,
+        target,
+        action,
+        &mut params_map,
+        action_target_json,
+        yes,
+        interactive,
+        json,
+    )
+}
+
+/// [`cmd_invoke`] over an explicit host — split for tests.
+#[allow(clippy::too_many_arguments)]
+fn cmd_invoke_host(
+    host: &mut Host,
+    target: &str,
+    action: &str,
+    params: &mut Params,
+    action_target: Option<Value>,
+    yes: bool,
+    interactive: bool,
+    json: bool,
+) -> Result<(), Fail> {
+    // Locate the declaration (danger + param metadata). Best-effort:
+    // undeclared actions still dispatch — the driver is authoritative
+    // (ops-derived rows cover zero-declaration drivers).
+    let declared = action_rows(host, target, Params::new(), false)
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|r| r.action.id == action))
+        .map(|r| r.action);
+
+    if let Some(a) = &declared {
+        check_danger(action, a.danger, action_target.as_ref(), yes)?;
+        // Fill declared defaults for absent params, then prompt for
+        // the rest under --interactive.
+        for p in &a.params {
+            if !params.contains_key(&p.name) {
+                if let Some(d) = &p.default {
+                    params.insert(p.name.clone(), d.clone());
+                }
+            }
+        }
+        if interactive {
+            if !std::io::stdin().is_terminal() {
+                return Err(Fail::usage(
+                    "--interactive needs a TTY — pass --param k=v instead",
+                ));
+            }
+            for p in &a.params {
+                let missing = match params.get(&p.name) {
+                    None | Some(Value::Null) => true,
+                    Some(Value::String(s)) => s.is_empty(),
+                    _ => false,
+                };
+                if missing {
+                    let v = prompt_param(p)?;
+                    if !v.is_null() {
+                        params.insert(p.name.clone(), v);
+                    }
+                }
+            }
+        }
+        // Client-side validation (required/options/bounds) — drivers
+        // stay authoritative via ActionResult.errors.
+        let errors = validate_params(a, params);
+        if !errors.is_empty() {
+            let detail = errors
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or("invalid")))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(Fail {
+                code: 1,
+                msg: format!("invalid params for '{action}' — {detail}"),
+            });
+        }
+    } else if interactive {
+        return Err(Fail::usage(format!(
+            "--interactive needs a declared action — '{action}' has no \
+             ParamSchema (try `pavo actions {target}`)"
+        )));
+    }
+
+    let result = host.invoke(target, action, None, action_target, params.clone())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).map_err(|e| Fail::err(e.to_string()))?
+        );
+    } else {
+        if let Some(message) = &result.message {
+            println!("{message}");
+        }
+        match &result.data {
+            Some(data) => println!(
+                "{}",
+                serde_json::to_string_pretty(data).map_err(|e| Fail::err(e.to_string()))?
+            ),
+            None if result.message.is_none() && result.errors.is_empty() => {
+                println!("(empty result)");
+            }
+            None => {}
+        }
+    }
+    // Per-param errors mean the driver *rejected* the invoke (the
+    // wire still answered ok:true) — same convention as submit.
+    if !result.errors.is_empty() {
+        let detail = result
+            .errors
+            .iter()
+            .map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or("invalid")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Fail {
+            code: 1,
+            msg: format!("invoke rejected — {detail}"),
+        });
+    }
+    Ok(())
+}
+
 fn cmd_jobs(json: bool) -> Result<(), Fail> {
     let host = Host::discover();
     cmd_jobs_host(&host, json)
@@ -934,7 +1591,7 @@ mod tests {
     /// Minimal sh fixture driver (`demo`) answering manifest + serve.
     const DEMO_DRIVER: &str = r#"#!/bin/sh
 if [ "$1" = manifest ]; then
-  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}],"contributes":{"navbar":[{"id":"nav","title":"Nav","route":"/demo/board"}],"extra":{"sidebar":[{"id":"side","title":"Side","route":"/x"}]},"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]}}'
+  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}],"actions":[{"id":"refresh","label":"Refresh"},{"id":"rm","label":"Remove","danger":"confirm"},{"id":"wipe","label":"Wipe","danger":"type-target","target":"item"},{"id":"move","label":"Move","params":[{"name":"id","kind":"string","required":true},{"name":"pri","kind":"enum","options":["low","high"],"default":"low"}]}],"contributes":{"navbar":[{"id":"nav","title":"Nav","route":"/demo/board"}],"extra":{"sidebar":[{"id":"side","title":"Side","route":"/x"}]},"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]}}'
   exit 0
 fi
 if [ "$1" = serve ]; then
@@ -942,11 +1599,13 @@ if [ "$1" = serve ]; then
     case "$line" in
       *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/demo/board","queries":["items"]}]}' ;;
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{"items":[1,2]}}}' ;;
+      *'"query":"ops"'*) printf '%s\n' '{"ok":true,"result":{"query":"ops","data":{"engine":"demo","ops":[{"name":"cli.ping","doc":"Ping the engine","params":[{"name":"verbose","kind":"flag"}]}]}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
       *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
+      *'"op":"invoke"'*) printf '%s\n' '{"ok":true,"result":{"message":"invoked","data":{"applied":1}}}' ;;
       *'"op":"jobs"'*) printf '%s\n' '{"ok":true,"result":[{"id":"j1","title":"Build","status":"running"}]}' ;;
       *'"op":"notifications"'*) printf '%s\n' '{"ok":true,"result":[{"id":"n1","title":"Heads up","severity":"info"}]}' ;;
-      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
+      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}],"actions":[{"id":"refresh","label":"Refresh"},{"id":"rm","label":"Remove","danger":"confirm"},{"id":"wipe","label":"Wipe","danger":"type-target","target":"item"},{"id":"move","label":"Move","params":[{"name":"id","kind":"string","required":true},{"name":"pri","kind":"enum","options":["low","high"],"default":"low"}]}]}}' ;;
     esac
   done
   exit 0
@@ -1212,5 +1871,188 @@ exit 1
         // Unknown driver/view → error.
         assert!(cmd_submit_host(&mut host, "ghost:board", None, Params::new(), false).is_err());
         assert!(cmd_submit_host(&mut host, "demo:nope", None, Params::new(), false).is_err());
+    }
+
+    #[test]
+    fn actions_lists_declared_and_ops_derived() {
+        let mut host = fixture_host();
+        // View scope: manifest actions + ops-derived "ping".
+        cmd_actions_host(&mut host, "demo:board", Params::new(), false)
+            .ok()
+            .unwrap();
+        cmd_actions_host(&mut host, "demo:board", Params::new(), true)
+            .ok()
+            .unwrap();
+        // Bare driver = manifest scope (+ ops fallback).
+        cmd_actions_host(&mut host, "demo", Params::new(), false)
+            .ok()
+            .unwrap();
+        cmd_actions_host(&mut host, "demo", Params::new(), true)
+            .ok()
+            .unwrap();
+        // Empty host → "no actions".
+        let mut empty = empty_host();
+        assert!(cmd_actions_host(&mut empty, "demo", Params::new(), false).is_err());
+        // Unknown driver / unresolvable view → error.
+        assert!(cmd_actions_host(&mut host, "ghost:board", Params::new(), false).is_err());
+        assert!(cmd_actions_host(&mut host, "demo:nope", Params::new(), false).is_err());
+    }
+
+    #[test]
+    fn invoke_dispatches_and_gates_danger() {
+        let mut host = fixture_host();
+        // danger:none dispatches without --yes (tests are non-TTY).
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "refresh",
+            &mut Params::new(),
+            None,
+            false,
+            false,
+            false,
+        )
+        .ok()
+        .unwrap();
+        // --json dumps the ActionResult.
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "refresh",
+            &mut Params::new(),
+            None,
+            false,
+            false,
+            true,
+        )
+        .ok()
+        .unwrap();
+        // confirm: non-TTY without --yes → usage error; --yes → ok.
+        assert!(cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "rm",
+            &mut Params::new(),
+            None,
+            false,
+            false,
+            false
+        )
+        .is_err());
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "rm",
+            &mut Params::new(),
+            None,
+            true,
+            false,
+            false,
+        )
+        .ok()
+        .unwrap();
+        // type-target: --target-id (or a JSON string --target) is
+        // required even with --yes.
+        assert!(cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "wipe",
+            &mut Params::new(),
+            None,
+            true,
+            false,
+            false
+        )
+        .is_err());
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "wipe",
+            &mut Params::new(),
+            Some(json!("i1")),
+            true,
+            false,
+            false,
+        )
+        .ok()
+        .unwrap();
+        // --target + --target-id conflict → usage error (pre-host).
+        assert!(cmd_invoke(
+            "demo:board",
+            "wipe",
+            &[],
+            Some("{}"),
+            Some("i2"),
+            true,
+            false,
+            false,
+        )
+        .is_err());
+        // ParamSchema validation: required param missing → exit 1
+        // before dispatch; defaults fill in; supplied params pass.
+        let err = cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "move",
+            &mut Params::new(),
+            None,
+            false,
+            false,
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(err.msg.contains("invalid params"), "{}", err.msg);
+        let mut p = Params::new();
+        p.insert("id".to_string(), json!("T-1"));
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "move",
+            &mut p,
+            None,
+            false,
+            false,
+            false,
+        )
+        .ok()
+        .unwrap();
+        // --interactive off-TTY → usage error.
+        assert!(cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "move",
+            &mut Params::new(),
+            None,
+            true,
+            true,
+            false
+        )
+        .is_err());
+        // Undeclared action still dispatches (driver is authoritative).
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "whatever",
+            &mut Params::new(),
+            None,
+            false,
+            false,
+            true,
+        )
+        .ok()
+        .unwrap();
+        // Malformed ref → error.
+        assert!(cmd_invoke_host(
+            &mut host,
+            "a:b:c",
+            "x",
+            &mut Params::new(),
+            None,
+            false,
+            false,
+            false
+        )
+        .is_err());
     }
 }
