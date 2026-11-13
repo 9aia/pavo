@@ -85,6 +85,7 @@ pub enum ParamKind {
     /// or `id`/`title` fields, or bare strings).
     Ref,
     /// List of strings — token/tag input.
+    #[serde(rename = "string[]")]
     StringList,
 }
 
@@ -214,6 +215,26 @@ mod tests {
         assert_eq!(full.params[0].kind, ParamKind::Ref);
         assert_eq!(full.params[0].ref_query.as_deref(), Some("items"));
         assert_eq!(full.params[1].kind, ParamKind::Text);
+    }
+
+    #[test]
+    fn param_kind_wire_spellings() {
+        // Mirrors the `kind` enum in protocol/v1/*.schema.json.
+        for (wire, kind) in [
+            ("string", ParamKind::String),
+            ("text", ParamKind::Text),
+            ("number", ParamKind::Number),
+            ("integer", ParamKind::Integer),
+            ("bool", ParamKind::Bool),
+            ("enum", ParamKind::Enum),
+            ("date", ParamKind::Date),
+            ("ref", ParamKind::Ref),
+            ("string[]", ParamKind::StringList),
+        ] {
+            let p: ParamSchema = serde_json::from_value(json!({"name":"x","kind":wire})).unwrap();
+            assert_eq!(p.kind, kind, "wire spelling {wire}");
+            assert_eq!(serde_json::to_value(p.kind).unwrap(), wire);
+        }
     }
 
     #[test]

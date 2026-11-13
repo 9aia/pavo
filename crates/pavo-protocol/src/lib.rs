@@ -15,6 +15,12 @@
 //!   requests are `{"op":"…", …}`, responses are
 //!   `{"ok":true,"result":…}` or `{"ok":false,"error":"…"}`.
 //!
+//! Interaction actions ([`action`]) cut across all three: an
+//! [`Action`] is declared on the manifest, a view node, or a tree
+//! item and dispatched through the `invoke` wire op, answering an
+//! [`wire::ActionResult`]; [`manifest::MenuEntry`] entries feed the
+//! host command palette.
+//!
 //! Versioning policy: **additive-only within v1** — new optional
 //! fields, new enum variants, and new ops may appear; existing
 //! fields and variant spellings never change meaning.
