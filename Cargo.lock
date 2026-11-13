@@ -1021,6 +1021,7 @@ dependencies = [
  "clap",
  "pavo-core",
  "pavo-protocol",
+ "pavo-testkit",
  "proptest",
  "serde",
  "serde_json",

@@ -8,8 +8,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use pavo_protocol::manifest::{QueryBinding, ViewSpec};
-use pavo_protocol::view_node::{NodeBase, TableNode, ViewNode};
-use pavo_protocol::DriverManifest;
+use pavo_protocol::view_node::{NodeBase, TableNode, TreeItem, TreeNode, ViewNode};
+use pavo_protocol::{Action, DriverManifest};
 use pavo_testkit::conformance::Check;
 use pavo_testkit::fixture::FixtureDriver;
 use pavo_testkit::record::{
@@ -343,6 +343,237 @@ fn conformance_accepts_path_and_fixture() {
     let fx = happy_driver();
     let direct = pavo_testkit::check_driver(fx.path());
     assert!(direct.is_empty(), "{direct:?}");
+}
+
+/// Minimal [`Action`] — `{"id","label"}` is the only required pair.
+fn act(id: &str) -> Action {
+    serde_json::from_value(json!({"id": id, "label": id})).unwrap()
+}
+
+/// [`act`] plus extra declaration fields (`danger`, `params`,
+/// `route`, `driver`, …) merged over the base.
+fn act_full(id: &str, extra: Value) -> Action {
+    let mut v = json!({"id": id, "label": id});
+    if let (Some(base), Some(add)) = (v.as_object_mut(), extra.as_object()) {
+        for (k, val) in add {
+            base.insert(k.clone(), val.clone());
+        }
+    }
+    serde_json::from_value(v).unwrap()
+}
+
+/// A view whose table node carries a node-scoped action.
+fn node_action_spec(id: &str, action: Action) -> ViewSpec {
+    let mut s = spec(id, &[]);
+    if let ViewNode::Table(t) = &mut s.root {
+        t.base.actions.push(action);
+    }
+    s
+}
+
+/// A tree view with inline item actions.
+fn inline_tree_spec(id: &str, items: Vec<TreeItem>) -> ViewSpec {
+    ViewSpec {
+        root: ViewNode::Tree(TreeNode {
+            base: NodeBase::default(),
+            items,
+            expandable: true,
+        }),
+        ..spec(id, &[])
+    }
+}
+
+/// A tree view whose items come from the `query` binding's
+/// `data[query].items` payload — the query-bound item-action path.
+fn query_tree_spec(id: &str, query: &str) -> ViewSpec {
+    let mut s = spec(id, &[query]);
+    s.root = ViewNode::Tree(TreeNode {
+        base: NodeBase {
+            query: Some(query.to_string()),
+            ..Default::default()
+        },
+        items: vec![],
+        expandable: true,
+    });
+    s
+}
+
+fn tree_item(id: &str, actions: Vec<Action>) -> TreeItem {
+    TreeItem {
+        id: Some(id.to_string()),
+        label: id.to_string(),
+        detail: None,
+        icon: None,
+        children: vec![],
+        props: Default::default(),
+        actions,
+    }
+}
+
+#[test]
+fn actions_across_scopes_are_conformant() {
+    // Manifest action (with required params → errors path), a
+    // node-scoped action, inline + query-bound item actions, and a
+    // route action that must be skipped (no wire dispatch).
+    let fx = FixtureDriver::builder("fx")
+        .view(node_action_spec("board", act("export")))
+        .view(inline_tree_spec(
+            "backlog",
+            vec![tree_item("T-1", vec![act("done")])],
+        ))
+        .view(query_tree_spec("tasks", "rows"))
+        .query(
+            "rows",
+            json!({"items": [{"id": "T-9", "label": "nine",
+                             "actions": [{"id": "archive", "label": "Archive"}]}]}),
+        )
+        .action(act_full(
+            "new",
+            json!({"params": [{"name": "title", "kind": "string", "required": true}]}),
+        ))
+        .action(act("refresh"))
+        .action(act_full("goto", json!({"route": "/fx/elsewhere"})))
+        .action(act_full("elsewhere", json!({"driver": "other"})))
+        .build()
+        .unwrap();
+    let violations = fx.check();
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+#[test]
+fn invoke_error_is_detected() {
+    let fx = FixtureDriver::builder("fx")
+        .action(act("refresh"))
+        .invoke_error("refresh", "driver refused")
+        .build()
+        .unwrap();
+    let violations = fx.check();
+    assert!(
+        checks(&violations).contains(&Check::Invoke),
+        "{violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.detail.contains("driver refused")),
+        "{violations:?}"
+    );
+}
+
+#[test]
+fn invoke_garbage_result_is_detected() {
+    // ok:true but the result isn't an ActionResult object.
+    let fx = FixtureDriver::builder("fx")
+        .action(act("refresh"))
+        .invoke("refresh", json!("not an object"))
+        .build()
+        .unwrap();
+    let violations = fx.check();
+    assert!(
+        checks(&violations).contains(&Check::Invoke),
+        "{violations:?}"
+    );
+}
+
+#[test]
+fn invoke_unknown_action_ok_true_is_detected() {
+    // The bogus-id probe must get ok:false — a driver answering
+    // ok:true for an undeclared action violates the contract.
+    let fx = FixtureDriver::builder("fx")
+        .action(act("refresh"))
+        .invoke(
+            "pavo.conformance.no-such-action",
+            json!({"message": "sure, why not"}),
+        )
+        .build()
+        .unwrap();
+    let violations = fx.check();
+    assert!(
+        checks(&violations).contains(&Check::InvokeUnknown),
+        "{violations:?}"
+    );
+}
+
+#[test]
+fn route_action_is_not_invoked() {
+    // `route` actions navigate host-locally — the suite must not
+    // send `invoke` for them. Configure an invoke override that
+    // would violate if it were ever dispatched.
+    let fx = FixtureDriver::builder("fx")
+        .action(act_full("goto", json!({"route": "/fx/{target.id}"})))
+        .invoke_error("goto", "must never be dispatched")
+        .build()
+        .unwrap();
+    let violations = fx.check();
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+#[test]
+fn invoke_dispatch_semantics() {
+    // Direct wire checks on the fixture's invoke handler: canned
+    // results, required-param errors, unknown actions, context echo.
+    let fx = FixtureDriver::builder("fx")
+        .view(spec("board", &[]))
+        .action(act_full(
+            "new",
+            json!({"params": [
+                {"name": "title", "kind": "string", "required": true},
+                {"name": "pri", "kind": "enum", "options": ["low", "high"]}
+            ]}),
+        ))
+        .action(act("refresh"))
+        .invoke("refresh", json!({"message": "reloaded", "data": {"n": 3}}))
+        .invoke_error("boom", "no such op")
+        .build()
+        .unwrap();
+    let mut s = Session::spawn(fx.path()).unwrap();
+
+    // Canned override wins over the default dispatch.
+    let resp = s
+        .call(
+            &json!({"op": "invoke", "view": "board", "action": "refresh"}),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert!(resp.ok);
+    let r = resp.result.unwrap();
+    assert_eq!(r["message"], "reloaded");
+    assert_eq!(r["data"]["n"], 3);
+
+    // Missing required param → ok:true ActionResult with errors.
+    let resp = s
+        .call(
+            &json!({"op": "invoke", "view": "board", "action": "new"}),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert!(resp.ok);
+    assert_eq!(resp.result.unwrap()["errors"]["title"], "required");
+
+    // Satisfied params → default echo result carrying the context.
+    let resp = s
+        .call(
+            &json!({"op": "invoke", "view": "board", "action": "new",
+                    "target": {"id": "T-1"}, "params": {"title": "x", "pri": "low"}}),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    let r = resp.result.unwrap();
+    assert_eq!(r["data"]["action"], "new");
+    assert_eq!(r["data"]["view"], "board");
+    assert_eq!(r["data"]["target"]["id"], "T-1");
+    assert_eq!(r["data"]["params"]["pri"], "low");
+
+    // invoke_error → ok:false; undeclared action → ok:false.
+    for action in ["boom", "ghost"] {
+        let resp = s
+            .call(
+                &json!({"op": "invoke", "action": action}),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert!(!resp.ok, "action {action} should fail");
+    }
 }
 
 #[test]

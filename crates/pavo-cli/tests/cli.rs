@@ -7,6 +7,11 @@
 
 use std::process::{Command, Output};
 
+use pavo_protocol::manifest::ViewSpec;
+use pavo_protocol::view_node::{NodeBase, TableNode, ViewNode};
+use pavo_protocol::Action;
+use pavo_testkit::fixture::FixtureDriver;
+
 /// Fixture driver `demo`: eager `manifest` + `serve` wire with two
 /// views — `board` (kv + table + markdown, query-fed) and `deps`
 /// (graph). Pure sh builtins so it runs with a bare PATH.
@@ -111,6 +116,123 @@ fn pavo(fx: &Fixture, args: &[&str]) -> Output {
         .env("TAMIAS_HOME", fx.bin.parent().unwrap().join("home"))
         .output()
         .unwrap()
+}
+
+/// Copy a testkit [`FixtureDriver`] into the fixture's `bin` dir —
+/// the generated script resolves its `.fixture.json` config next to
+/// `__file__`, so both files must land together. Returns the driver
+/// kind (`<name>`).
+fn install_fixture_driver(fx: &Fixture, driver: &FixtureDriver) -> String {
+    let file = format!("tamias-driver-{}", driver.name());
+    std::fs::copy(driver.path(), fx.bin.join(&file)).unwrap();
+    std::fs::copy(
+        driver.dir().join(format!("{file}.fixture.json")),
+        fx.bin.join(format!("{file}.fixture.json")),
+    )
+    .unwrap();
+    driver.name().to_string()
+}
+
+fn act(id: &str) -> Action {
+    serde_json::from_value(serde_json::json!({"id": id, "label": id})).unwrap()
+}
+
+/// [`act`] plus extra declaration fields (`danger`, `params`,
+/// `route`, …) merged over the base.
+fn act_full(id: &str, extra: serde_json::Value) -> Action {
+    let mut v = serde_json::json!({"id": id, "label": id});
+    if let (Some(base), Some(add)) = (v.as_object_mut(), extra.as_object()) {
+        for (k, val) in add {
+            base.insert(k.clone(), val.clone());
+        }
+    }
+    serde_json::from_value(v).unwrap()
+}
+
+/// The `act` fixture driver — one view whose table node carries a
+/// node action, plus manifest actions covering every `DangerLevel`,
+/// typed params, a `route` action, and canned invoke results.
+fn actions_driver() -> FixtureDriver {
+    let board = ViewSpec {
+        id: "board".to_string(),
+        title: "Board".to_string(),
+        route: "/act/board".to_string(),
+        description: None,
+        queries: vec![],
+        root: ViewNode::Table(TableNode {
+            base: NodeBase {
+                actions: vec![act_full(
+                    "export",
+                    serde_json::json!({"params": [
+                        {"name": "format", "kind": "enum",
+                         "options": ["json", "csv"], "default": "json",
+                         "required": true}
+                    ]}),
+                )],
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        item_route: None,
+        filter_param: None,
+        refresh_ms: None,
+    };
+    FixtureDriver::builder("act")
+        .view(board)
+        .action(act("refresh"))
+        .action(act_full("rm", serde_json::json!({"danger": "confirm"})))
+        .action(act_full(
+            "wipe",
+            serde_json::json!({"danger": "type-target", "target": "item"}),
+        ))
+        .action(act_full(
+            "move",
+            serde_json::json!({"params": [
+                {"name": "id", "kind": "string", "required": true},
+                {"name": "pri", "kind": "enum",
+                 "options": ["low", "high"], "default": "low"}
+            ]}),
+        ))
+        .action(act_full(
+            "open",
+            serde_json::json!({"route": "/act/item?id={target.id}"}),
+        ))
+        .action(act("fragile"))
+        .invoke(
+            "refresh",
+            serde_json::json!({"message": "reloaded", "data": {"n": 1}}),
+        )
+        .invoke("fragile", serde_json::json!({"errors": {"note": "nope"}}))
+        .build()
+        .unwrap()
+}
+
+/// `pavo()` replaces PATH wholesale — the testkit FixtureDriver is a
+/// Python script (`#!/usr/bin/env python3`), so `python3` must be
+/// reachable on the bare fixture PATH. Symlink the real interpreter
+/// into `bin` (unix-only; the suite's other fixtures are `#!/bin/sh`).
+#[cfg(unix)]
+fn link_python3(fx: &Fixture) {
+    let found = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .map(|d| std::path::PathBuf::from(d).join("python3"))
+        .find(|p| p.is_file());
+    if let Some(src) = found {
+        let _ = std::os::unix::fs::symlink(&src, fx.bin.join("python3"));
+    }
+}
+
+#[cfg(not(unix))]
+fn link_python3(_fx: &Fixture) {}
+
+/// Fixture + the `act` actions driver installed on its PATH.
+fn actions_fixture() -> (Fixture, String) {
+    let fx = fixture();
+    link_python3(&fx);
+    let driver = actions_driver();
+    let kind = install_fixture_driver(&fx, &driver);
+    (fx, kind)
 }
 
 fn stdout(o: &Output) -> String {
@@ -469,4 +591,188 @@ fn open_unknown_target_errors() {
     let o = pavo(&fx, &["open", "ghost:board"]);
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).contains("unknown driver"), "{}", stderr(&o));
+}
+
+// -- actions / invoke ----------------------------------------------------
+// Surface coverage for the `invoke` wire op driven by a pavo-testkit
+// FixtureDriver — the same fixture the driver-conformance suite runs.
+
+#[test]
+fn actions_lists_declared_actions() {
+    let (fx, kind) = actions_fixture();
+    let target = format!("{kind}:board");
+
+    let o = pavo(&fx, &["actions", &target]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    // Manifest actions + the node-scoped `export` on the table.
+    for needle in ["refresh", "rm", "wipe", "move", "open", "export"] {
+        assert!(out.contains(needle), "missing {needle} in:\n{out}");
+    }
+    assert!(out.contains("confirm"), "{out}");
+    assert!(out.contains("type-target"), "{out}");
+    assert!(out.contains("format:enum!"), "{out}");
+
+    // --json dumps the structured rows.
+    let o = pavo(&fx, &["actions", &target, "--json"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    let rows = v.as_array().unwrap();
+    let get = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
+    assert_eq!(get("refresh")["scope"], "manifest");
+    assert_eq!(get("rm")["danger"], "confirm");
+    assert_eq!(get("wipe")["danger"], "type-target");
+    assert_eq!(get("export")["scope"], "node");
+    assert_eq!(get("move")["params"][0]["name"], "id");
+
+    // Bare driver = manifest scope only (no view resolution).
+    let o = pavo(&fx, &["actions", &kind]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("refresh"), "{out}");
+    assert!(!out.contains("export"), "{out}");
+}
+
+#[test]
+fn invoke_dispatches_and_renders_result() {
+    let (fx, kind) = actions_fixture();
+    let target = format!("{kind}:board");
+
+    // Canned ActionResult — text mode prints message + data.
+    let o = pavo(&fx, &["invoke", &target, "refresh"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("reloaded"), "{out}");
+    assert!(out.contains("\"n\": 1"), "{out}");
+
+    // --json dumps the full ActionResult.
+    let o = pavo(&fx, &["invoke", &target, "refresh", "--json"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["message"], "reloaded");
+    assert_eq!(v["data"]["n"], 1);
+
+    // Default dispatch echoes the invoke context (view/target/params).
+    let o = pavo(
+        &fx,
+        &[
+            "invoke",
+            &target,
+            "export",
+            "--param",
+            "format=csv",
+            "--target",
+            "{\"row\": 2}",
+            "--json",
+        ],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["data"]["action"], "export");
+    assert_eq!(v["data"]["view"], "board");
+    assert_eq!(v["data"]["target"]["row"], 2);
+    assert_eq!(v["data"]["params"]["format"], "csv");
+}
+
+#[test]
+fn invoke_gates_on_danger_level() {
+    let (fx, kind) = actions_fixture();
+    let target = format!("{kind}:board");
+
+    // confirm: off-TTY without --yes is a usage error (exit 2).
+    let o = pavo(&fx, &["invoke", &target, "rm"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("needs confirmation"), "{}", stderr(&o));
+
+    // --yes bypasses the confirm gate and dispatches.
+    let o = pavo(&fx, &["invoke", &target, "rm", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("invoked rm"), "{}", stdout(&o));
+
+    // type-target: the id is the confirmation — required even with
+    // --yes, and without --yes off-TTY it still gates.
+    let o = pavo(&fx, &["invoke", &target, "wipe"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("target id"), "{}", stderr(&o));
+    let o = pavo(&fx, &["invoke", &target, "wipe", "--target-id", "T-1"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("needs confirmation"), "{}", stderr(&o));
+    let o = pavo(
+        &fx,
+        &[
+            "invoke",
+            &target,
+            "wipe",
+            "--yes",
+            "--target-id",
+            "T-1",
+            "--json",
+        ],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    // --target-id rides the wire as the action target (string form).
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["data"]["target"], "T-1");
+}
+
+#[test]
+fn invoke_validates_params_and_surfaces_driver_errors() {
+    let (fx, kind) = actions_fixture();
+    let target = format!("{kind}:board");
+
+    // Client-side validation: required param missing → exit 1, no
+    // wire dispatch.
+    let o = pavo(&fx, &["invoke", &target, "move"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("invalid params"), "{}", stderr(&o));
+
+    // Declared defaults fill absent params before dispatch.
+    let o = pavo(
+        &fx,
+        &["invoke", &target, "move", "--param", "id=T-1", "--json"],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["data"]["params"]["id"], "T-1");
+    assert_eq!(v["data"]["params"]["pri"], "low"); // enum default
+
+    // Driver-side per-param errors → ok:true on the wire but exit 1.
+    let o = pavo(&fx, &["invoke", &target, "fragile"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("invoke rejected"), "{}", stderr(&o));
+    assert!(stderr(&o).contains("note"), "{}", stderr(&o));
+
+    // Undeclared action still dispatches — driver answers ok:false.
+    let o = pavo(&fx, &["invoke", &target, "ghost"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("unknown action"), "{}", stderr(&o));
+}
+
+#[test]
+fn invoke_route_action_navigates_without_dispatch() {
+    let (fx, kind) = actions_fixture();
+    let target = format!("{kind}:board");
+
+    // `route` actions interpolate host-side — no `invoke` wire op.
+    let o = pavo(
+        &fx,
+        &[
+            "invoke",
+            &target,
+            "open",
+            "--target",
+            "{\"id\":\"T-1\"}",
+            "--json",
+        ],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["route"], "/act/item?id=T-1");
+
+    let o = pavo(
+        &fx,
+        &["invoke", &target, "open", "--target", "{\"id\":\"T-1\"}"],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "/act/item?id=T-1");
 }
