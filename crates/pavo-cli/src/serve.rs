@@ -29,7 +29,11 @@
 //!   `"params"` — answered with the `ActionResult` JSON. Confirmation
 //!   UX (`confirm`/`type-target` danger) is the client's job — the
 //!   bridge dispatches like `--yes`.
-//! - `GET /api/view?ref=<driver>:<view>` (+ `param.<k>=<v>`) → ViewResult
+//! - `GET /api/view?ref=<driver>:<view>` (+ `param.<k>=<v>`) →
+//!   ViewResult. `ref` may also be a `/path?query` route — resolved
+//!   against declared view routes/`item_route` templates like the
+//!   CLI's `pavo view <route>`; route-derived params merge under
+//!   explicit `param.*` pairs.
 //! - `GET /api/raw?ref=…` → same as `/api/view`
 //! - `GET /api/query?driver=<d>&query=<q>` (+ `param.<k>=<v>`) → QueryResult
 //! - `GET /api/submit?ref=<d>:<v>[&form=<id>][&values=<json>]` → SubmitResult
@@ -436,7 +440,31 @@ fn view_target(pairs: &[(String, String)]) -> Result<String, ApiFail> {
 
 fn api_view(host: &Host, pairs: &[(String, String)]) -> Result<Value, ApiFail> {
     let target = view_target(pairs)?;
-    let params: Params = http::collect_params(pairs).into_iter().collect();
+    let mut params: Params = http::collect_params(pairs).into_iter().collect();
+    // `/path?query` routes (Action.route / item_route output)
+    // resolve against declared view routes — explicit `param.*`
+    // pairs win over route-derived params. Same matcher as the CLI's
+    // `pavo view <route>` (see `route_target` in main.rs).
+    let target = if target.trim_start().starts_with('/') {
+        match crate::route_target(host, &target) {
+            Some((reference, route_params)) => {
+                for (k, v) in route_params {
+                    if !params.contains_key(&k) {
+                        params.insert(k, v);
+                    }
+                }
+                reference
+            }
+            None => {
+                return Err(ApiFail::new(
+                    404,
+                    format!("unknown route '{target}' — no declared view route matches"),
+                ));
+            }
+        }
+    } else {
+        target
+    };
     let resolved = host.resolve_view(&target, params)?;
     serde_json::to_value(&resolved.result).map_err(|e| ApiFail::new(500, e.to_string()))
 }

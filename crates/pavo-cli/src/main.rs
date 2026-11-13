@@ -14,6 +14,11 @@
 //!   deep link and render it: `text` (default) summarizes the
 //!   ViewNode tree + bound data, `json` dumps the raw
 //!   [`ViewResult`], `dot`/`mermaid` emit the view's graph nodes.
+//!   `/path?query` routes (what `Action.route`/`item_route`
+//!   templates produce, e.g. `/myco/item?id=T-1`) resolve back to a
+//!   `<driver>:<view>` ref + params via declared view routes —
+//!   `view`, `open` (non-TTY), `actions`, `invoke`, and `submit`
+//!   all accept them.
 //! - `query <driver> <query> [--param k=v …]` — raw `query` op
 //!   passthrough.
 //! - `submit <driver>:<view> [--form <id>] --param k=v …` — the
@@ -29,7 +34,11 @@
 //!   `--target`/`--target-id` carry the opaque action target,
 //!   `--interactive` prompts for missing params on a TTY, and
 //!   `--yes` bypasses `confirm`/`type-target` confirmations
-//!   (required off-TTY).
+//!   (required off-TTY). Actions declaring `route` navigate instead
+//!   of dispatching: the template is interpolated over the invoke
+//!   context and the resulting route is printed (`{"route": …}`
+//!   with `--json`), exit 0. A real invoke whose `ActionResult`
+//!   carries `route` appends a `→ <route>` hint in text mode.
 //! - `jobs` / `notifications` — the aggregated platform feeds: every
 //!   provider driver's `jobs`/`notifications` wire op, tagged with
 //!   its driver (`--json` dumps the flattened rows).
@@ -61,8 +70,8 @@ mod serve;
 
 use clap::{Parser, Subcommand};
 use pavo_core::{
-    collect_actions, manifest_actions, ops_actions, validate_params, ActionScope, Host, Params,
-    PavoError, ResolvedView,
+    collect_actions, interpolate, interpolate_ctx_value, manifest_actions, ops_actions,
+    validate_params, ActionScope, Host, Params, PavoError, ResolvedView,
 };
 use pavo_protocol::{Action, DangerLevel, ParamKind, ParamSchema};
 use serde_json::{json, Map, Value};
@@ -104,12 +113,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Resolve + render a view — `pavo view myco:board`.
+    /// Resolve + render a view — `pavo view myco:board` or a
+    /// `/myco/item?id=T-1` route.
     View {
-        /// `<driver>:<view>` deep link (bare `<driver>` = its first view).
+        /// `<driver>:<view>` deep link (bare `<driver>` = its first
+        /// view) or a `/route?query` matching a declared view route /
+        /// `item_route` template.
         target: String,
         /// View param, `key=value` (repeatable). Values parse as JSON
-        /// when possible, else strings.
+        /// when possible, else strings. A view's `filter_param`
+        /// (ViewSpec, convention `q`) is just another `--param`.
         #[arg(long = "param", value_name = "K=V")]
         params: Vec<String>,
         /// Output format — `text` (default), `json`, `dot`, `mermaid`,
@@ -230,7 +243,7 @@ enum Command {
     /// Falls back to `view` text output when stdout is not a TTY.
     Open {
         /// `<driver>:<view>` deep link (bare `<driver>` = its first
-        /// view). Omit to open the TUI dashboard.
+        /// view) or a `/route?query`. Omit to open the TUI dashboard.
         target: Option<String>,
     },
     /// Print the pavo capability manifest (JSON).
@@ -405,8 +418,10 @@ fn schema_doc() -> Value {
                 "flags": {"--json": "bool"}
             },
             "view": {
-                "summary": "resolve + render a <driver>:<view> deep link",
-                "args": ["<driver>:<view>", "--param K=V (repeatable)"],
+                "summary": "resolve + render a <driver>:<view> deep link \
+                            or /route?query (declared view routes)",
+                "args": ["<driver>:<view> | /route?query",
+                         "--param K=V (repeatable — filter_param is one)"],
                 "flags": {"--format": "text|json|dot|mermaid|<plugin format>"}
             },
             "query": {
@@ -781,8 +796,10 @@ fn cmd_view(target: &str, params: &[String], format: &str) -> Result<(), Fail> {
 
 /// [`cmd_view`] over an explicit host — split for tests.
 fn cmd_view_host(host: &mut Host, target: &str, params: Params, format: &str) -> Result<(), Fail> {
-    let resolved = host.resolve_view(target, params)?;
-    let out = view_output(host, &resolved, target, format)?;
+    // `/route?query` deep links → `<driver>:<view>` + params.
+    let (target, params) = resolve_deep_link(host, target, params)?;
+    let resolved = host.resolve_view(&target, params)?;
+    let out = view_output(host, &resolved, &target, format)?;
     print!("{out}");
     Ok(())
 }
@@ -924,7 +941,13 @@ fn cmd_submit_host(
     values: Params,
     json: bool,
 ) -> Result<(), Fail> {
-    let result = host.submit(target, form, values)?;
+    // `/route?query` → ref; submit has no view-param channel, so
+    // route-derived params are dropped (noted on stderr).
+    let (target, route_params) = resolve_deep_link(host, target, Params::new())?;
+    if !route_params.is_empty() {
+        eprintln!("pavo: note — route query params don't apply to submit");
+    }
+    let result = host.submit(&target, form, values)?;
     if json {
         println!(
             "{}",
@@ -996,6 +1019,201 @@ fn split_view_ref(target: &str) -> Result<(String, Option<String>), Fail> {
             "malformed view ref '{target}' — expected <driver>:<view> or <driver>"
         ))),
     }
+}
+
+// ---------- `/route?query` deep links ----------
+//
+// `Action.route`, `ViewSpec.item_route`, `MenuEntry.route`, and
+// `ActionResult.route` all produce host-relative route strings like
+// `/myco/item?id=T-1`. The CLI is non-interactive, so "navigate"
+// means resolving the route back to a `<driver>:<view>` ref + view
+// params and rendering/invoking there. Matching is local to this
+// file (pavo-core stays transport-pure): every discovered
+// manifest's `ViewSpec.route` and `item_route` is a candidate
+// pattern.
+//
+// Limits (v1):
+// - Only *view* routes resolve — `contributes.routes` pages are
+//   driver-owned and have no `resolve_view` target.
+// - `{name}` placeholders match exactly one whole path segment and
+//   capture into a view param named `name` (`{item.id}` captures as
+//   `"item.id"`); literals must match segment-for-segment. The
+//   candidate's own `?query` template is ignored for matching —
+//   the request's query pairs become the params.
+// - Best match wins: fewest captures, then longest pattern.
+
+/// Match request path `segs` (decoded, split on `/`) against one
+/// candidate route `pattern` (`/myco/item/{item.id}?id={item.id}` —
+/// its query half is ignored). Returns the `{name}` captures on
+/// success.
+fn match_route_pattern(pattern: &str, segs: &[String]) -> Option<(Params, usize)> {
+    let pat_path = pattern.split(['?', '#']).next().unwrap_or(pattern);
+    let pat: Vec<&str> = pat_path.split('/').filter(|s| !s.is_empty()).collect();
+    if pat.len() != segs.len() {
+        return None;
+    }
+    let mut params = Params::new();
+    let mut captures = 0;
+    for (p, s) in pat.iter().zip(segs.iter()) {
+        if let Some(name) = p.strip_prefix('{').and_then(|x| x.strip_suffix('}')) {
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            params.insert(name.to_string(), Value::String(s.clone()));
+            captures += 1;
+        } else if p != s {
+            return None;
+        }
+    }
+    Some((params, captures))
+}
+
+/// Segment count of a candidate pattern's path half (scoring).
+fn route_pattern_len(pattern: &str) -> usize {
+    pattern
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(pattern)
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .count()
+}
+
+/// Resolve a `/path?query` route to a `<driver>:<view>` ref + view
+/// params by matching declared `ViewSpec.route`/`item_route`
+/// patterns across all discovered manifests. `None` when nothing
+/// matches — callers only invoke this for leading-`/` targets.
+///
+/// Query pairs become params via the same scalar rule as `--param`
+/// ([`http::param_json`]: JSON when possible, else string) and
+/// override `{name}` path captures on key conflicts.
+#[must_use]
+pub(crate) fn route_target(host: &Host, route: &str) -> Option<(String, Params)> {
+    let route = route.trim();
+    if !route.starts_with('/') {
+        return None;
+    }
+    let (path, query) = route.split_once('?').unwrap_or((route, ""));
+    let path = path.split('#').next().unwrap_or(path);
+    let segs: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(http::percent_decode)
+        .collect();
+    if segs.is_empty() {
+        return None;
+    }
+    // Deterministic scan: driver kinds sorted, manifest view order.
+    let mut kinds: Vec<String> = host.drivers().iter().map(|d| d.kind.clone()).collect();
+    kinds.sort();
+    // Best: (namespaced ref, captures, pattern len, is_item_route,
+    // capture params). `ViewSpec.route` is canonical — it outranks
+    // `item_route` templates on ties (an item_route like
+    // `/item?id={item.id}` shares its path with the detail view's
+    // own route and must not shadow it).
+    let mut best: Option<(String, usize, usize, bool, Params)> = None;
+    for kind in kinds {
+        let Ok(manifest) = host.manifest(&kind) else {
+            continue;
+        };
+        for spec in &manifest.views {
+            for (pattern, is_item_route) in [
+                (Some(spec.route.as_str()), false),
+                (spec.item_route.as_deref(), true),
+            ]
+            .into_iter()
+            .filter_map(|(p, i)| p.map(|p| (p, i)))
+            {
+                let Some((capture_params, captures)) = match_route_pattern(pattern, &segs) else {
+                    continue;
+                };
+                if std::env::var_os("PAVO_DEBUG_ROUTE").is_some() {
+                    eprintln!(
+                        "  candidate {kind}:{} pattern={pattern:?} captures={captures}",
+                        spec.id
+                    );
+                }
+                let plen = route_pattern_len(pattern);
+                let better = match &best {
+                    None => true,
+                    Some((_, bc, bl, bi, _)) => {
+                        (captures, std::cmp::Reverse(plen), is_item_route)
+                            < (*bc, std::cmp::Reverse(*bl), *bi)
+                    }
+                };
+                if better {
+                    best = Some((
+                        format!("{kind}:{}", spec.id),
+                        captures,
+                        plen,
+                        is_item_route,
+                        capture_params,
+                    ));
+                }
+            }
+        }
+    }
+    if std::env::var_os("PAVO_DEBUG_ROUTE").is_some() {
+        eprintln!("route_target({route:?}) -> {best:?}");
+    }
+    best.map(|(target, _, _, _, mut params)| {
+        for (k, v) in http::parse_query(query) {
+            if !k.is_empty() {
+                params.insert(k, http::param_json(&v));
+            }
+        }
+        (target, params)
+    })
+}
+
+/// Normalize a CLI target that may be a `/route?query` deep link:
+/// routes resolve to `<driver>:<view>` + params (explicit `params`
+/// win over route-derived ones); anything else passes through
+/// untouched. A leading-`/` target matching no declared route is a
+/// hard error — the driver-ref grammar never produces leading
+/// slashes, so it's unambiguously a route.
+fn resolve_deep_link(host: &Host, target: &str, params: Params) -> Result<(String, Params), Fail> {
+    if !target.trim_start().starts_with('/') {
+        return Ok((target.to_string(), params));
+    }
+    match route_target(host, target) {
+        Some((reference, mut route_params)) => {
+            for (k, v) in params {
+                route_params.insert(k, v);
+            }
+            Ok((reference, route_params))
+        }
+        None => Err(Fail::err(format!(
+            "unknown route '{target}' — no view route or item_route \
+             template matches (see `pavo views` for declared routes)"
+        ))),
+    }
+}
+
+/// The interpolation context for `Action.route`/`ActionResult.route`
+/// templates — the same shape [`interpolate_ctx_value`] builds for
+/// interactive hosts (`driver`/`view`/`data`/`target`/`params`/
+/// `item`). The view resolve is best-effort and usually cache-warm
+/// (`action_rows` already fetched it when the target names a view).
+fn invoke_ctx(
+    host: &Host,
+    target: &str,
+    view_params: &Params,
+    item_id: Option<&str>,
+    action_target: Option<&Value>,
+    params: &Params,
+) -> Value {
+    let driver = split_view_ref(target).map(|(d, _)| d).unwrap_or_default();
+    let view = host.resolve_view(target, view_params.clone()).ok();
+    let item = item_id.map(|id| json!({ "id": id }));
+    interpolate_ctx_value(
+        &driver,
+        view.as_ref().map(|r| &r.result),
+        action_target,
+        params,
+        item.as_ref(),
+    )
 }
 
 /// Collect the action rows visible at `target`: declared actions
@@ -1110,7 +1328,10 @@ fn cmd_actions_host(
     view_params: Params,
     json: bool,
 ) -> Result<(), Fail> {
-    let rows = action_rows(host, target, view_params, true)?;
+    // `/route?query` → ref; `--param` are view params here, so they
+    // merge over route-derived ones.
+    let (target, view_params) = resolve_deep_link(host, target, view_params)?;
+    let rows = action_rows(host, &target, view_params, true)?;
     if json {
         let out: Vec<Value> = rows
             .iter()
@@ -1124,6 +1345,7 @@ fn cmd_actions_host(
                     "danger": r.action.danger,
                     "keys": r.action.keys,
                     "target": r.action.target,
+                    "route": r.action.route,
                     "description": r.action.description,
                     "params": r.action.params,
                 })
@@ -1173,6 +1395,11 @@ fn cmd_actions_host(
         }
         if let Some(t) = &a.target {
             println!("    target: {t}");
+        }
+        // Route actions navigate instead of dispatching — surface
+        // the template where danger/params would otherwise lead.
+        if let Some(route) = &a.route {
+            println!("    → {route}");
         }
         if let Some(d) = &a.description {
             println!("    {}", d.lines().next().unwrap_or(""));
@@ -1395,13 +1622,22 @@ fn cmd_invoke_host(
     interactive: bool,
     json: bool,
 ) -> Result<(), Fail> {
-    // Locate the declaration (danger + param metadata). Best-effort:
-    // undeclared actions still dispatch — the driver is authoritative
-    // (ops-derived rows cover zero-declaration drivers).
-    let declared = action_rows(host, target, Params::new(), false)
+    // `/route?query` deep links → `<driver>:<view>`; route-derived
+    // params are *view* params (they feed the view resolve inside
+    // `action_rows`/`invoke_ctx`), never action params.
+    let (target, view_params) = resolve_deep_link(host, target, Params::new())?;
+    let target = target.as_str();
+
+    // Locate the declaration (danger + param metadata + route).
+    // Best-effort: undeclared actions still dispatch — the driver is
+    // authoritative (ops-derived rows cover zero-declaration
+    // drivers). The row is kept whole: item scope feeds `{item.*}`
+    // interpolation for route templates.
+    let declared_row = action_rows(host, target, view_params.clone(), false)
         .ok()
-        .and_then(|rows| rows.into_iter().find(|r| r.action.id == action))
-        .map(|r| r.action);
+        .and_then(|rows| rows.into_iter().find(|r| r.action.id == action));
+    let declared = declared_row.as_ref().map(|r| r.action.clone());
+    let item_id = declared_row.as_ref().and_then(|r| r.item_id.as_deref());
 
     if let Some(a) = &declared {
         check_danger(action, a.danger, action_target.as_ref(), yes)?;
@@ -1455,7 +1691,35 @@ fn cmd_invoke_host(
         )));
     }
 
-    let result = host.invoke(target, action, None, action_target, params.clone())?;
+    // Route actions navigate instead of dispatching — danger and
+    // params still applied host-side above (a form may collect
+    // params the template consumes), but no `invoke` wire op is
+    // sent. The interpolated route is the whole output.
+    if let Some(template) = declared.as_ref().and_then(|a| a.route.clone()) {
+        let ctx = invoke_ctx(
+            host,
+            target,
+            &view_params,
+            item_id,
+            action_target.as_ref(),
+            params,
+        );
+        let route = interpolate(&template, &ctx);
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "route": route }))
+                    .map_err(|e| Fail::err(e.to_string()))?
+            );
+        } else {
+            println!("{route}");
+        }
+        return Ok(());
+    }
+
+    // `action_target` is cloned — `ActionResult.route` interpolation
+    // below still needs it.
+    let result = host.invoke(target, action, None, action_target.clone(), params.clone())?;
     if json {
         println!(
             "{}",
@@ -1474,6 +1738,20 @@ fn cmd_invoke_host(
                 println!("(empty result)");
             }
             None => {}
+        }
+        // Driver-requested redirect — interpolate the route template
+        // over the invoke context and hint the destination. `--json`
+        // carries the raw template in `result.route` already.
+        if let Some(template) = &result.route {
+            let ctx = invoke_ctx(
+                host,
+                target,
+                &view_params,
+                item_id,
+                action_target.as_ref(),
+                params,
+            );
+            println!("→ {}", interpolate(template, &ctx));
         }
     }
     // Per-param errors mean the driver *rejected* the invoke (the
@@ -1591,21 +1869,23 @@ mod tests {
     /// Minimal sh fixture driver (`demo`) answering manifest + serve.
     const DEMO_DRIVER: &str = r#"#!/bin/sh
 if [ "$1" = manifest ]; then
-  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}}],"actions":[{"id":"refresh","label":"Refresh"},{"id":"rm","label":"Remove","danger":"confirm"},{"id":"wipe","label":"Wipe","danger":"type-target","target":"item"},{"id":"move","label":"Move","params":[{"name":"id","kind":"string","required":true},{"name":"pri","kind":"enum","options":["low","high"],"default":"low"}]}],"contributes":{"navbar":[{"id":"nav","title":"Nav","route":"/demo/board"}],"extra":{"sidebar":[{"id":"side","title":"Side","route":"/x"}]},"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]}}'
+  printf '%s\n' '{"name":"demo","title":"Demo","version":"1.0.0","verbs":["manifest","serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","queries":[{"name":"items","op":"query"}],"root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}},{"id":"item","title":"Item","route":"/demo/item","item_route":"/demo/item/{item.id}","root":{"kind":"kv","pairs":[]}}],"actions":[{"id":"refresh","label":"Refresh"},{"id":"rm","label":"Remove","danger":"confirm"},{"id":"wipe","label":"Wipe","danger":"type-target","target":"item"},{"id":"move","label":"Move","params":[{"name":"id","kind":"string","required":true},{"name":"pri","kind":"enum","options":["low","high"],"default":"low"}]},{"id":"open","label":"Open item","route":"/demo/item?id={target.id}"},{"id":"go","label":"Go next"}],"contributes":{"navbar":[{"id":"nav","title":"Nav","route":"/demo/board"}],"extra":{"sidebar":[{"id":"side","title":"Side","route":"/x"}]},"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]}}'
   exit 0
 fi
 if [ "$1" = serve ]; then
   while IFS= read -r line; do
     case "$line" in
-      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/demo/board","queries":["items"]}]}' ;;
+      *'"op":"views"'*) printf '%s\n' '{"ok":true,"result":[{"id":"board","title":"Board","route":"/demo/board","queries":["items"]},{"id":"item","title":"Item","route":"/demo/item","queries":[]}]}' ;;
+      *'"view":"item"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"item","title":"Item","route":"/demo/item","root":{"kind":"kv","pairs":[]}},"data":{}}}' ;;
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{"items":[1,2]}}}' ;;
       *'"query":"ops"'*) printf '%s\n' '{"ok":true,"result":{"query":"ops","data":{"engine":"demo","ops":[{"name":"cli.ping","doc":"Ping the engine","params":[{"name":"verbose","kind":"flag"}]}]}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
       *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
+      *'"action":"go"'*) printf '%s\n' '{"ok":true,"result":{"message":"moved","route":"/demo/item?id={target.id}"}}' ;;
       *'"op":"invoke"'*) printf '%s\n' '{"ok":true,"result":{"message":"invoked","data":{"applied":1}}}' ;;
       *'"op":"jobs"'*) printf '%s\n' '{"ok":true,"result":[{"id":"j1","title":"Build","status":"running"}]}' ;;
       *'"op":"notifications"'*) printf '%s\n' '{"ok":true,"result":[{"id":"n1","title":"Heads up","severity":"info"}]}' ;;
-      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}],"actions":[{"id":"refresh","label":"Refresh"},{"id":"rm","label":"Remove","danger":"confirm"},{"id":"wipe","label":"Wipe","danger":"type-target","target":"item"},{"id":"move","label":"Move","params":[{"name":"id","kind":"string","required":true},{"name":"pri","kind":"enum","options":["low","high"],"default":"low"}]}]}}' ;;
+      *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}},{"id":"item","title":"Item","route":"/demo/item","item_route":"/demo/item/{item.id}","root":{"kind":"kv","pairs":[]}}],"actions":[{"id":"refresh","label":"Refresh"},{"id":"rm","label":"Remove","danger":"confirm"},{"id":"wipe","label":"Wipe","danger":"type-target","target":"item"},{"id":"move","label":"Move","params":[{"name":"id","kind":"string","required":true},{"name":"pri","kind":"enum","options":["low","high"],"default":"low"}]},{"id":"open","label":"Open item","route":"/demo/item?id={target.id}"},{"id":"go","label":"Go next"}]}}' ;;
     esac
   done
   exit 0
@@ -2054,5 +2334,145 @@ exit 1
             false
         )
         .is_err());
+    }
+
+    #[test]
+    fn route_target_resolves_declared_routes() {
+        let host = fixture_host();
+        // Exact view route + query params (param_json scalar rule).
+        let (r, p) = route_target(&host, "/demo/item?id=T-1").unwrap();
+        assert_eq!(r, "demo:item");
+        assert_eq!(p["id"], json!("T-1"));
+        let (r, p) = route_target(&host, "/demo/item?n=5&ok=true").unwrap();
+        assert_eq!(r, "demo:item");
+        assert_eq!(p["n"], json!(5));
+        assert_eq!(p["ok"], json!(true));
+        // item_route path template captures {item.id} as "item.id".
+        let (r, p) = route_target(&host, "/demo/item/T-9").unwrap();
+        assert_eq!(r, "demo:item");
+        assert_eq!(p["item.id"], json!("T-9"));
+        // Bare route, no params.
+        let (r, p) = route_target(&host, "/demo/board").unwrap();
+        assert_eq!(r, "demo:board");
+        assert!(p.is_empty());
+        // Non-routes and unknown routes → None.
+        assert!(route_target(&host, "demo:board").is_none());
+        assert!(route_target(&host, "/nope/x").is_none());
+        assert!(route_target(&host, "/").is_none());
+        // Trailing slash tolerated.
+        assert_eq!(route_target(&host, "/demo/board/").unwrap().0, "demo:board");
+    }
+
+    #[test]
+    fn deep_link_normalization() {
+        let host = fixture_host();
+        // Non-route targets pass through with params intact.
+        let mut p = Params::new();
+        p.insert("a".into(), json!(1));
+        let (t, params) = resolve_deep_link(&host, "demo:board", p).ok().unwrap();
+        assert_eq!(t, "demo:board");
+        assert_eq!(params["a"], json!(1));
+        // Route → ref; explicit params override route-derived ones.
+        let mut p = Params::new();
+        p.insert("id".into(), json!("override"));
+        let (t, params) = resolve_deep_link(&host, "/demo/item?id=T-1", p)
+            .ok()
+            .unwrap();
+        assert_eq!(t, "demo:item");
+        assert_eq!(params["id"], json!("override"));
+        // Unknown route → error (leading '/' is unambiguously a route).
+        assert!(resolve_deep_link(&host, "/nope", Params::new()).is_err());
+    }
+
+    #[test]
+    fn view_and_actions_accept_route_deep_links() {
+        let mut host = fixture_host();
+        for target in ["/demo/item?id=T-1", "/demo/item/T-7", "/demo/board"] {
+            for fmt in ["text", "json"] {
+                cmd_view_host(&mut host, target, Params::new(), fmt)
+                    .ok()
+                    .unwrap();
+            }
+        }
+        cmd_actions_host(&mut host, "/demo/item?id=T-1", Params::new(), false)
+            .ok()
+            .unwrap();
+        cmd_actions_host(&mut host, "/demo/item?id=T-1", Params::new(), true)
+            .ok()
+            .unwrap();
+        cmd_submit_host(&mut host, "/demo/board", None, Params::new(), false)
+            .ok()
+            .unwrap();
+        assert!(cmd_view_host(&mut host, "/nope", Params::new(), "text").is_err());
+        assert!(cmd_actions_host(&mut host, "/nope", Params::new(), false).is_err());
+    }
+
+    #[test]
+    fn invoke_route_action_and_result_route() {
+        let mut host = fixture_host();
+        // Action.route → interpolated route printed, no wire invoke
+        // (text + --json). {target.id} resolves over --target.
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "open",
+            &mut Params::new(),
+            Some(json!({ "id": "T-1" })),
+            false,
+            false,
+            false,
+        )
+        .ok()
+        .unwrap();
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "open",
+            &mut Params::new(),
+            Some(json!({ "id": "T-1" })),
+            false,
+            false,
+            true,
+        )
+        .ok()
+        .unwrap();
+        // Route-shaped invoke target works too.
+        cmd_invoke_host(
+            &mut host,
+            "/demo/board",
+            "open",
+            &mut Params::new(),
+            Some(json!({ "id": "T-2" })),
+            false,
+            false,
+            false,
+        )
+        .ok()
+        .unwrap();
+        // ActionResult.route → real dispatch + `→ route` text hint.
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "go",
+            &mut Params::new(),
+            Some(json!({ "id": "T-3" })),
+            false,
+            false,
+            false,
+        )
+        .ok()
+        .unwrap();
+        cmd_invoke_host(
+            &mut host,
+            "demo:board",
+            "go",
+            &mut Params::new(),
+            Some(json!({ "id": "T-3" })),
+            false,
+            false,
+            true,
+        )
+        .ok()
+        .unwrap();
     }
 }
