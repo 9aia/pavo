@@ -5,8 +5,11 @@
 //! [`pavo_protocol::Action`] type): `DriverManifest.actions[]`,
 //! `NodeBase.actions[]` on any view node, and `TreeItem.actions[]`
 //! on tree rows. [`collect_actions`] folds them into one list a
-//! host can render (buttons, palette entries, keybindings);
-//! [`param_form_field`] maps a [`ParamSchema`] onto the existing
+//! host can render (buttons, palette entries, keybindings) —
+//! manifest-global first, then node actions in tree pre-order,
+//! then tree-item actions; when ids collide hosts dedupe with
+//! item > node > manifest precedence. [`param_form_field`] maps a
+//! [`ParamSchema`] onto the existing
 //! [`FormField`] widget set so hosts can auto-generate forms;
 //! [`validate_params`] is the shared client-side check (drivers
 //! stay authoritative — `ActionResult.errors` is the truth).
@@ -17,7 +20,8 @@
 //! per op, so every ops-manifest driver gets a mutation surface
 //! without declaring `actions[]`.
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 
 use pavo_protocol::wire::ViewResult;
 use pavo_protocol::{
@@ -40,10 +44,16 @@ pub enum ActionScope {
 }
 
 /// An [`Action`] plus the context needed to dispatch it.
+///
+/// `action`/`item_id` are [`Cow`]s: actions on literal tree items
+/// borrow straight out of the [`ViewResult`]; actions on
+/// query-bound tree items (the renderer resolves
+/// `data[node.query].items` lazily) are owned clones — same
+/// precedence as inline items, no caller-side materialization.
 #[derive(Clone, Debug)]
 pub struct ScopedAction<'a> {
     /// The action declaration.
-    pub action: &'a Action,
+    pub action: Cow<'a, Action>,
     /// Which declaration site it came from.
     pub scope: ActionScope,
     /// The view the action was found in (`ViewResult.view.id`) —
@@ -52,7 +62,7 @@ pub struct ScopedAction<'a> {
     pub view: Option<String>,
     /// For [`ActionScope::Item`] — the tree item's `id` (the
     /// natural `target` for the invoke request).
-    pub item_id: Option<&'a str>,
+    pub item_id: Option<Cow<'a, str>>,
 }
 
 fn collect_tree_items<'a>(
@@ -63,14 +73,26 @@ fn collect_tree_items<'a>(
     for item in items {
         for action in &item.actions {
             out.push(ScopedAction {
-                action,
+                action: Cow::Borrowed(action),
                 scope: ActionScope::Item,
                 view: view.clone(),
-                item_id: item.id.as_deref(),
+                item_id: item.id.as_deref().map(Cow::Borrowed),
             });
         }
         collect_tree_items(&item.children, view, out);
     }
+}
+
+/// Deserialize a query payload into tree items — accepts a bare
+/// `TreeItem[]` or `{"items": [...]}` (same shapes renderers
+/// accept).
+fn payload_tree_items(payload: &Value) -> Option<Vec<TreeItem>> {
+    let value = if payload.is_array() {
+        payload.clone()
+    } else {
+        payload.get("items")?.clone()
+    };
+    serde_json::from_value(value).ok()
 }
 
 /// Every action visible in `view_result`, in declaration order:
@@ -89,26 +111,63 @@ pub fn collect_actions<'a>(
         .actions
         .iter()
         .map(|action| ScopedAction {
-            action,
+            action: Cow::Borrowed(action),
             scope: ActionScope::Manifest,
             view: view.clone(),
             item_id: None,
         })
         .collect();
+    // Query-bound trees resolve `data[query].items` lazily in the
+    // renderers; do the same here so row actions survive. Resolved
+    // items are owned clones (see [`ScopedAction`]).
+    let mut resolved: HashMap<String, Vec<TreeItem>> = HashMap::new();
     walk(&view_result.view.root, &mut |node| {
         for action in &node.base().actions {
             out.push(ScopedAction {
-                action,
+                action: Cow::Borrowed(action),
                 scope: ActionScope::Node,
                 view: view.clone(),
                 item_id: None,
             });
         }
         if let ViewNode::Tree(tree) = node {
-            collect_tree_items(&tree.items, &view, &mut out);
+            if !tree.items.is_empty() {
+                collect_tree_items(&tree.items, &view, &mut out);
+            } else if let Some(query) = &tree.base.query {
+                let items = resolved.entry(query.clone()).or_insert_with(|| {
+                    view_result
+                        .data
+                        .get(query)
+                        .and_then(payload_tree_items)
+                        .unwrap_or_default()
+                });
+                collect_tree_items_owned(items, &view, &mut out);
+            }
         }
     });
     out
+}
+
+/// Item actions for an owned (query-resolved) item list. The
+/// source borrow is independent of `'a` — every field is cloned
+/// into the [`ScopedAction`], so the resolved-items cache may drop
+/// freely.
+fn collect_tree_items_owned<'a>(
+    items: &[TreeItem],
+    view: &Option<String>,
+    out: &mut Vec<ScopedAction<'a>>,
+) {
+    for item in items {
+        for action in &item.actions {
+            out.push(ScopedAction {
+                action: Cow::Owned(action.clone()),
+                scope: ActionScope::Item,
+                view: view.clone(),
+                item_id: item.id.clone().map(Cow::Owned),
+            });
+        }
+        collect_tree_items_owned(&item.children, view, out);
+    }
 }
 
 /// Manifest actions alone — for palette enumeration before any
@@ -430,9 +489,39 @@ mod tests {
                 ("deep", ActionScope::Item),
             ]
         );
-        assert_eq!(scoped[2].item_id, Some("i1"));
-        assert_eq!(scoped[3].item_id, Some("i3"));
+        assert_eq!(scoped[2].item_id.as_deref(), Some("i1"));
+        assert_eq!(scoped[3].item_id.as_deref(), Some("i3"));
         assert!(scoped.iter().all(|s| s.view.as_deref() == Some("v")));
+    }
+
+    #[test]
+    fn collect_actions_resolves_query_bound_tree_items() {
+        let manifest = manifest_with(vec![]);
+        let root: ViewNode = serde_json::from_value(json!({
+            "kind":"tree","query":"tasks","items":[]
+        }))
+        .unwrap();
+        let mut vr = view_result(root);
+        vr.data.insert(
+            "tasks".into(),
+            json!({"items":[
+                {"id":"T-1","label":"one","actions":[{"id":"done","label":"Done"}]},
+                {"id":"T-2","label":"two","children":[
+                    {"id":"T-3","label":"three","actions":[{"id":"cancel","label":"Cancel"}]}
+                ]}
+            ]}),
+        );
+        let scoped = collect_actions(&manifest, &vr);
+        let ids: Vec<(&str, ActionScope)> = scoped
+            .iter()
+            .map(|s| (s.action.id.as_str(), s.scope))
+            .collect();
+        assert_eq!(
+            ids,
+            [("done", ActionScope::Item), ("cancel", ActionScope::Item),]
+        );
+        assert_eq!(scoped[0].item_id.as_deref(), Some("T-1"));
+        assert_eq!(scoped[1].item_id.as_deref(), Some("T-3"));
     }
 
     #[test]
