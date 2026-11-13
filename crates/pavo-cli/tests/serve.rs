@@ -8,6 +8,11 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 
+use pavo_protocol::manifest::ViewSpec;
+use pavo_protocol::view_node::{NodeBase, TableNode, ViewNode};
+use pavo_protocol::Action;
+use pavo_testkit::fixture::FixtureDriver;
+
 /// Same fixture driver as cli.rs — eager manifest + serve wire.
 const DEMO: &str = r#"#!/bin/sh
 if [ "$1" = manifest ]; then
@@ -42,6 +47,7 @@ struct Serve {
     child: Child,
     port: u16,
     _tmp: tempfile::TempDir,
+    _fixtures: Vec<FixtureDriver>,
 }
 
 impl Drop for Serve {
@@ -54,6 +60,12 @@ impl Drop for Serve {
 /// Spawn `pavo serve --port 0` against the fixture driver; returns
 /// once the `listening …` line arrives.
 fn serve() -> Serve {
+    serve_with(Vec::new())
+}
+
+/// [`serve`] plus extra testkit [`FixtureDriver`]s installed on the
+/// fixture PATH (driver + `.fixture.json` copied into `bin`).
+fn serve_with(fixtures: Vec<FixtureDriver>) -> Serve {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -63,6 +75,29 @@ fn serve() -> Serve {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for fx in &fixtures {
+        let file = format!("tamias-driver-{}", fx.name());
+        std::fs::copy(fx.path(), bin.join(&file)).unwrap();
+        std::fs::copy(
+            fx.dir().join(format!("{file}.fixture.json")),
+            bin.join(format!("{file}.fixture.json")),
+        )
+        .unwrap();
+    }
+    // `pavo serve` gets PATH=<bin> only — the FixtureDriver is a
+    // Python script (`#!/usr/bin/env python3`), so link the real
+    // interpreter in (unix-only).
+    #[cfg(unix)]
+    if !fixtures.is_empty() {
+        let found = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .map(|d| std::path::PathBuf::from(d).join("python3"))
+            .find(|p| p.is_file());
+        if let Some(src) = found {
+            let _ = std::os::unix::fs::symlink(&src, bin.join("python3"));
+        }
     }
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_pavo"))
@@ -90,6 +125,7 @@ fn serve() -> Serve {
         child,
         port,
         _tmp: tmp,
+        _fixtures: fixtures,
     }
 }
 
@@ -319,4 +355,126 @@ fn builtin_landing_and_view_page() {
 
     let (status, _, _) = http_get(srv.port, "/view/ghost%3Ax");
     assert_eq!(status, 200); // page renders the error inline
+}
+
+// -- /api/invoke ---------------------------------------------------------
+// The web surface's action path end-to-end: POST body → Host::invoke →
+// ActionResult passthrough, driven by a pavo-testkit FixtureDriver.
+
+fn act(id: &str) -> Action {
+    serde_json::from_value(serde_json::json!({"id": id, "label": id})).unwrap()
+}
+
+fn act_full(id: &str, extra: serde_json::Value) -> Action {
+    let mut v = serde_json::json!({"id": id, "label": id});
+    if let (Some(base), Some(add)) = (v.as_object_mut(), extra.as_object()) {
+        for (k, val) in add {
+            base.insert(k.clone(), val.clone());
+        }
+    }
+    serde_json::from_value(v).unwrap()
+}
+
+/// `act` driver: one view + manifest actions — `refresh` (canned
+/// result), `rm` (confirm), `move` (required param), `fragile`
+/// (driver-side per-param errors).
+fn actions_driver() -> FixtureDriver {
+    let board = ViewSpec {
+        id: "board".to_string(),
+        title: "Board".to_string(),
+        route: "/act/board".to_string(),
+        description: None,
+        queries: vec![],
+        root: ViewNode::Table(TableNode {
+            base: NodeBase::default(),
+            ..Default::default()
+        }),
+        item_route: None,
+        filter_param: None,
+        refresh_ms: None,
+    };
+    FixtureDriver::builder("act")
+        .view(board)
+        .action(act("refresh"))
+        .action(act_full("rm", serde_json::json!({"danger": "confirm"})))
+        .action(act_full(
+            "move",
+            serde_json::json!({"params": [
+                {"name": "id", "kind": "string", "required": true}
+            ]}),
+        ))
+        .action(act("fragile"))
+        .invoke(
+            "refresh",
+            serde_json::json!({"message": "reloaded", "data": {"n": 2}}),
+        )
+        .invoke("fragile", serde_json::json!({"errors": {"note": "nope"}}))
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn api_invoke_end_to_end() {
+    let srv = serve_with(vec![actions_driver()]);
+
+    // ref + action + target + params → ActionResult passthrough.
+    let (status, _, body) = http_request(
+        srv.port,
+        "POST",
+        "/api/invoke",
+        r#"{"ref":"act:board","action":"refresh","target":{"id":"T-1"},"params":{"x":1}}"#,
+    );
+    assert_eq!(status, 200);
+    let v = json_body(&body);
+    assert_eq!(v["ok"], true, "{body}");
+    assert_eq!(v["result"]["message"], "reloaded");
+    assert_eq!(v["result"]["data"]["n"], 2);
+
+    // driver+view form; default dispatch echoes context.
+    let (status, _, body) = http_request(
+        srv.port,
+        "POST",
+        "/api/invoke",
+        r#"{"driver":"act","view":"board","action":"move","params":{"id":"T-9"}}"#,
+    );
+    assert_eq!(status, 200);
+    let v = json_body(&body);
+    assert_eq!(v["ok"], true, "{body}");
+    assert_eq!(v["result"]["data"]["params"]["id"], "T-9");
+
+    // Driver-side per-param errors stay ok:true on the wire — the
+    // web host reads `result.errors` (no confirmation gate here).
+    let (status, _, body) = http_request(
+        srv.port,
+        "POST",
+        "/api/invoke",
+        r#"{"ref":"act:board","action":"fragile"}"#,
+    );
+    assert_eq!(status, 200);
+    let v = json_body(&body);
+    assert_eq!(v["ok"], true, "{body}");
+    assert_eq!(v["result"]["errors"]["note"], "nope");
+
+    // ok:false from the driver surfaces as an error envelope.
+    let (status, _, body) = http_request(
+        srv.port,
+        "POST",
+        "/api/invoke",
+        r#"{"ref":"act:board","action":"ghost"}"#,
+    );
+    assert_ne!(status, 200);
+    assert_eq!(json_body(&body)["ok"], false);
+
+    // Bad bodies → 400; unknown driver → 404.
+    let (status, _, _) = http_request(srv.port, "POST", "/api/invoke", "{bad");
+    assert_eq!(status, 400);
+    let (status, _, _) = http_request(srv.port, "POST", "/api/invoke", r#"{"ref":"act:board"}"#);
+    assert_eq!(status, 400);
+    let (status, _, _) = http_request(
+        srv.port,
+        "POST",
+        "/api/invoke",
+        r#"{"driver":"ghost","action":"a"}"#,
+    );
+    assert_eq!(status, 404);
 }

@@ -491,6 +491,7 @@ while IFS= read -r line; do
     *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/fx/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]}},"data":{"items":[1]}}}' ;;
     *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2,3]}}' ;;
     *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
+    *'"op":"invoke"'*) printf '%s\n' '{"ok":true,"result":{"message":"done","data":{"applied":1},"errors":{"note":"required"}}}' ;;
     *'"op":"boom"'*) printf '%s\n' '{"ok":false,"error":"driver says no"}' ;;
     *'"op":"slow"'*) sleep 30 ;;
   esac
@@ -514,6 +515,15 @@ exit 0
         assert_eq!(q.data, serde_json::json!([1, 2, 3]));
         let s = client.submit("board", None, Params::new()).unwrap();
         assert_eq!(s.message.as_deref(), Some("saved"));
+        // invoke: view context + opaque target + params ride the
+        // wire; the ActionResult parses typed (errors map included).
+        let target = serde_json::json!({"id": "T-1"});
+        let r = client
+            .invoke(Some("board"), "task.done", Some(&target), Params::new())
+            .unwrap();
+        assert_eq!(r.message.as_deref(), Some("done"));
+        assert_eq!(r.data.unwrap()["applied"], 1);
+        assert_eq!(r.errors["note"], "required");
     }
 
     #[test]

@@ -957,6 +957,7 @@ if [ "$1" = serve ]; then
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/fx/board","root":{"kind":"kv","pairs":[]}},"data":{"items":[1,2]}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
       *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
+      *'"op":"invoke"'*) printf '%s\n' '{"ok":true,"result":{"message":"invoked","data":{"applied":2},"view":{"view":{"id":"board","title":"Board","route":"/fx/board","root":{"kind":"kv","pairs":[]}},"data":{"items":[1,2]}}}}' ;;
       *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"fx","title":"Fx","version":"0.1.0","verbs":["serve"],"capabilities":["pavo"],"views":[{"id":"board","title":"Board","route":"/fx/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
     esac
   done
@@ -1053,6 +1054,24 @@ exit 1
         ));
         // resolve again post-submit — the view cache was invalidated
         // for fx:board (refetch succeeds against the same fixture).
+        let v = host.resolve_view("fx:board", Params::new()).unwrap();
+        assert_eq!(v.result.data["items"], serde_json::json!([1, 2]));
+
+        // invoke: namespaced target + view context resolution +
+        // ActionResult passthrough (fresh `view` stays on the
+        // result, not the cache — same contract as submit).
+        let target = serde_json::json!({"id": "T-1"});
+        let r = host
+            .invoke("fx:board", "task.done", None, Some(target), Params::new())
+            .unwrap();
+        assert_eq!(r.message.as_deref(), Some("invoked"));
+        assert_eq!(r.data.unwrap()["applied"], 2);
+        assert_eq!(r.view.as_ref().map(|v| v.view.id.as_str()), Some("board"));
+        assert!(matches!(
+            host.invoke("fx:nope", "task.done", None, None, Params::new()),
+            Err(PavoError::UnknownView { .. })
+        ));
+        // Post-invoke the view cache was invalidated — refetch.
         let v = host.resolve_view("fx:board", Params::new()).unwrap();
         assert_eq!(v.result.data["items"], serde_json::json!([1, 2]));
     }

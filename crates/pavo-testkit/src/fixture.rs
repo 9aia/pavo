@@ -10,8 +10,8 @@
 //!   (what pavo discovery probes).
 //! - `tamias-driver-<name> capabilities` — advertises `pavo`/`serve`.
 //! - `tamias-driver-<name> serve` — the ndjson wire: `manifest`,
-//!   `views`, `view`, `query`, plus `ok:false` for unknown ops and
-//!   malformed JSON.
+//!   `views`, `view`, `query`, `invoke`, plus `ok:false` for unknown
+//!   ops and malformed JSON.
 //!
 //! Behaviour is driven by a sibling `<name>.fixture.json` config the
 //! builder writes next to the executable — manifest, view specs,
@@ -23,7 +23,7 @@ use std::io;
 use std::path::PathBuf;
 
 use pavo_protocol::manifest::ViewSpec;
-use pavo_protocol::DriverManifest;
+use pavo_protocol::{Action, DriverManifest};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -74,6 +74,8 @@ QUERY_ERRORS = CFG.get("query_errors") or {}
 VIEW_ERRORS = CFG.get("view_errors") or {}
 QUERIES = CFG.get("queries") or {}
 VIEWS = CFG.get("views") or []
+ACTIONS_CFG = CFG.get("actions") or []
+INVOKE = CFG.get("invoke") or {}
 TRANSCRIPT = CFG.get("transcript")
 MANIFEST = CFG.get("manifest")
 
@@ -114,6 +116,70 @@ def view_result(view_id):
     return None
 
 
+def action_specs():
+    """action id → declaration. Sources: the manifest's `actions[]`,
+    the config's `actions` list, `actions` arrays found while walking
+    the view specs (node/inline-item declarations), and the same
+    walk over query payloads (query-bound tree-item actions live in
+    `data`, not specs)."""
+    specs = {}
+
+    def note(a):
+        if isinstance(a, dict) and a.get("id"):
+            specs.setdefault(a["id"], a)
+
+    for a in (MANIFEST or {}).get("actions") or []:
+        note(a)
+    for a in ACTIONS_CFG:
+        note(a)
+
+    def walk(node):
+        if isinstance(node, dict):
+            for a in node.get("actions") or []:
+                note(a)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    for spec in VIEWS:
+        walk(spec)
+    for payload in QUERIES.values():
+        walk(payload)
+    return specs
+
+
+def invoke_dispatch(obj):
+    """`{"op":"invoke"}` — canned overrides win; otherwise declared
+    actions get a required-param check (the ecosystem convention:
+    missing required params → `errors`, still ok:true) and a default
+    ActionResult echoing the request context. Undeclared actions are
+    `ok:false`, like every real driver."""
+    aid = obj.get("action")
+    params = obj.get("params") or {}
+    if aid in INVOKE:
+        r = INVOKE[aid]
+        if isinstance(r, str):
+            return {"ok": False, "error": r}
+        return {"ok": True, "result": r}
+    spec = action_specs().get(aid)
+    if spec is None:
+        return {"ok": False, "error": "unknown action: %s" % aid}
+    errors = {}
+    for p in spec.get("params") or []:
+        name = p.get("name")
+        v = params.get(name)
+        if p.get("required") and (v is None or v == ""):
+            errors[name] = "required"
+    if errors:
+        return {"ok": True, "result": {"errors": errors}}
+    return {"ok": True, "result": {
+        "message": "invoked %s" % aid,
+        "data": {"action": aid, "view": obj.get("view"),
+                 "target": obj.get("target"), "params": params}}}
+
+
 def dispatch(obj):
     """Map a parsed request object to a response dict (or raw str)."""
     if TRANSCRIPT is not None:
@@ -146,6 +212,10 @@ def dispatch(obj):
         if q in QUERY_ERRORS:
             return {"ok": False, "error": QUERY_ERRORS[q]}
         return {"ok": True, "result": {"query": q, "data": QUERIES.get(q)}}
+    if op == "invoke":
+        if ERR_ALL:
+            return {"ok": False, "error": ERR_ALL}
+        return invoke_dispatch(obj)
     return {"ok": False, "error": "unknown op: %s" % op}
 
 
@@ -318,6 +388,8 @@ pub struct FixtureDriverBuilder {
     failure: Failure,
     transcript: Option<Transcript>,
     renderers: Vec<pavo_protocol::RendererDecl>,
+    actions: Vec<Action>,
+    invoke: Map<String, Value>,
 }
 
 impl FixtureDriverBuilder {
@@ -334,6 +406,8 @@ impl FixtureDriverBuilder {
             failure: Failure::default(),
             transcript: None,
             renderers: Vec::new(),
+            actions: Vec::new(),
+            invoke: Map::new(),
         }
     }
 
@@ -391,6 +465,38 @@ impl FixtureDriverBuilder {
         self
     }
 
+    /// Declare an [`Action`] — merged into the generated manifest's
+    /// `actions[]` and used by the `invoke` op's default dispatch
+    /// (required-param checks, echo result). With a custom
+    /// [`Self::manifest`] the actions still feed invoke param
+    /// metadata but aren't added to the manifest — declare them
+    /// there yourself.
+    #[must_use]
+    pub fn action(mut self, action: Action) -> Self {
+        self.actions.push(action);
+        self
+    }
+
+    /// Canned `invoke` result for `action_id` — `result` is answered
+    /// verbatim as the `ok:true` payload (an [`ActionResult`]-shaped
+    /// object: `message`/`errors`/`data`/`view`/`route`/`extra`).
+    /// Overrides the default dispatch for that action; undeclared
+    /// actions configured here still answer (fixture flexibility).
+    #[must_use]
+    pub fn invoke(mut self, action_id: &str, result: Value) -> Self {
+        self.invoke.insert(action_id.to_string(), result);
+        self
+    }
+
+    /// Make `invoke` for `action_id` answer `ok:false` with
+    /// `message` — the driver-rejection path.
+    #[must_use]
+    pub fn invoke_error(mut self, action_id: &str, message: &str) -> Self {
+        self.invoke
+            .insert(action_id.to_string(), Value::String(message.to_string()));
+        self
+    }
+
     /// Replace the failure-mode configuration.
     #[must_use]
     pub fn failure(mut self, failure: Failure) -> Self {
@@ -431,7 +537,7 @@ impl FixtureDriverBuilder {
             contributes: Default::default(),
             views: self.views.clone(),
             renderers: self.renderers.clone(),
-            actions: Vec::new(),
+            actions: self.actions.clone(),
         });
 
         let mut config = Map::new();
@@ -444,6 +550,13 @@ impl FixtureDriverBuilder {
             serde_json::to_value(&self.views).unwrap_or(Value::Null),
         );
         config.insert("queries".to_string(), Value::Object(self.queries.clone()));
+        config.insert(
+            "actions".to_string(),
+            serde_json::to_value(&self.actions).unwrap_or(Value::Null),
+        );
+        if !self.invoke.is_empty() {
+            config.insert("invoke".to_string(), Value::Object(self.invoke.clone()));
+        }
         if !self.query_errors.is_empty() {
             config.insert(
                 "query_errors".to_string(),

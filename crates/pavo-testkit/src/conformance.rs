@@ -14,9 +14,16 @@
 //!    map carries every declared query binding.
 //! 4. `{"op":"query","query":<name>"}` for every declared binding →
 //!    parses as [`QueryResult`].
-//! 5. Malformed requests — an unknown op and a non-JSON line — must
+//! 5. `{"op":"invoke","action":<id>"}` for every declared action —
+//!    manifest-global, node-scoped (`NodeBase.actions[]`), and
+//!    tree-item-scoped (`TreeItem.actions[]`, inline or query-bound)
+//!    — with the view/target context hosts would send → parses as
+//!    [`ActionResult`]. `route`/`driver`-scoped actions are skipped
+//!    (they don't dispatch over this driver's `invoke`). An
+//!    undeclared action id must answer `ok:false`.
+//! 6. Malformed requests — an unknown op and a non-JSON line — must
 //!    both get an `ok:false` [`Response`].
-//! 6. The process must still answer after all of the above (session
+//! 7. The process must still answer after all of the above (session
 //!    liveness across multiple requests).
 //!
 //! Transport failures (timeout, EOF, unparseable response lines)
@@ -27,8 +34,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use pavo_protocol::wire::{QueryResult, Response, ViewResult, ViewSummary};
-use pavo_protocol::DriverManifest;
+use pavo_protocol::wire::{ActionResult, QueryResult, Response, ViewResult, ViewSummary};
+use pavo_protocol::{Action, DriverManifest, TreeItem, ViewNode};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -59,6 +66,11 @@ pub enum Check {
     /// `query` op for a declared binding: transport failure,
     /// `ok:false`, or a result that doesn't parse as [`QueryResult`].
     Query,
+    /// `invoke` op for a declared action: transport failure,
+    /// `ok:false`, or a result that doesn't parse as [`ActionResult`].
+    Invoke,
+    /// `invoke` of an undeclared action id didn't get `ok:false`.
+    InvokeUnknown,
     /// Malformed requests (unknown op, non-JSON) didn't get `ok:false`.
     MalformedRejected,
     /// The session died or stopped answering partway through.
@@ -76,6 +88,8 @@ impl std::fmt::Display for Check {
             Self::View => "view",
             Self::ViewShape => "view_shape",
             Self::Query => "query",
+            Self::Invoke => "invoke",
+            Self::InvokeUnknown => "invoke_unknown",
             Self::MalformedRejected => "malformed_rejected",
             Self::SessionAlive => "session_alive",
         };
@@ -237,6 +251,12 @@ pub fn check_driver_with(driver: &Path, options: CheckOptions) -> Vec<Violation>
         }
     }
 
+    // Action probes collected while serving views — node/item-scoped
+    // declarations live inside ViewResults; manifest-global ones are
+    // added once `view_ids` is known (they still get a view context,
+    // like `Host::invoke` always sends).
+    let mut probes: Vec<InvokeProbe> = Vec::new();
+
     for id in &view_ids {
         let request = json!({"op": "view", "view": id});
         let Some(value) = typed_call(&mut session, request, timeout, Check::View, &mut out) else {
@@ -261,6 +281,7 @@ pub fn check_driver_with(driver: &Path, options: CheckOptions) -> Vec<Violation>
                 for name in result.view.queries.iter().map(|b| b.name.clone()) {
                     binding_names.insert(name);
                 }
+                probes.extend(view_action_probes(&result));
             }
             Err(e) => out.push(violation(
                 Check::View,
@@ -282,7 +303,67 @@ pub fn check_driver_with(driver: &Path, options: CheckOptions) -> Vec<Violation>
         }
     }
 
-    // -- 5. malformed requests must get ok:false ------------------------
+    // -- 5. invoke per declared action ----------------------------------
+    // Manifest-global actions dispatch with the driver's first view as
+    // context (what `Host::invoke` falls back to); no view context at
+    // all when the driver declares none.
+    if let Some(m) = &manifest {
+        for a in &m.actions {
+            if dispatchable(a) {
+                probes.push(InvokeProbe {
+                    view: view_ids.first().cloned(),
+                    action: a.id.clone(),
+                    target: None,
+                });
+            }
+        }
+    }
+
+    // Dedupe identical wire requests — the same action id declared at
+    // several scopes collapses to one probe per distinct context.
+    let mut seen_requests = BTreeSet::new();
+    for probe in &probes {
+        let mut request = json!({"op": "invoke", "action": probe.action, "params": {}});
+        if let Some(v) = &probe.view {
+            request["view"] = json!(v);
+        }
+        if let Some(t) = &probe.target {
+            request["target"] = t.clone();
+        }
+        if !seen_requests.insert(serde_json::to_string(&request).unwrap_or_default()) {
+            continue;
+        }
+        if let Some(value) = typed_call(&mut session, request, timeout, Check::Invoke, &mut out) {
+            if let Err(e) = serde_json::from_value::<ActionResult>(value) {
+                out.push(violation(
+                    Check::Invoke,
+                    format!(
+                        "invoke '{}' result isn't an ActionResult: {e}",
+                        probe.action
+                    ),
+                ));
+            }
+        }
+    }
+
+    // An undeclared action id must be rejected — `ok:false` is the
+    // contract for undispatchable actions (unknown op, unknown
+    // action). Runs even for action-less drivers: `ok:false` is the
+    // right answer there too.
+    let bogus = json!({"op": "invoke", "action": "pavo.conformance.no-such-action"});
+    match session.call(&bogus, timeout) {
+        Ok(resp) if !resp.ok => {}
+        Ok(resp) => out.push(violation(
+            Check::InvokeUnknown,
+            format!(
+                "undeclared action got ok:true: {}",
+                serde_json::to_string(&resp.result.unwrap_or(Value::Null)).unwrap_or_default()
+            ),
+        )),
+        Err(e) => out.push(violation(Check::InvokeUnknown, wire_detail(&bogus, &e))),
+    }
+
+    // -- 6. malformed requests must get ok:false ------------------------
     for raw in ["{\"op\":\"bogus\"}", "this is not json"] {
         match session.request_raw(raw, timeout) {
             Ok(line) => match serde_json::from_str::<Response>(&line) {
@@ -303,7 +384,7 @@ pub fn check_driver_with(driver: &Path, options: CheckOptions) -> Vec<Violation>
         }
     }
 
-    // -- 6. session still alive -----------------------------------------
+    // -- 7. session still alive -----------------------------------------
     match session.call(&json!({"op": "views"}), timeout) {
         Ok(resp) if resp.ok => {}
         Ok(resp) => out.push(violation(
@@ -317,6 +398,120 @@ pub fn check_driver_with(driver: &Path, options: CheckOptions) -> Vec<Violation>
     }
 
     out
+}
+
+/// One `invoke` probe — the wire fields a host would send for a
+/// declared action.
+struct InvokeProbe {
+    /// View-id context (`None` only for manifest-global actions on
+    /// view-less drivers).
+    view: Option<String>,
+    /// The action id.
+    action: String,
+    /// Opaque target — `{"id": …}` for item-scoped actions.
+    target: Option<Value>,
+}
+
+/// Whether an [`Action`] dispatches over *this* driver's `invoke`.
+/// `route` actions navigate host-locally (no wire round-trip, per
+/// protocol); `driver`-scoped actions name another driver's serve —
+/// v1 hosts may treat them as local, but the declaring driver isn't
+/// obligated to resolve the id, so probing would risk false
+/// violations.
+fn dispatchable(a: &Action) -> bool {
+    a.route.is_none() && a.driver.is_none()
+}
+
+/// Node- and tree-item-scoped action probes declared inside one
+/// served [`ViewResult`] — node actions first (pre-order), then
+/// tree-item actions (inline items, else query-bound `data` items —
+/// same resolution rule renderers/hosts use). Item probes are
+/// deduped to one per action id per view (first item wins) so a
+/// 1000-row tree doesn't turn into 1000 invokes.
+fn view_action_probes(result: &ViewResult) -> Vec<InvokeProbe> {
+    let view = result.view.id.clone();
+    let mut probes = Vec::new();
+    let mut seen_node = BTreeSet::new();
+    let mut seen_item = BTreeSet::new();
+    walk_view_node(&result.view.root, &mut |node| {
+        for a in &node.base().actions {
+            if dispatchable(a) && seen_node.insert(a.id.clone()) {
+                probes.push(InvokeProbe {
+                    view: Some(view.clone()),
+                    action: a.id.clone(),
+                    target: None,
+                });
+            }
+        }
+        if let ViewNode::Tree(tree) = node {
+            if !tree.items.is_empty() {
+                collect_item_probes(&tree.items, &view, &mut seen_item, &mut probes);
+            } else if let Some(items) = tree
+                .base
+                .query
+                .as_ref()
+                .and_then(|q| result.data.get(q))
+                .and_then(payload_tree_items)
+            {
+                collect_item_probes(&items, &view, &mut seen_item, &mut probes);
+            }
+        }
+    });
+    probes
+}
+
+/// `TreeItem[]` or `{"items": [...]}` — the two payload shapes tree
+/// query bindings carry (mirrors `pavo_core::actions`).
+fn payload_tree_items(payload: &Value) -> Option<Vec<TreeItem>> {
+    let value = if payload.is_array() {
+        payload.clone()
+    } else {
+        payload.get("items")?.clone()
+    };
+    serde_json::from_value(value).ok()
+}
+
+/// Item-scoped probes for one item list, recursing into `children`.
+fn collect_item_probes(
+    items: &[TreeItem],
+    view: &str,
+    seen: &mut BTreeSet<String>,
+    out: &mut Vec<InvokeProbe>,
+) {
+    for item in items {
+        for a in &item.actions {
+            if dispatchable(a) && seen.insert(a.id.clone()) {
+                out.push(InvokeProbe {
+                    view: Some(view.to_string()),
+                    action: a.id.clone(),
+                    // The canonical item target hosts send —
+                    // `{"id": <item-id>}` (see
+                    // `pavo_core::commands` dispatch).
+                    target: item.id.as_ref().map(|id| json!({"id": id})),
+                });
+            }
+        }
+        collect_item_probes(&item.children, view, seen, out);
+    }
+}
+
+/// A node's children — `panel`/`row`/`column` nest `Vec<ViewNode>`;
+/// every other kind is a leaf (mirrors `pavo_core::viewnode`).
+fn view_node_children(node: &ViewNode) -> &[ViewNode] {
+    match node {
+        ViewNode::Panel(n) => &n.children,
+        ViewNode::Row(n) => &n.children,
+        ViewNode::Column(n) => &n.children,
+        _ => &[],
+    }
+}
+
+/// Depth-first pre-order walk over a [`ViewNode`] tree.
+fn walk_view_node<'a>(node: &'a ViewNode, f: &mut impl FnMut(&'a ViewNode)) {
+    f(node);
+    for child in view_node_children(node) {
+        walk_view_node(child, f);
+    }
 }
 
 /// One wire round-trip → the `result` value on `ok:true`.
@@ -351,8 +546,9 @@ fn typed_call(
 fn wire_detail(request: &Value, e: &WireError) -> String {
     let op = request.get("op").and_then(Value::as_str).unwrap_or("?");
     let extra = request
-        .get("view")
-        .or_else(|| request.get("query"))
+        .get("query")
+        .or_else(|| request.get("action"))
+        .or_else(|| request.get("view"))
         .and_then(Value::as_str)
         .map(|s| format!(" '{s}'"))
         .unwrap_or_default();
