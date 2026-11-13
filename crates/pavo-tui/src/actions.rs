@@ -667,6 +667,7 @@ mod tests {
             target: None,
             description: None,
             driver: None,
+            route: None,
         }
     }
 
@@ -834,6 +835,8 @@ mod tests {
                 icon: None,
                 action: Some("todo.add".into()),
                 route: None,
+                command: None,
+                keys: vec![],
                 keywords: vec!["create".into()],
                 section: Some("myco".into()),
                 priority: 1,

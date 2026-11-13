@@ -31,6 +31,11 @@
 //!   (`find_nodes`, `collect_queries`, KV degradation).
 //! - [`renderers`] — renderer-plugin registry: manifest `renderers[]`
 //!   declarations → kind claims, conflict resolution, `render` ops.
+//! - [`commands`] — the unified command layer: the
+//!   `action:`/`route:`/`host.`/`driver:` grammar, route-template
+//!   interpolation, host builtins, and effective keybindings.
+//! - [`keymap`] — [`keymap::KeySpec`], the shared keybinding-spec
+//!   grammar hosts validate/normalize against.
 //! - [`paths`] — `<tamias-home>` resolution (`$TAMIAS_HOME` →
 //!   `$XDG_DATA_HOME/tamias` → `~/.local/share/tamias` → `./.tamias`).
 //! - [`cache`] — small TTL cache for view models.
@@ -42,10 +47,12 @@
 pub mod actions;
 pub mod cache;
 pub mod client;
+pub mod commands;
 pub mod deps;
 pub mod discovery;
 pub mod error;
 pub mod host;
+pub mod keymap;
 pub mod merge;
 pub mod paths;
 pub mod renderers;
@@ -57,10 +64,17 @@ pub use actions::{
 };
 pub use cache::TtlCache;
 pub use client::{ClientConfig, DriverClient};
+pub use commands::{
+    action_binding_source, builtin_binding_sources, effective_bindings, interpolate,
+    interpolate_ctx_value, item_value, menu_binding_source, menu_command, resolve_command,
+    resolve_menu_entry, BindingSource, BuiltinDecl, Command, CommandBinding, HostBuiltin,
+    ResolveContext, Resolved, ResolvedInvoke, BUILTINS,
+};
 pub use deps::{order as order_drivers, DepsError};
 pub use discovery::{discover, discover_with, DiscoveryOptions, DriverInfo};
 pub use error::PavoError;
 pub use host::{FeedEntry, Host, ResolvedView, RouteEntry, RouteKind, ViewEntry};
+pub use keymap::KeySpec;
 pub use merge::{merge_chrome, Chrome, SlotEntry};
 pub use paths::{drivers_dir, tamias_home};
 pub use renderers::{plugin_nodes, PluginNode, RendererBinding, RendererRegistry};

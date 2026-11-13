@@ -41,6 +41,8 @@ fn spec(id: &str, queries: &[&str]) -> ViewSpec {
             },
             ..Default::default()
         }),
+        item_route: None,
+        filter_param: None,
     }
 }
 

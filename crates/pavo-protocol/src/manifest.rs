@@ -289,13 +289,12 @@ fn default_priority() -> i32 {
 /// One entry in a [`Contributes::menus`] slot — a command-palette /
 /// quick-launch item.
 ///
-/// An entry either invokes an action (`action` set — the driver +
-/// action id resolved like the `invoke` op) or navigates (`route`
-/// set — same resolution as [`Contribution::route`]). At least one
-/// of the two should be present; entries with neither are display
-/// headers/section labels. `keywords` feed host-side fuzzy matching
-/// (dmenu-style): users find entries by typing any keyword, not
-/// just the title.
+/// An entry resolves to a **command** — `command` when set (the
+/// unified grammar: `action:<id>` | `route:<path>` | `host.<builtin>`
+/// | `driver:<name>:<id>`), else the legacy `action`/`route` pair —
+/// or is display-only (a section label). `keywords` feed host-side
+/// fuzzy matching (dmenu-style): users find entries by typing any
+/// keyword, not just the title.
 ///
 /// Wire shape:
 ///
@@ -321,9 +320,23 @@ pub struct MenuEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     /// Route to navigate to instead of invoking — same semantics
-    /// as [`Contribution::route`].
+    /// as [`Contribution::route`]. May carry `{…}` template
+    /// placeholders (see [`crate::action::Action::route`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
+    /// Generic command target — the unified command grammar
+    /// (`action:<id>` | `route:<path>` | `host.<builtin>` |
+    /// `driver:<name>:<id>`; see `pavo_core::commands`). When
+    /// present it **wins** over `action`/`route`; the legacy fields
+    /// stay for compat. Entries whose command doesn't parse are
+    /// display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Suggested keyboard bindings for this entry — same role as
+    /// [`crate::action::Action::keys`]: declarations suggest, the
+    /// host's user keymap overrides by command id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
     /// Extra fuzzy-match terms — aliases, synonyms, related ids.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
@@ -357,6 +370,24 @@ pub struct ViewSpec {
     pub queries: Vec<QueryBinding>,
     /// The declarative UI tree — the renderers' input.
     pub root: ViewNode,
+    /// Per-view row-navigation template — when set, activating a
+    /// [`crate::view_node::TreeItem`] (Enter/click) navigates the
+    /// host to this interpolated route instead of doing nothing.
+    /// Template placeholders resolve over the item:
+    /// `{item.id}`, `{item.label}`, `{item.<prop>}` (item `props`
+    /// keys are addressable directly — see
+    /// `pavo_core::commands::interpolate`). Example:
+    /// `"/myco/item?id={item.id}"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_route: Option<String>,
+    /// Names this view's free-text filter query param — the
+    /// convention is `"q"`. The host's `host.filter` builtin opens a
+    /// filter dialog that re-resolves the view with
+    /// `params[<filter_param>]` set; no new wire op. When absent,
+    /// `host.filter` falls back to `"q"` if the view's query
+    /// bindings accept it, else the builtin is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_param: Option<String>,
 }
 
 /// A named query binding inside a [`ViewSpec`]: `name` is what
@@ -382,4 +413,63 @@ pub struct QueryBinding {
     /// Static params merged into every invocation of this binding.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub params: Map<String, Value>,
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use serde_json::json;
+
+    /// `MenuEntry.command`/`keys` and `ViewSpec.item_route`/
+    /// `filter_param` — additive optional fields: absent defaults,
+    /// present round-trips, unknown siblings ignored.
+    #[test]
+    fn menu_entry_and_view_spec_new_fields() {
+        let m: MenuEntry = serde_json::from_value(json!({
+            "id":"go","title":"Go","command":"route:/myco/item?id={item.id}",
+            "keys":["g i"],"future":true
+        }))
+        .unwrap();
+        assert_eq!(m.command.as_deref(), Some("route:/myco/item?id={item.id}"));
+        assert_eq!(m.keys, vec!["g i".to_string()]);
+        assert!(m.action.is_none() && m.route.is_none());
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["command"], "route:/myco/item?id={item.id}");
+        assert_eq!(v["keys"], json!(["g i"]));
+        assert!(v.get("future").is_none());
+
+        // Legacy-only entry still parses clean.
+        let legacy: MenuEntry = serde_json::from_value(json!({
+            "id":"x","title":"X","action":"todo.add","route":"/v"
+        }))
+        .unwrap();
+        assert!(legacy.command.is_none());
+        assert!(legacy.keys.is_empty());
+
+        let spec: ViewSpec = serde_json::from_value(json!({
+            "id":"board","title":"Board","route":"/myco/board",
+            "item_route":"/myco/item?id={item.id}",
+            "filter_param":"q",
+            "root":{"kind":"kv","pairs":[]}
+        }))
+        .unwrap();
+        assert_eq!(spec.item_route.as_deref(), Some("/myco/item?id={item.id}"));
+        assert_eq!(spec.filter_param.as_deref(), Some("q"));
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v["item_route"], "/myco/item?id={item.id}");
+        assert_eq!(v["filter_param"], "q");
+
+        let bare: ViewSpec = serde_json::from_value(json!({
+            "id":"v","title":"V","route":"/v","root":{"kind":"kv"}
+        }))
+        .unwrap();
+        assert!(bare.item_route.is_none());
+        assert!(bare.filter_param.is_none());
+        assert!(serde_json::to_value(&bare)
+            .unwrap()
+            .get("item_route")
+            .is_none());
+    }
 }

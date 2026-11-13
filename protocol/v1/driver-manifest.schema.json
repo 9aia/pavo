@@ -222,6 +222,14 @@
         },
         "root": {
           "$ref": "view-node.schema.json"
+        },
+        "item_route": {
+          "type": "string",
+          "description": "Per-view row-navigation template — Enter/click on a tree item navigates to this interpolated route ({item.id}, {item.<prop>}, …)."
+        },
+        "filter_param": {
+          "type": "string",
+          "description": "Names the view's free-text filter query param (convention \"q\") — enables the host.filter builtin; submit re-resolves the view with params[<name>]."
         }
       }
     },
@@ -471,6 +479,10 @@
         "driver": {
           "type": "string",
           "description": "Cross-driver target — reserved; v1 hosts may ignore it."
+        },
+        "route": {
+          "type": "string",
+          "description": "Navigate-instead-of-dispatch — a route template ({target.id}, {params.x}, {item.id}, …) the host interpolates and navigates to locally; no invoke round-trip."
         }
       }
     },
@@ -498,7 +510,18 @@
         },
         "route": {
           "type": "string",
-          "description": "Route to navigate to instead of invoking."
+          "description": "Route to navigate to instead of invoking — may carry {…} template placeholders."
+        },
+        "command": {
+          "type": "string",
+          "description": "Generic command target — action:<id> | route:<path> | host.<builtin> | driver:<name>:<id>. Wins over action/route when present; unparseable commands are display-only."
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Suggested keyboard bindings — declarations suggest; the host user keymap overrides by command id."
         },
         "keywords": {
           "type": "array",

@@ -385,6 +385,8 @@ fn view_spec() -> BoxedStrategy<ViewSpec> {
             description,
             queries,
             root,
+            item_route: None,
+            filter_param: None,
         })
         .boxed()
 }

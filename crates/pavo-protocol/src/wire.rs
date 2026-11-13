@@ -365,6 +365,16 @@ pub struct ActionResult {
     /// refresh-after-mutation path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<Box<ViewResult>>,
+    /// Driver-requested redirect — a route **template** (same
+    /// `{…}` syntax and context as [`crate::action::Action::route`])
+    /// the host should interpolate over the invoke context
+    /// (`target`/`params`/`item`/`view`) and navigate to *after*
+    /// applying `view`/`data`. Lets a driver turn "mark done" into
+    /// "navigate to the next item" without the host hard-coding
+    /// product routes. Hosts that don't implement navigation may
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
     /// Forward-compat catch-all.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -548,6 +558,26 @@ mod tests {
             serde_json::to_string(&Request::Notifications).unwrap(),
             r#"{"op":"notifications"}"#
         );
+    }
+
+    /// `ActionResult.route` — the driver-redirect field — parses,
+    /// round-trips, defaults absent, and survives unknown siblings.
+    #[test]
+    fn action_result_route_field() {
+        let r: ActionResult = serde_json::from_value(json!({
+            "message":"done",
+            "route":"/myco/next?id={target.id}",
+            "extra_future": 1
+        }))
+        .unwrap();
+        assert_eq!(r.route.as_deref(), Some("/myco/next?id={target.id}"));
+        assert_eq!(r.extra["extra_future"], json!(1));
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["route"], "/myco/next?id={target.id}");
+
+        let bare = ActionResult::default();
+        assert!(bare.route.is_none());
+        assert!(serde_json::to_value(&bare).unwrap().get("route").is_none());
     }
 
     /// Unknown ops still fail; `submit` joined the v1 op set.

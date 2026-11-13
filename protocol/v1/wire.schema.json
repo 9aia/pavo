@@ -478,6 +478,10 @@
         "data": {},
         "view": {
           "$ref": "#/defs/viewResult"
+        },
+        "route": {
+          "type": "string",
+          "description": "Driver-requested redirect — a route template ({target.id}, {params.x}, …) the host interpolates over the invoke context and navigates to after applying view/data."
         }
       }
     }

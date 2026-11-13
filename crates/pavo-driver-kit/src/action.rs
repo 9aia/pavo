@@ -30,6 +30,7 @@ pub fn action(id: impl Into<String>, label: impl Into<String>) -> ActionBuilder 
             target: None,
             description: None,
             driver: None,
+            route: None,
         },
     }
 }
@@ -105,6 +106,16 @@ impl ActionBuilder {
     #[must_use]
     pub fn driver(mut self, driver: impl Into<String>) -> Self {
         self.action.driver = Some(driver.into());
+        self
+    }
+
+    /// Navigate-instead-of-dispatch — a route template the host
+    /// interpolates and navigates to locally when the action is
+    /// activated (`{target.id}`, `{params.x}`, `{item.id}`, …; see
+    /// `pavo_core::commands::interpolate`). No `invoke` round-trip.
+    #[must_use]
+    pub fn route(mut self, route: impl Into<String>) -> Self {
+        self.action.route = Some(route.into());
         self
     }
 
@@ -253,6 +264,8 @@ pub fn menu(id: impl Into<String>, title: impl Into<String>) -> MenuBuilder {
             icon: None,
             action: None,
             route: None,
+            command: None,
+            keys: Vec::new(),
             keywords: Vec::new(),
             section: None,
             priority: 100,
@@ -277,6 +290,31 @@ impl MenuBuilder {
     #[must_use]
     pub fn route(mut self, route: impl Into<String>) -> Self {
         self.entry.route = Some(route.into());
+        self
+    }
+
+    /// Generic command target — the unified grammar
+    /// (`action:<id>` | `route:<path>` | `host.<builtin>` |
+    /// `driver:<name>:<id>`; see `pavo_core::commands`). Wins over
+    /// `action`/`route` when both are set.
+    #[must_use]
+    pub fn command(mut self, command: impl Into<String>) -> Self {
+        self.entry.command = Some(command.into());
+        self
+    }
+
+    /// Add a suggested key binding for this entry (same role as
+    /// `Action.keys` — the host keymap may override).
+    #[must_use]
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.entry.keys.push(key.into());
+        self
+    }
+
+    /// Set all suggested keys at once.
+    #[must_use]
+    pub fn keys(mut self, keys: Vec<String>) -> Self {
+        self.entry.keys = keys;
         self
     }
 

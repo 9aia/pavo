@@ -2161,6 +2161,8 @@ mod tests {
             description: None,
             queries: Vec::new(),
             root: serde_json::from_value(kv_root()).unwrap(),
+            item_route: None,
+            filter_param: None,
         }
     }
 
@@ -2677,6 +2679,7 @@ mod tests {
                 target: None,
                 description: None,
                 driver: None,
+                route: None,
             },
             scope: pavo_core::ActionScope::Manifest,
             target: "demo:board".to_string(),

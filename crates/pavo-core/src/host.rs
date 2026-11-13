@@ -664,7 +664,12 @@ impl Host {
     /// `driver:view` is invalidated — actions mutate driver state,
     /// so the next `resolve_view` must re-fetch (a returned
     /// [`ActionResult::view`] is *not* inserted into the cache; it
-    /// belongs to the invoking renderer).
+    /// belongs to the invoking renderer). When the result carries
+    /// [`ActionResult::route`] — a driver-requested redirect
+    /// template — the host should interpolate it over the invoke
+    /// context ([`crate::commands::interpolate`], same `{…}`
+    /// syntax as [`pavo_protocol::Action::route`]) and navigate
+    /// locally; `Host::invoke` itself stays transport-pure.
     ///
     /// # Errors
     /// [`PavoError::BadViewRef`] / [`PavoError::UnknownDriver`] /

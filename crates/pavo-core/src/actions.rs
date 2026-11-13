@@ -350,6 +350,7 @@ pub fn ops_actions(manifest: &Value) -> Vec<Action> {
             target: None,
             description: (!doc.is_empty()).then(|| doc.to_string()),
             driver: None,
+            route: None,
         });
     }
     out
@@ -443,6 +444,8 @@ mod tests {
                 description: None,
                 queries: vec![],
                 root,
+                item_route: None,
+                filter_param: None,
             },
             data: Map::new(),
         }
@@ -460,6 +463,7 @@ mod tests {
             target: None,
             description: None,
             driver: None,
+            route: None,
         };
         let manifest = manifest_with(vec![done.clone()]);
         let root: ViewNode = serde_json::from_value(json!({
