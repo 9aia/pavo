@@ -204,9 +204,19 @@ def query_data(name, params):
         return counts()
     if name == "items":
         return {"items": tree_items()}
-    if name == "tasks" and params.get("status"):
-        wanted = params["status"]
-        return [t for t in TASKS if t["status"] == wanted]
+    if name == "task":
+        task = find_task(str(params.get("id", "")))
+        return task if task else {"error": "unknown task %s" % params.get("id")}
+    if name == "tasks":
+        rows = TASKS
+        if params.get("status"):
+            wanted = params["status"]
+            rows = [t for t in rows if t["status"] == wanted]
+        if params.get("q"):
+            needle = str(params["q"]).lower()
+            rows = [t for t in rows
+                    if needle in t["title"].lower() or needle in t["id"].lower()]
+        return rows
     return QUERIES.get(name)
 
 
@@ -221,8 +231,9 @@ VIEWS = [
         "id": "board",
         "title": "Board",
         "route": "/actions/board",
+        "filter_param": "q",
         "description": "Tasks as a table — try the node action and "
-                       "the task.* manifest actions.",
+                       "the task.* manifest actions. `/` filters.",
         "queries": [q("tasks"), q("counts"), q("members")],
         "root": {
             "kind": "column",
@@ -259,15 +270,29 @@ VIEWS = [
         "id": "backlog",
         "title": "Backlog",
         "route": "/actions/backlog",
+        "item_route": "/actions/item?id={item.id}",
         "description": "Task tree with per-row actions — select a row "
                        "and invoke task.done / task.archive / "
-                       "task.delete.",
+                       "task.delete. Enter opens the item route.",
         "queries": [q("items")],
         "root": {
             "kind": "tree",
             "title": "Backlog",
             "query": "items",
             "expandable": True,
+        },
+    },
+    {
+        "id": "item",
+        "title": "Task",
+        "route": "/actions/item",
+        "description": "Single task — reached via item_route from the "
+                       "backlog tree (`/actions/item?id=A-001`).",
+        "queries": [q("task")],
+        "root": {
+            "kind": "kv",
+            "title": "Task",
+            "query": "task",
         },
     },
 ]
