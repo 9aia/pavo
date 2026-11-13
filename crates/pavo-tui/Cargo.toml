@@ -22,6 +22,7 @@ pavo-core.workspace = true
 serde_json.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+toml_edit.workspace = true
 
 [lints]
 workspace = true

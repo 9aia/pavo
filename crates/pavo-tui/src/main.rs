@@ -18,6 +18,7 @@
 mod actions;
 mod app;
 mod form;
+mod keymap;
 mod model;
 mod worker;
 
@@ -52,8 +53,10 @@ OPTIONS:
 KEYS:
     j/k arrows navigate · Tab/←/→ switch panes · Enter opens
     r refresh · d dump view JSON · g dump graph DOT · ? help · q quit
-    : command palette (view actions + menus)
-    view actions: drivers declare keys (e.g. dd) — see ? help
+    : / ctrl+p command palette (actions + menus + host builtins)
+    / · F filter current view (writes the view's filter_param)
+    view actions: drivers declare keys (e.g. dd, ctrl+x) — see ? help
+    keymap: ~/.config/pavo/keys.toml remaps commands (see ? help)
     forms: Enter on a field edits it — type, ↑↓/Tab move, Enter
     submits (submit wire op), Esc closes
 ";
@@ -141,7 +144,9 @@ fn main() -> ExitCode {
 /// Enter the alternate screen, run the event loop, restore on exit.
 fn run_tui(initial: Option<String>) -> io::Result<()> {
     let worker = worker::spawn();
-    let mut app = App::new(worker, initial);
+    // User keymap: first readable keys.toml wins (XDG → ~/.config).
+    // A missing/malformed file is a no-op — declarations suggest.
+    let mut app = App::with_keymap(worker, initial, keymap::load());
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;

@@ -60,6 +60,11 @@ pub struct Selection {
     pub title: String,
     /// Ordered detail fields.
     pub fields: Vec<(String, String)>,
+    /// The [`pavo_core::commands::item_value`] JSON when the row is a
+    /// tree item — feeds `ViewSpec.item_route` interpolation and the
+    /// `{item.*}`/`{target.*}` command-template context on Enter.
+    /// `None` for non-item rows (tables, kv pairs, dashboard entries).
+    pub item: Option<Value>,
 }
 
 /// The flat canvas: rows to draw plus the selection table.
@@ -315,7 +320,34 @@ impl Builder {
         fields: Vec<(String, String)>,
     ) {
         let sel = self.selections.len();
-        self.selections.push(Selection { title, fields });
+        self.selections.push(Selection {
+            title,
+            fields,
+            item: None,
+        });
+        self.rows.push(Row {
+            text: text.to_string(),
+            style,
+            sel: Some(sel),
+        });
+    }
+
+    /// [`Builder::sel_row`] plus an item-context payload (tree items
+    /// carry their [`item_value`] JSON for route interpolation).
+    fn sel_row_with_item(
+        &mut self,
+        text: &str,
+        style: RowStyle,
+        title: String,
+        fields: Vec<(String, String)>,
+        item: Option<Value>,
+    ) {
+        let sel = self.selections.len();
+        self.selections.push(Selection {
+            title,
+            fields,
+            item,
+        });
         self.rows.push(Row {
             text: text.to_string(),
             style,
@@ -639,6 +671,7 @@ fn table_json(v: &Value, data: &Map<String, Value>, depth: usize, width: usize, 
             Some(Selection {
                 title: format!("{node_title} row"),
                 fields,
+                item: None,
             }),
         );
     }
@@ -708,7 +741,13 @@ fn tree_items(items: &[TreeItem], prefix: &str, b: &mut Builder) {
                 pretty(&Value::Object(item.props.clone())),
             ));
         }
-        b.sel_row(&text, RowStyle::Normal, item.label.clone(), fields);
+        b.sel_row_with_item(
+            &text,
+            RowStyle::Normal,
+            item.label.clone(),
+            fields,
+            Some(pavo_core::item_value(item)),
+        );
         let child_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
         tree_items(&item.children, &child_prefix, b);
     }
@@ -1573,6 +1612,7 @@ fn plugin_rows(
             Some(Selection {
                 title: "plugin row".to_string(),
                 fields,
+                item: None,
             }),
             b,
         );

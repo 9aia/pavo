@@ -15,11 +15,14 @@
 //! — `none` invokes immediately, `confirm` opens [`ConfirmSession`],
 //! `type-target` opens [`TypeTargetSession`].
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crossterm::event::KeyCode;
-use pavo_core::{param_form_field, ActionScope, Params};
+use crossterm::event::{KeyCode, KeyModifiers};
+use pavo_core::{
+    param_form_field, ActionScope, BindingSource, Command, HostBuiltin, Params, BUILTINS,
+};
 use pavo_protocol::{Action, DangerLevel, FormFieldKind, MenuEntry};
 use serde_json::Value;
 
@@ -276,8 +279,9 @@ impl PaletteEntry {
                 .clone()
                 .unwrap_or_else(|| u.action.id.clone()),
             Self::Menu(m) => m
-                .action
+                .command
                 .clone()
+                .or_else(|| m.action.clone())
                 .or_else(|| m.route.clone())
                 .unwrap_or_else(|| m.id.clone()),
         }
@@ -304,7 +308,11 @@ impl PaletteEntry {
                 s.push_str(&m.id);
                 s.push(' ');
                 s.push_str(&m.title);
-                for k in &m.keywords {
+                if let Some(c) = &m.command {
+                    s.push(' ');
+                    s.push_str(c);
+                }
+                for k in m.keywords.iter().chain(m.keys.iter()) {
                     s.push(' ');
                     s.push_str(k);
                 }
@@ -631,20 +639,225 @@ impl TypeTargetSession {
     }
 }
 
-// ---------- action key specs ----------
+// ---------- binding sources / palette synthesis ----------
 
-/// Parse an action `keys[]` entry into the char sequence the app
-/// matches. Returns `None` for specs the TUI can't produce —
-/// modifier chords like `"ctrl+k"` (the key path only sees
-/// [`KeyCode::Char`] values; `App::on_key` discards modifiers).
-/// Multi-char sequences like `"dd"` become two-key chords via the
-/// app's pending-key mechanism.
+/// A [`BindingSource`] for a [`UiAction`] — the `UiAction` analogue
+/// of `pavo_core::commands::action_binding_source` (which takes the
+/// borrowing [`pavo_core::ScopedAction`]). The command is
+/// `action:<id>` locally, or `driver:<drv>:<id>` when the action
+/// declares a cross-driver `driver`.
 #[must_use]
-pub fn parse_key_spec(spec: &str) -> Option<String> {
-    if spec.is_empty() || spec.contains('+') || spec.chars().any(char::is_whitespace) {
-        return None;
+pub fn ui_binding_source(ui: &UiAction) -> BindingSource<'_> {
+    let command = match &ui.action.driver {
+        Some(driver) => Command::Driver {
+            driver: driver.clone(),
+            id: ui.action.id.clone(),
+        },
+        None => Command::Action {
+            id: ui.action.id.clone(),
+        },
+    };
+    BindingSource {
+        command,
+        label: Cow::Borrowed(ui.action.label.as_str()),
+        detail: ui
+            .action
+            .description
+            .as_deref()
+            .map(Cow::Borrowed)
+            .or(Some(Cow::Borrowed(ui.action.id.as_str()))),
+        section: Some(Cow::Borrowed(match ui.scope {
+            ActionScope::Manifest => "actions",
+            ActionScope::Node => "view",
+            ActionScope::Item => "item",
+        })),
+        keys: ui.action.keys.clone(),
     }
-    Some(spec.to_string())
+}
+
+/// The host builtins synthesized as palette entries — one
+/// [`MenuEntry`] per [`BUILTINS`] row so they flow through the same
+/// `menu_command` → `run_command` path as driver menus (command =
+/// `host.<name>`, section `"host"`, priority 1000 so driver menus
+/// and actions sort ahead of host chrome).
+///
+/// `host.editor` is included only when `$EDITOR` is set — the TUI
+/// can't hand the terminal to an editor mid-session, so the handler
+/// dumps the view JSON and reports the path instead of spawning.
+#[must_use]
+pub fn builtin_menu_entries() -> Vec<MenuEntry> {
+    BUILTINS
+        .iter()
+        .filter(|b| b.builtin != HostBuiltin::Editor || std::env::var_os("EDITOR").is_some())
+        .map(|b| MenuEntry {
+            id: b.id.to_string(),
+            title: b.label.to_string(),
+            icon: None,
+            action: None,
+            route: None,
+            command: Some(b.id.to_string()),
+            keys: b.keys.iter().map(|k| k.to_string()).collect(),
+            keywords: vec!["host".to_string(), b.builtin.name().to_string()],
+            section: Some("host".to_string()),
+            priority: 1000,
+        })
+        .collect()
+}
+
+// ---------- filter mode (host.filter) ----------
+
+/// What a filter-mode keypress asks the app to do.
+#[derive(Clone, Debug)]
+pub enum FilterCmd {
+    /// Key consumed, nothing further.
+    None,
+    /// `Esc` — close without applying.
+    Close,
+    /// `Enter` — apply: re-resolve the view with
+    /// `params[param] = text` (empty text clears the param).
+    Submit,
+}
+
+/// The `host.filter` overlay — a [`LineEdit`] bound to the current
+/// view's `filter_param` (convention `"q"`). Submitting re-resolves
+/// the view through the normal `Cmd::Resolve` path with the param
+/// set, so drivers see it as an ordinary view param.
+#[derive(Clone, Debug)]
+pub struct FilterSession {
+    /// The filter text input.
+    pub edit: LineEdit,
+    /// The view param the text binds to (`filter_param` or `"q"`).
+    pub param: String,
+    /// Namespaced `driver:view` being filtered (re-resolve target).
+    pub target: String,
+}
+
+impl FilterSession {
+    /// Open a filter session over `param`/`target`.
+    #[must_use]
+    pub fn new(param: String, target: String) -> Self {
+        Self {
+            edit: LineEdit::default(),
+            param,
+            target,
+        }
+    }
+
+    /// Route one key — the overlay owns the keyboard while open.
+    pub fn key(&mut self, code: KeyCode) -> FilterCmd {
+        match code {
+            KeyCode::Esc => FilterCmd::Close,
+            KeyCode::Enter => FilterCmd::Submit,
+            KeyCode::Backspace => {
+                self.edit.backspace();
+                FilterCmd::None
+            }
+            KeyCode::Delete => {
+                self.edit.delete();
+                FilterCmd::None
+            }
+            KeyCode::Home => {
+                self.edit.home();
+                FilterCmd::None
+            }
+            KeyCode::End => {
+                self.edit.end();
+                FilterCmd::None
+            }
+            KeyCode::Left => {
+                self.edit.move_cursor(-1);
+                FilterCmd::None
+            }
+            KeyCode::Right => {
+                self.edit.move_cursor(1);
+                FilterCmd::None
+            }
+            KeyCode::Char(c) => {
+                self.edit.insert(c);
+                FilterCmd::None
+            }
+            _ => FilterCmd::None,
+        }
+    }
+}
+
+/// Merge a filter submission into the current view params: non-empty
+/// trimmed text sets `params[param]`; empty text *removes* the param
+/// (clears the filter). All other params pass through untouched.
+#[must_use]
+pub fn filter_params(base: &Params, param: &str, text: &str) -> Params {
+    let mut out = base.clone();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        out.remove(param);
+    } else {
+        out.insert(param.to_string(), Value::String(trimmed.to_string()));
+    }
+    out
+}
+
+// ---------- key event → KeySpec ----------
+
+/// Map a crossterm key event to the [`pavo_core::KeySpec`] string the
+/// binding table matches — `None` for events no spec can name.
+///
+/// Rules:
+///
+/// - `Char(c)` with no ctrl/alt/cmd modifier → the bare char
+///   (case preserved — `"D"` ≠ `"d"`); `SPACE`/`+` map to the named
+///   specs `"space"`/`"plus"`. Shift alone doesn't add a modifier —
+///   the shifted char *is* the spec (`P` binds as `"P"`).
+/// - `Char(c)` with ctrl/alt/cmd → `"ctrl+alt+…+c"` (shift is
+///   ignored — `ctrl+shift+p` isn't representable; bind `"ctrl+p"`).
+/// - Named keys → their canonical lowercase spec (`enter`, `esc`,
+///   `tab`, `backspace`, `delete`, `insert`, `home`, `end`,
+///   `pageup`, `pagedown`, `up`, `down`, `left`, `right`, `f1`–`f12`);
+///   `BackTab` → `"shift+tab"`.
+#[must_use]
+pub fn key_event_spec(code: KeyCode, mods: KeyModifiers) -> Option<String> {
+    use KeyModifiers as M;
+    if let KeyCode::Char(c) = code {
+        let has_chord_mod = mods.intersects(M::CONTROL | M::ALT | M::SUPER | M::HYPER | M::META);
+        if !has_chord_mod {
+            return match c {
+                ' ' => Some("space".to_string()),
+                '+' => Some("plus".to_string()),
+                _ => Some(c.to_string()),
+            };
+        }
+        let mut spec = String::new();
+        if mods.contains(M::CONTROL) {
+            spec.push_str("ctrl+");
+        }
+        if mods.contains(M::ALT) {
+            spec.push_str("alt+");
+        }
+        if mods.contains(M::SUPER) || mods.contains(M::HYPER) || mods.contains(M::META) {
+            spec.push_str("cmd+");
+        }
+        spec.push(c);
+        return Some(spec);
+    }
+    let name = match code {
+        KeyCode::Enter => "enter",
+        KeyCode::Esc => "esc",
+        KeyCode::Tab => "tab",
+        KeyCode::BackTab => return Some("shift+tab".to_string()),
+        KeyCode::Backspace => "backspace",
+        KeyCode::Delete => "delete",
+        KeyCode::Insert => "insert",
+        KeyCode::Home => "home",
+        KeyCode::End => "end",
+        KeyCode::PageUp => "pageup",
+        KeyCode::PageDown => "pagedown",
+        KeyCode::Up => "up",
+        KeyCode::Down => "down",
+        KeyCode::Left => "left",
+        KeyCode::Right => "right",
+        KeyCode::F(n) => return Some(format!("f{n}")),
+        _ => return None,
+    };
+    Some(name.to_string())
 }
 
 #[cfg(test)]
@@ -814,12 +1027,102 @@ mod tests {
     }
 
     #[test]
-    fn key_spec_parsing() {
-        assert_eq!(parse_key_spec("dd").as_deref(), Some("dd"));
-        assert_eq!(parse_key_spec("D").as_deref(), Some("D"));
-        assert_eq!(parse_key_spec("ctrl+k"), None);
-        assert_eq!(parse_key_spec(""), None);
-        assert_eq!(parse_key_spec("g q"), None);
+    fn key_event_spec_maps_chars_mods_and_named_keys() {
+        use KeyModifiers as M;
+        assert_eq!(
+            key_event_spec(KeyCode::Char('d'), M::NONE).as_deref(),
+            Some("d")
+        );
+        assert_eq!(
+            key_event_spec(KeyCode::Char('D'), M::SHIFT).as_deref(),
+            Some("D")
+        );
+        assert_eq!(
+            key_event_spec(KeyCode::Char('p'), M::CONTROL).as_deref(),
+            Some("ctrl+p")
+        );
+        assert_eq!(
+            key_event_spec(KeyCode::Char('p'), M::CONTROL | M::ALT).as_deref(),
+            Some("ctrl+alt+p")
+        );
+        assert_eq!(
+            key_event_spec(KeyCode::Enter, M::NONE).as_deref(),
+            Some("enter")
+        );
+        assert_eq!(
+            key_event_spec(KeyCode::BackTab, M::NONE).as_deref(),
+            Some("shift+tab")
+        );
+        assert_eq!(
+            key_event_spec(KeyCode::Char(' '), M::NONE).as_deref(),
+            Some("space")
+        );
+        // Every produced spec must round-trip through KeySpec.
+        for (code, mods) in [
+            (KeyCode::Char('x'), M::NONE),
+            (KeyCode::Char('x'), M::CONTROL),
+            (KeyCode::F(5), M::NONE),
+            (KeyCode::PageDown, M::NONE),
+        ] {
+            let spec = key_event_spec(code, mods).unwrap();
+            assert!(pavo_core::KeySpec::parse(&spec).is_some(), "{spec}");
+        }
+    }
+
+    #[test]
+    fn filter_params_sets_and_clears() {
+        let mut base = Params::new();
+        base.insert("keep".into(), json!(1));
+        base.insert("q".into(), json!("old"));
+        let out = filter_params(&base, "q", "  new text  ");
+        assert_eq!(out["q"], json!("new text"));
+        assert_eq!(out["keep"], json!(1));
+        // Empty/whitespace clears the param only.
+        let out = filter_params(&out, "q", "   ");
+        assert!(out.get("q").is_none());
+        assert_eq!(out["keep"], json!(1));
+    }
+
+    #[test]
+    fn builtin_menu_entries_cover_catalog_minus_editor_gate() {
+        let entries = builtin_menu_entries();
+        let ids: Vec<&str> = entries.iter().map(|m| m.id.as_str()).collect();
+        for want in [
+            "host.filter",
+            "host.help",
+            "host.reload",
+            "host.palette",
+            "host.quit",
+        ] {
+            assert!(ids.contains(&want), "missing {want}");
+        }
+        // Editor appears iff $EDITOR is set in this environment.
+        assert_eq!(
+            ids.contains(&"host.editor"),
+            std::env::var_os("EDITOR").is_some()
+        );
+        // Every entry resolves through the command grammar.
+        for m in &entries {
+            assert!(matches!(
+                pavo_core::commands::Command::parse(m.command.as_deref().unwrap()),
+                Some(Command::Host(_))
+            ));
+            assert_eq!(m.section.as_deref(), Some("host"));
+        }
+    }
+
+    #[test]
+    fn ui_binding_source_matches_action_binding_source_shape() {
+        let mut a = ui("x", ActionScope::Node);
+        a.action.driver = Some("other".into());
+        let src = ui_binding_source(&a);
+        assert_eq!(src.command.id(), "driver:other:x");
+        assert_eq!(src.section.as_deref(), Some("view"));
+        assert_eq!(src.keys, a.action.keys);
+        let item_ui = ui("y", ActionScope::Item);
+        let src2 = ui_binding_source(&item_ui);
+        assert_eq!(src2.command.id(), "action:y");
+        assert_eq!(src2.section.as_deref(), Some("item"));
     }
 
     #[test]

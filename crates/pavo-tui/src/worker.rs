@@ -17,8 +17,8 @@ use pavo_core::{
     ResolvedView, RouteEntry,
 };
 use pavo_protocol::wire::{ActionResult, SubmitResult};
-use pavo_protocol::{Action, MenuEntry, RenderModel};
-use std::collections::HashMap;
+use pavo_protocol::{Action, DriverManifest, MenuEntry, RenderModel};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::actions::{dedupe_ui_actions, UiAction};
 
@@ -37,8 +37,17 @@ pub struct DriverRow {
 #[derive(Clone, Debug)]
 pub enum Cmd {
     /// Resolve `target` (`"driver:view"` or bare `"driver"`) to a view.
-    /// `refresh` clears the host's view cache first.
-    Resolve { target: String, refresh: bool },
+    /// `refresh` clears the host's view cache first. `params` are
+    /// caller-supplied view params (filter text, route query args) —
+    /// they flow into the driver's `view` op and key the result cache.
+    Resolve {
+        /// Namespaced view ref or bare driver.
+        target: String,
+        /// Bypass the view-result cache.
+        refresh: bool,
+        /// View params (`filter_param`, route `?query` args, …).
+        params: Params,
+    },
     /// Re-fetch manifests → views + chrome (the `r` key on the
     /// dashboard, or a manual refresh of chrome data).
     Reload,
@@ -88,6 +97,10 @@ pub enum Ev {
         chrome: Chrome,
         /// Every navigable route (view + slot).
         routes: Vec<RouteEntry>,
+        /// Every discovered driver's manifest, keyed by kind — the
+        /// app's command layer resolves `action:`/`driver:` commands
+        /// against these (action lookup, `driver:` scoping).
+        manifests: BTreeMap<String, DriverManifest>,
     },
     /// A [`Cmd::Resolve`] finished — `Err` carries the display string.
     View {
@@ -116,6 +129,8 @@ pub enum Ev {
         chrome: Chrome,
         /// Fresh route list.
         routes: Vec<RouteEntry>,
+        /// Fresh manifests (drivers may have been reinstalled).
+        manifests: BTreeMap<String, DriverManifest>,
     },
     /// A [`Cmd::Submit`] finished — `Err` carries the display string
     /// (transport/driver `ok:false`).
@@ -160,12 +175,16 @@ pub fn spawn() -> Worker {
         boot(&mut host, &ev_tx);
         while let Ok(cmd) = rx.recv() {
             match cmd {
-                Cmd::Resolve { target, refresh } => {
+                Cmd::Resolve {
+                    target,
+                    refresh,
+                    params,
+                } => {
                     if refresh {
                         host.clear_cache();
                     }
                     let resolved = host
-                        .resolve_view(&target, Params::new())
+                        .resolve_view(&target, params)
                         .map_err(|e| e.to_string());
                     // Plugin renders are a second round-trip set —
                     // only for views that resolved; failures inside
@@ -193,10 +212,12 @@ pub fn spawn() -> Worker {
                     let views = host.list_views();
                     let chrome = host.chrome();
                     let routes = host.list_routes();
+                    let manifests = collect_manifests(&host);
                     let _ = ev_tx.send(Ev::Reloaded {
                         views,
                         chrome,
                         routes,
+                        manifests,
                     });
                 }
                 Cmd::Submit {
@@ -251,6 +272,7 @@ fn boot(host: &mut Host, ev_tx: &Sender<Ev>) {
     let views = host.list_views();
     let chrome = host.chrome();
     let routes = host.list_routes();
+    let manifests = collect_manifests(host);
     let rows = drivers
         .iter()
         .map(|d| DriverRow {
@@ -264,7 +286,20 @@ fn boot(host: &mut Host, ev_tx: &Sender<Ev>) {
         views,
         chrome,
         routes,
+        manifests,
     });
+}
+
+/// Every discovered driver's manifest keyed by kind — feeds the
+/// app's command layer (`resolve_command` needs the current
+/// manifest plus the all-drivers table for `driver:` commands).
+/// Drivers whose manifest can't be produced are skipped (they
+/// error on use elsewhere too).
+fn collect_manifests(host: &Host) -> BTreeMap<String, DriverManifest> {
+    host.drivers()
+        .iter()
+        .filter_map(|d| host.manifest(&d.kind).ok().map(|m| (d.kind.clone(), m)))
+        .collect()
 }
 
 /// Collect the interaction surface for a resolved view: declared
@@ -435,6 +470,7 @@ mod tests {
         w.tx.send(Cmd::Resolve {
             target: "definitely-not-a-driver:nope".to_string(),
             refresh: false,
+            params: Params::new(),
         })
         .unwrap();
         match recv_timeout(&w.rx) {
@@ -455,6 +491,7 @@ mod tests {
         w.tx.send(Cmd::Resolve {
             target: "definitely-not-a-driver:nope".to_string(),
             refresh: true,
+            params: Params::new(),
         })
         .unwrap();
         match recv_timeout(&w.rx) {
