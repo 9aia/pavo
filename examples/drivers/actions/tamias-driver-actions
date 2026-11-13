@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+"""tamias-driver-actions — the interaction-actions demo driver.
+
+A self-contained demo driver (Python 3 stdlib only) that exercises
+the `invoke` wire op and the declarative action layer end-to-end:
+
+- `DriverManifest.actions[]` — global verbs covering all three
+  `DangerLevel`s (`none`/`confirm`/`type-target`) and every
+  `ParamKind` (`string`, `text`, `number`, `integer`, `bool`,
+  `enum`, `date`, `ref`, `string[]`).
+- `NodeBase.actions[]` — a node-scoped `board.export` action on the
+  tasks table.
+- `TreeItem.actions[]` — per-row `task.*` actions on every backlog
+  tree item.
+- `contributes.menus[]` — command-palette entries mixing `action`
+  and `route` kinds, with sections, keywords, and priorities.
+- `{"op":"invoke",…}` — the dispatch handler; mutations are
+  in-memory for the life of the `serve` process and answered with a
+  fresh `view` so hosts can re-render (the refresh-after-mutation
+  contract).
+
+Wire surface (ndjson JSON-RPC over `serve`, one JSON object per line):
+
+    {"op":"manifest"}                      -> DriverManifest
+    {"op":"views"}                         -> [ViewSummary, ...]
+    {"op":"view","view":"board"}          -> ViewResult
+    {"op":"query","query":"tasks",...}    -> QueryResult
+    {"op":"invoke","view":"board",
+     "action":"task.new","params":{…}}    -> ActionResult
+
+`tamias-driver-actions manifest` and `tamias-driver-actions
+capabilities` answer the discovery probes pavo runs before spawning
+`serve`.
+"""
+
+import json
+import sys
+
+NAME = "actions"
+
+# ---------------------------------------------------------------- data
+
+TASKS = [
+    {"id": "A-001", "title": "scaffold the protocol", "status": "done",
+     "kind": "chore", "assignee": "u-ana", "due": "2025-11-01",
+     "score": 3, "estimate": 2, "blocked": False,
+     "tags": ["pavo", "protocol"], "notes": "wire types landed first"},
+    {"id": "A-002", "title": "host renderers", "status": "wip",
+     "kind": "feature", "assignee": "u-bo", "due": "2025-12-01",
+     "score": 8, "estimate": 5, "blocked": False,
+     "tags": ["pavo", "cli"], "notes": "cli/tui/web interpretation"},
+    {"id": "A-003", "title": "action menus", "status": "open",
+     "kind": "feature", "assignee": "u-ana", "due": "2025-12-15",
+     "score": 5, "estimate": 3, "blocked": True,
+     "tags": ["pavo", "tui"], "notes": "palette + keybindings"},
+    {"id": "A-004", "title": "write the docs", "status": "open",
+     "kind": "chore", "assignee": "u-cyd", "due": "2026-01-10",
+     "score": 2, "estimate": 1, "blocked": False,
+     "tags": ["docs"], "notes": "reference-quality comments"},
+]
+
+# Picker data for `ref` params — objects with id/label (bare strings
+# work too; hosts accept both).
+MEMBERS = [
+    {"id": "u-ana", "label": "Ana"},
+    {"id": "u-bo", "label": "Bo"},
+    {"id": "u-cyd", "label": "Cyd"},
+]
+
+KINDS = ["bug", "feature", "chore"]
+STATUSES = ["open", "wip", "done"]
+
+
+# ---------------------------------------------------------------- actions
+
+def act(action_id, label, **kw):
+    """Action dict — same shape as pavo_protocol::Action."""
+    a = {"id": action_id, "label": label}
+    a.update(kw)
+    return a
+
+
+def param(name, kind="string", **kw):
+    """ParamSchema dict — `kind` is one of the ParamKind spellings."""
+    p = {"name": name, "kind": kind}
+    p.update(kw)
+    return p
+
+
+# Manifest-global actions — offered on every view.
+ACTION_REFRESH = act(
+    "refresh", "Refresh", icon="reload", keys=["r"],
+    description="Re-run the view's queries.",
+)
+
+ACTION_NEW = act(
+    "task.new", "New task", icon="plus", keys=["n"],
+    description="Add a task — every ParamKind in one auto-form.",
+    params=[
+        param("title", "string", required=True,
+              placeholder="what needs doing?"),
+        param("notes", "text", doc="Multi-line details."),
+        param("kind", "enum", options=KINDS, default="chore",
+              doc="Task kind."),
+        param("assignee", "ref", ref_query="members", required=True,
+              doc="Picked from the members query binding."),
+        param("due", "date", hint="YYYY-MM-DD"),
+        param("score", "number", min=0, max=10,
+              doc="Priority score, 0–10."),
+        param("estimate", "integer", min=1, max=21,
+              doc="Story points."),
+        param("blocked", "bool", default=False,
+              doc="Mark the task blocked."),
+        param("tags", "string[]", doc="Comma-separated labels."),
+    ],
+)
+
+ACTION_DONE = act(
+    "task.done", "Mark done", icon="check", keys=["d"],
+    target="item",
+    description="Set the target task's status to done.",
+)
+
+ACTION_ARCHIVE = act(
+    "task.archive", "Archive", icon="archive", keys=["a"],
+    danger="confirm", target="item",
+    description="Remove the target task from the board.",
+)
+
+ACTION_DELETE = act(
+    "task.delete", "Delete", icon="trash", keys=["D"],
+    danger="type-target", target="item",
+    description="Permanently delete the target task — type its id.",
+    params=[
+        param("reason", "text",
+              doc="Optional reason, recorded in the result data."),
+    ],
+)
+
+# Node-scoped action — lives on the board's tasks table.
+ACTION_EXPORT = act(
+    "board.export", "Export", icon="download",
+    description="Export the tasks table.",
+    params=[
+        param("format", "enum", options=["json", "csv", "md"],
+              default="json", required=True),
+    ],
+)
+
+MANIFEST_ACTIONS = [
+    ACTION_REFRESH,
+    ACTION_NEW,
+    ACTION_DONE,
+    ACTION_ARCHIVE,
+    ACTION_DELETE,
+]
+
+# Per-row actions on backlog tree items (same ids — the driver
+# resolves them against the invoke request's `view`/`target`).
+ITEM_ACTIONS = [
+    ACTION_DONE,
+    ACTION_ARCHIVE,
+    ACTION_DELETE,
+]
+
+# ---------------------------------------------------------------- queries
+
+def counts():
+    out = {}
+    for t in TASKS:
+        out[t["status"]] = out.get(t["status"], 0) + 1
+    out["total"] = len(TASKS)
+    return out
+
+
+def tree_items():
+    """Backlog tree rows — built per render so mutations show up."""
+    items = []
+    for t in TASKS:
+        detail = "%s · %s · score %s" % (
+            t["kind"], t["assignee"], t["score"])
+        if t["blocked"]:
+            detail += " · blocked"
+        items.append({
+            "id": t["id"],
+            "label": t["title"],
+            "detail": detail,
+            "icon": "🟥" if t["blocked"] else "⬜",
+            "actions": ITEM_ACTIONS,
+        })
+    return items
+
+
+QUERIES = {
+    "tasks": TASKS,
+    "members": MEMBERS,
+    "items": {"items": tree_items()},
+    "counts": counts(),
+}
+
+
+def query_data(name, params):
+    if name == "counts":
+        return counts()
+    if name == "items":
+        return {"items": tree_items()}
+    if name == "tasks" and params.get("status"):
+        wanted = params["status"]
+        return [t for t in TASKS if t["status"] == wanted]
+    return QUERIES.get(name)
+
+
+# ---------------------------------------------------------------- views
+
+def q(name):
+    return {"name": name, "op": "query", "params": {}}
+
+
+VIEWS = [
+    {
+        "id": "board",
+        "title": "Board",
+        "route": "/actions/board",
+        "description": "Tasks as a table — try the node action and "
+                       "the task.* manifest actions.",
+        "queries": [q("tasks"), q("counts"), q("members")],
+        "root": {
+            "kind": "column",
+            "title": "Tasks",
+            "children": [
+                {"kind": "kv", "title": "Counts", "query": "counts",
+                 "pairs": []},
+                {
+                    "kind": "table",
+                    "title": "Tasks",
+                    "query": "tasks",
+                    "sortable": True,
+                    "actions": [ACTION_EXPORT],
+                    "columns": [
+                        {"key": "id", "title": "ID", "width": 6},
+                        {"key": "title", "title": "Title"},
+                        {"key": "status", "title": "Status", "width": 8},
+                        {"key": "kind", "title": "Kind", "width": 8},
+                        {"key": "assignee", "title": "Who", "width": 8},
+                        {"key": "score", "title": "Score", "width": 5},
+                    ],
+                },
+                {
+                    "kind": "markdown",
+                    "text": "*tamias-driver-actions* — the `invoke` "
+                            "op's reference consumer. Actions mutate "
+                            "in-memory state and return a fresh "
+                            "`view` for hosts to re-render.",
+                },
+            ],
+        },
+    },
+    {
+        "id": "backlog",
+        "title": "Backlog",
+        "route": "/actions/backlog",
+        "description": "Task tree with per-row actions — select a row "
+                       "and invoke task.done / task.archive / "
+                       "task.delete.",
+        "queries": [q("items")],
+        "root": {
+            "kind": "tree",
+            "title": "Backlog",
+            "query": "items",
+            "expandable": True,
+        },
+    },
+]
+
+MANIFEST = {
+    "name": NAME,
+    "title": "Actions",
+    "icon": "🎛",
+    "version": "0.1.0",
+    "verbs": ["manifest", "serve"],
+    "capabilities": ["pavo"],
+    "actions": MANIFEST_ACTIONS,
+    "contributes": {
+        "navbar": [
+            {"id": "nav-board", "title": "Task board",
+             "route": "/actions/board", "priority": 10},
+            {"id": "nav-backlog", "title": "Backlog",
+             "route": "/actions/backlog", "priority": 20},
+        ],
+        "menus": [
+            {"id": "new-task", "title": "New task", "icon": "plus",
+             "action": "task.new",
+             "keywords": ["create", "add", "task"],
+             "section": "Tasks", "priority": 10},
+            {"id": "archive-task", "title": "Archive task",
+             "icon": "archive", "action": "task.archive",
+             "keywords": ["remove", "done", "clean"],
+             "section": "Tasks", "priority": 20},
+            {"id": "delete-task", "title": "Delete task",
+             "icon": "trash", "action": "task.delete",
+             "keywords": ["remove", "destroy"],
+             "section": "Tasks", "priority": 30},
+            {"id": "hdr-navigate", "title": "Navigate"},
+            {"id": "go-board", "title": "Task board",
+             "route": "/actions/board", "keywords": ["table", "grid"],
+             "section": "Navigate", "priority": 90},
+            {"id": "go-backlog", "title": "Backlog",
+             "route": "/actions/backlog", "keywords": ["tree", "list"],
+             "section": "Navigate", "priority": 91},
+        ],
+        "statusbar": [
+            {"id": "status", "title": "actions", "route": "/actions/board",
+             "priority": 95},
+        ],
+    },
+    "views": VIEWS,
+}
+
+
+def summary(spec):
+    return {
+        "id": spec["id"],
+        "title": spec["title"],
+        "route": spec["route"],
+        "description": spec.get("description"),
+        "queries": [b["name"] for b in spec.get("queries", [])],
+    }
+
+
+def view_result(view_id, params):
+    for spec in VIEWS:
+        if spec["id"] == view_id:
+            data = {}
+            for binding in spec.get("queries", []):
+                data[binding["name"]] = query_data(binding["name"], params)
+            return {"view": spec, "data": data}
+    return None
+
+
+def find_task(task_id):
+    return next((t for t in TASKS if t["id"] == task_id), None)
+
+
+def next_id():
+    nums = [int(t["id"].split("-")[1]) for t in TASKS
+            if t["id"].startswith("A-")]
+    return "A-%03d" % (max(nums, default=0) + 1)
+
+
+# ---------------------------------------------------------------- invoke
+
+def target_id(target):
+    """Extract a task id from an opaque invoke target — accepts a
+    bare id string, {"id": …}, or a row object carrying `id`."""
+    if isinstance(target, str):
+        return target
+    if isinstance(target, dict):
+        if isinstance(target.get("id"), str):
+            return target["id"]
+        item = target.get("item")
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            return item["id"]
+        if isinstance(item, str):
+            return item
+    return None
+
+
+def required_errors(action_params, params):
+    errors = {}
+    for p in action_params:
+        v = params.get(p["name"])
+        if p.get("required") and (v is None or v == ""):
+            errors[p["name"]] = "required"
+    return errors
+
+
+def fresh_view(view_id):
+    """Re-render the invoking view (or the board) after a mutation."""
+    vid = view_id if view_id in (v["id"] for v in VIEWS) else "board"
+    return view_result(vid, {})
+
+
+def invoke_result(view_id, action_id, target, params):
+    """The `invoke` op — dispatch on the action id.
+
+    Returns (ok, payload): payload is an ActionResult dict on ok,
+    or an error string. Mutations return a fresh `view` so hosts
+    re-render — the refresh-after-mutation contract.
+    """
+    params = params or {}
+
+    if action_id == "refresh":
+        return True, {"message": "refreshed", "view": fresh_view(view_id)}
+
+    if action_id == "board.export":
+        fmt = params.get("format") or "json"
+        if fmt not in ("json", "csv", "md"):
+            return True, {"errors": {"format": "invalid option"}}
+        return True, {
+            "message": "exported %d tasks as %s" % (len(TASKS), fmt),
+            "data": {"format": fmt, "count": len(TASKS)},
+        }
+
+    if action_id == "task.new":
+        spec = next(a for a in MANIFEST_ACTIONS if a["id"] == "task.new")
+        errors = required_errors(spec["params"], params)
+        kind = params.get("kind") or "chore"
+        if kind not in KINDS:
+            errors["kind"] = "invalid option"
+        if "assignee" in params and params["assignee"] not in (
+                m["id"] for m in MEMBERS):
+            errors["assignee"] = "unknown member"
+        if errors:
+            return True, {"errors": errors}
+        title = (params.get("title") or "").strip()
+        if not title:
+            return True, {"errors": {"title": "required"}}
+        task = {
+            "id": next_id(),
+            "title": title,
+            "status": "open",
+            "kind": kind,
+            "assignee": params.get("assignee"),
+            "due": params.get("due"),
+            "score": params.get("score", 5),
+            "estimate": params.get("estimate", 1),
+            "blocked": bool(params.get("blocked", False)),
+            "tags": params.get("tags") or [],
+            "notes": params.get("notes"),
+        }
+        TASKS.append(task)
+        return True, {
+            "message": "added %s" % task["id"],
+            "data": {"task": task, "total": len(TASKS)},
+            "view": fresh_view(view_id),
+        }
+
+    # Item-scoped actions — target carries the task id.
+    if action_id not in ("task.done", "task.archive", "task.delete"):
+        return False, "unknown action: %s" % action_id
+    tid = target_id(target)
+    if not tid:
+        return True, {"errors": {"target": "missing task id"}}
+    task = find_task(tid)
+    if task is None:
+        return True, {"errors": {"target": "unknown task %s" % tid}}
+
+    if action_id == "task.done":
+        task["status"] = "done"
+        return True, {
+            "message": "marked %s done" % tid,
+            "data": {"task": task},
+            "view": fresh_view(view_id),
+        }
+
+    if action_id == "task.archive":
+        TASKS.remove(task)
+        return True, {
+            "message": "archived %s" % tid,
+            "data": {"id": tid, "remaining": len(TASKS)},
+            "view": fresh_view(view_id),
+        }
+
+    if action_id == "task.delete":
+        errors = required_errors(
+            next(a for a in MANIFEST_ACTIONS
+                 if a["id"] == "task.delete")["params"], params)
+        # `reason` is optional — nothing required; kept to show the
+        # per-param errors path on item actions too.
+        if errors:
+            return True, {"errors": errors}
+        TASKS.remove(task)
+        return True, {
+            "message": "deleted %s" % tid,
+            "data": {"id": tid, "reason": params.get("reason"),
+                     "remaining": len(TASKS)},
+            "view": fresh_view(view_id),
+        }
+
+    return False, "unknown action: %s" % action_id
+
+
+# ---------------------------------------------------------------- wire
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def respond_ok(result):
+    emit({"ok": True, "result": result})
+
+
+def respond_err(msg):
+    emit({"ok": False, "error": str(msg)})
+
+
+def dispatch(obj):
+    op = obj.get("op")
+    if op == "manifest":
+        respond_ok(MANIFEST)
+    elif op == "views":
+        respond_ok([summary(v) for v in VIEWS])
+    elif op == "view":
+        result = view_result(obj.get("view"), obj.get("params") or {})
+        if result is None:
+            respond_err("unknown view: %s" % obj.get("view"))
+        else:
+            respond_ok(result)
+    elif op == "query":
+        name = obj.get("query")
+        respond_ok({"query": name,
+                    "data": query_data(name, obj.get("params") or {})})
+    elif op == "invoke":
+        ok, payload = invoke_result(
+            obj.get("view"), obj.get("action"),
+            obj.get("target"), obj.get("params") or {})
+        if ok:
+            respond_ok(payload)
+        else:
+            respond_err(payload)
+    else:
+        respond_err("unknown op: %s" % op)
+
+
+def serve():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            respond_err("invalid JSON request")
+            continue
+        if not isinstance(obj, dict):
+            respond_err("request must be a JSON object")
+            continue
+        dispatch(obj)
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        sys.stderr.write(
+            "usage: tamias-driver-actions manifest|capabilities|serve\n")
+        return 1
+    verb = args[0]
+    if verb == "manifest":
+        sys.stdout.write(json.dumps(MANIFEST, indent=2) + "\n")
+        return 0
+    if verb == "capabilities":
+        sys.stdout.write(json.dumps({
+            "capabilities": MANIFEST["capabilities"],
+            "verbs": MANIFEST["verbs"],
+        }) + "\n")
+        return 0
+    if verb == "serve":
+        return serve()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
