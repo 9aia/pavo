@@ -28,6 +28,7 @@ const navOpen = ref(false)
       <main class="content">
         <NuxtPage />
       </main>
+      <CommandPalette />
       <footer v-if="slots?.statusbar?.length" class="statusbar">
         <span
           v-for="e in slots.statusbar"

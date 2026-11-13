@@ -7,8 +7,9 @@
 // `pavoApplyView`, consumed by FormView.vue) so forms work
 // identically in pages and popovers.
 import type { ComputedRef, MaybeRefOrGetter, Ref } from 'vue'
-import { computed, provide, toValue } from 'vue'
+import { computed, onBeforeUnmount, provide, toValue, watch } from 'vue'
 import type { ViewParam } from '~/utils/view-link'
+import { registerViewApplier, unregisterViewApplier } from '~/composables/actions'
 
 export function useView(
   ref: MaybeRefOrGetter<string>,
@@ -55,10 +56,64 @@ export function useView(
   // `view` swaps the whole ViewResult in place.
   const viewRef = computed(() => toValue(ref))
   provide<Ref<string> | ComputedRef<string>>('pavoViewRef', viewRef)
-  provide('pavoApplyView', (vr: any) => {
+  const applyView = (vr: any) => {
     if (data.value) {
       data.value = { ok: true, result: vr } as typeof data.value
     }
+  }
+  provide('pavoApplyView', applyView)
+
+  // Action-dispatch context for deeply nested surfaces (tree-row
+  // ItemActions inside ViewNode): `{driver, view}` — the invoke
+  // op's driver target and view-id context. `view` prefers the
+  // resolved ViewSpec id, falling back to the ref's view segment.
+  provide(
+    'pavoActionCtx',
+    computed(() => {
+      const r = viewRef.value
+      const [d, v] = r.includes(':') ? r.split(/:(.*)/s) : [r, '']
+      const specId = (data.value as any)?.result?.view?.id as
+        | string
+        | undefined
+      return { driver: d || '', view: specId || v || undefined }
+    }),
+  )
+
+  // Register the swap callback in the module registry too — invoke
+  // results dispatched outside this component's tree (the command
+  // palette) reach it via `applyViewResult(driver, viewId, vr)`.
+  // The key is the `driver:view` ref; watch covers ref changes.
+  watch(
+    viewRef,
+    (r, _old, onCleanup) => {
+      if (!r) return
+      registerViewApplier(r, applyView)
+      onCleanup(() => unregisterViewApplier(r, applyView))
+    },
+    { immediate: true },
+  )
+  onBeforeUnmount(() => unregisterViewApplier(viewRef.value, applyView))
+
+  // Alias registration: invoke results key the swap by the *spec*
+  // view id (`driver:<ViewSpec.id>`), which can differ from the
+  // URL's view segment — register that spelling too once the
+  // ViewResult lands.
+  let aliasKey: string | null = null
+  watch(
+    () => (data.value as any)?.result?.view?.id as string | undefined,
+    (specId) => {
+      if (!specId) return
+      const driver = viewRef.value.split(':')[0]
+      if (!driver) return
+      const alias = `${driver}:${specId}`
+      if (alias === viewRef.value || alias === aliasKey) return
+      if (aliasKey) unregisterViewApplier(aliasKey, applyView)
+      aliasKey = alias
+      registerViewApplier(alias, applyView)
+    },
+  )
+  onBeforeUnmount(() => {
+    if (aliasKey) unregisterViewApplier(aliasKey, applyView)
   })
 
   return { data, pending, error, refresh, apiError, viewResult }

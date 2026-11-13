@@ -7,6 +7,8 @@
 // the parent owns open/close state and renders the scrim.
 import type { ViewLink } from '~/utils/view-link'
 import { viewLinkHref } from '~/utils/view-link'
+import { collectActions, dedupeActions } from '~/utils/interactions'
+import { fetchManifest } from '~/composables/actions'
 
 const props = defineProps<{
   link: ViewLink
@@ -29,6 +31,24 @@ const heading = computed(
   () => props.title || viewResult.value?.view?.title || ref.value,
 )
 const pageHref = computed(() => viewLinkHref(props.link))
+
+// Same action surface as the full view page — manifest (cached)
+// + collected node/item actions, deduped.
+const driver = computed(() => ref.value.split(':')[0] ?? '')
+const manifest = ref<any>(null)
+watch(
+  driver,
+  async (d) => {
+    manifest.value = d ? await fetchManifest(d) : null
+  },
+  { immediate: true },
+)
+const collected = computed(() =>
+  collectActions(manifest.value, viewResult.value),
+)
+const barActions = computed(() =>
+  dedupeActions(collected.value.filter((s) => s.scope !== 'item')),
+)
 </script>
 
 <template>
@@ -54,6 +74,7 @@ const pageHref = computed(() => viewLinkHref(props.link))
         <p v-if="viewResult.view?.description" class="muted">
           {{ viewResult.view.description }}
         </p>
+        <ActionBar :actions="barActions" />
         <ViewNode :node="viewResult.view.root" :data="viewResult.data || {}" />
       </template>
     </div>

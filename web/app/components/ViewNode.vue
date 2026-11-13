@@ -7,6 +7,10 @@
 // query-binding map; a node's `query` field names the binding whose
 // payload feeds it.
 import type { RendererEntry } from '~/composables/renderers'
+import type { Action } from '~/utils/interactions'
+// Explicit import — the recursive tree renderer calls h(ItemActions)
+// inside a render function, where Nuxt's template auto-import doesn't reach.
+import ItemActions from '~/components/ItemActions.vue'
 
 const props = defineProps<{
   node: Record<string, any>
@@ -118,6 +122,7 @@ interface TreeItem {
   detail?: string
   icon?: string
   children?: TreeItem[]
+  actions?: Action[]
 }
 
 function normTreeItem(x: any): TreeItem {
@@ -128,6 +133,8 @@ function normTreeItem(x: any): TreeItem {
     detail: x?.detail ?? x?.description,
     icon: x?.icon,
     children: Array.isArray(x?.children) ? x.children.map(normTreeItem) : [],
+    // TreeItem.actions[] — per-row invoke actions (ItemActions.vue).
+    actions: Array.isArray(x?.actions) ? x.actions : undefined,
   }
 }
 
@@ -194,6 +201,9 @@ const ViewNodeTreeItems = defineComponent({
           item.icon ? h('span', item.icon + ' ') : null,
           item.label,
           item.detail ? h('span', { class: 'muted' }, ' ' + item.detail) : null,
+          item.actions?.length
+            ? h(ItemActions, { actions: item.actions, itemId: item.id })
+            : null,
           item.children?.length
             ? h(
                 'ul',
@@ -332,6 +342,11 @@ function fmt(v: any): string {
         <span v-if="item.icon">{{ item.icon }}</span>
         {{ item.label }}
         <span v-if="item.detail" class="muted">{{ item.detail }}</span>
+        <ItemActions
+          v-if="item.actions?.length"
+          :actions="item.actions"
+          :item-id="item.id"
+        />
         <ul v-if="item.children?.length">
           <component :is="ViewNodeTreeItems" :items="item.children" :data="data" />
         </ul>
