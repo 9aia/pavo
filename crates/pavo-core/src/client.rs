@@ -37,7 +37,7 @@ use std::thread;
 use std::time::Duration;
 
 use pavo_protocol::platform::{JobItem, NotificationItem};
-use pavo_protocol::wire::{QueryResult, SubmitResult, ViewResult, ViewSummary};
+use pavo_protocol::wire::{ActionResult, QueryResult, SubmitResult, ViewResult, ViewSummary};
 use pavo_protocol::{DriverManifest, RenderModel, Request, Response};
 use serde::de::DeserializeOwned;
 
@@ -219,6 +219,30 @@ impl DriverClient {
             view: view.to_string(),
             form: form.map(str::to_string),
             values,
+        })
+    }
+
+    /// `{"op":"invoke","view":…,"action":…,"target":…,"params":…}`
+    /// → [`ActionResult`] — the action verb. `view` is the optional
+    /// view-id context; `action` the action id; `target` opaque JSON
+    /// the driver interprets; `params` maps `ParamSchema.name` →
+    /// value.
+    ///
+    /// # Errors
+    /// As [`DriverClient::manifest`]. A driver without action
+    /// support answers `ok:false` → [`PavoError::Driver`].
+    pub fn invoke(
+        &mut self,
+        view: Option<&str>,
+        action: &str,
+        target: Option<&serde_json::Value>,
+        params: Params,
+    ) -> Result<ActionResult, PavoError> {
+        self.request(&Request::Invoke {
+            view: view.map(str::to_string),
+            action: action.to_string(),
+            target: target.cloned(),
+            params,
         })
     }
 

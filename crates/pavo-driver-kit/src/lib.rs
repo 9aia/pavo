@@ -21,6 +21,8 @@
 //!   for the shared `id`/`title`/`query`/`description`/`props` fields.
 //! - [`platform`] — [`JobItem`] / [`NotificationItem`] constructors
 //!   for the `jobs`/`notifications` feed ops.
+//! - [`action`] — [`Action`] / [`ParamSchema`] / [`MenuEntry`]
+//!   constructors for the `invoke` interaction layer.
 //! - [`surface`] — the surface-driver layer: an engine's **ops
 //!   manifest** (`ops` verb / `cli.*` wire queries) rendered onto real
 //!   surfaces — a generated clap CLI (feature `cli`), MCP tools over
@@ -59,11 +61,14 @@
 //! is the first-party Rust driver (it predates the kit and shows the
 //! hand-rolled equivalent).
 
+pub mod action;
 pub mod manifest;
 pub mod node;
 pub mod platform;
 pub mod serve;
 pub mod surface;
+
+pub use action::{action, menu, param, ActionBuilder, MenuBuilder, ParamBuilder};
 
 pub use manifest::{
     binding, binding_on, binding_on_params, binding_params, capabilities_value, contribution,

@@ -94,6 +94,21 @@ impl Base {
         self
     }
 
+    /// Add an action scoped to this node — dispatched via the
+    /// `invoke` wire op. See [`crate::action`].
+    #[must_use]
+    pub fn action(mut self, action: pavo_protocol::Action) -> Self {
+        self.base.actions.push(action);
+        self
+    }
+
+    /// Set all node actions at once.
+    #[must_use]
+    pub fn actions(mut self, actions: Vec<pavo_protocol::Action>) -> Self {
+        self.base.actions = actions;
+        self
+    }
+
     /// Finish — the [`NodeBase`] the kind functions take.
     #[must_use]
     pub fn build(self) -> NodeBase {

@@ -127,6 +127,23 @@ impl Manifest {
         self
     }
 
+    /// A driver-global action (the `actions[]` slot) — verbs offered
+    /// on every view, dispatched via the `invoke` wire op. See
+    /// [`crate::action`].
+    #[must_use]
+    pub fn action(mut self, action: pavo_protocol::Action) -> Self {
+        self.manifest.actions.push(action);
+        self
+    }
+
+    /// A `contributes.menus[]` entry — command-palette/quick-launch
+    /// item (invokes an action or routes to a view).
+    #[must_use]
+    pub fn menu(mut self, entry: pavo_protocol::MenuEntry) -> Self {
+        self.manifest.contributes.menus.push(entry);
+        self
+    }
+
     /// `contributes.navbar` entry.
     #[must_use]
     pub fn navbar(mut self, entry: Contribution) -> Self {

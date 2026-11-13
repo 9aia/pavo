@@ -73,7 +73,7 @@ pub enum ParamKind {
 }
 
 /// One op param — name, surface kind, optional doc.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ParamSpec {
     /// Wire params key / CLI arg name.
     pub name: String,
@@ -87,6 +87,12 @@ pub struct ParamSpec {
     /// value. Additive within the manifest contract: absent = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub secret: bool,
+    /// Optional [`pavo_protocol::ParamSchema`] — the typed form
+    /// metadata hosts use to auto-generate action forms (enum
+    /// options, ref pickers, validation). Additive: absent params
+    /// derive a bare `string`/`bool` schema from `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<pavo_protocol::ParamSchema>,
 }
 
 /// Params deserialize from either the typed object form
@@ -106,12 +112,14 @@ impl<'de> Deserialize<'de> for ParamSpec {
             doc: Option<String>,
             #[serde(default)]
             secret: bool,
+            #[serde(default)]
+            schema: Option<pavo_protocol::ParamSchema>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Repr {
             Name(String),
-            Typed(Typed),
+            Typed(Box<Typed>),
         }
         Ok(match Repr::deserialize(d)? {
             Repr::Name(name) => ParamSpec {
@@ -119,12 +127,14 @@ impl<'de> Deserialize<'de> for ParamSpec {
                 kind: ParamKind::Opt,
                 doc: None,
                 secret: false,
+                schema: None,
             },
             Repr::Typed(t) => ParamSpec {
                 name: t.name,
                 kind: t.kind,
                 doc: t.doc,
                 secret: t.secret,
+                schema: t.schema,
             },
         })
     }
@@ -132,7 +142,7 @@ impl<'de> Deserialize<'de> for ParamSpec {
 
 /// One engine op from the manifest — `cli.<name>` on the wire,
 /// `<name>` as a generated subcommand / MCP tool.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct OpSpec {
     /// Bare op name (`find`) — the `cli.` prefix is stripped on parse.
     pub name: String,
@@ -187,7 +197,7 @@ impl<'de> Deserialize<'de> for OpSpec {
 }
 
 /// A parsed ops manifest — what a driver's `ops` verb/`ops` query emits.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct OpsManifest {
     /// Engine name (`kuda`) — also the `<type>` in
     /// `tamias-driver-<type>` by convention.

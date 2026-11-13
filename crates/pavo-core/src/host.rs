@@ -51,7 +51,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pavo_protocol::wire::{QueryResult, SubmitResult, ViewResult, ViewSummary};
+use pavo_protocol::wire::{ActionResult, QueryResult, SubmitResult, ViewResult, ViewSummary};
 use pavo_protocol::{
     DriverDeps, DriverManifest, JobItem, NotificationItem, QueryBinding, RenderModel, Request,
 };
@@ -645,6 +645,66 @@ impl Host {
         }
         let result = self.with_client(&driver, |client| client.submit(&view_id, form, values))?;
         // Submits mutate state — drop every cached params variant of
+        // this view so the next resolve re-fetches.
+        self.view_cache
+            .invalidate_prefix(&format!("{driver}:{view_id}\u{1f}"));
+        Ok(result)
+    }
+
+    /// `{"op":"invoke"}` — dispatch an [`pavo_protocol::Action`] on
+    /// the driver that owns `target` (`"<driver>:<view>"`, bare
+    /// `"<driver>"`). `action` is the action id; `view` optionally
+    /// overrides the view context (defaults to the target's view,
+    /// then the driver's first view — the context helps drivers
+    /// resolve node/item-scoped actions); `action_target` is the
+    /// opaque target JSON (selected row, item id, …); `params`
+    /// maps `ParamSchema.name` → value.
+    ///
+    /// On success every cached result for the resolved
+    /// `driver:view` is invalidated — actions mutate driver state,
+    /// so the next `resolve_view` must re-fetch (a returned
+    /// [`ActionResult::view`] is *not* inserted into the cache; it
+    /// belongs to the invoking renderer).
+    ///
+    /// # Errors
+    /// [`PavoError::BadViewRef`] / [`PavoError::UnknownDriver`] /
+    /// [`PavoError::UnknownView`] for bad targets; `ok:false` driver
+    /// answers (validation failures included — check
+    /// [`ActionResult::errors`] on `Ok`) propagate as
+    /// [`PavoError::Driver`].
+    pub fn invoke(
+        &self,
+        target: &str,
+        action: &str,
+        view: Option<&str>,
+        action_target: Option<Value>,
+        params: Params,
+    ) -> Result<ActionResult, PavoError> {
+        let (driver, target_view) = self.parse_target(target)?;
+        let manifest = self.manifest(&driver)?;
+        // View context precedence: explicit arg > target's view >
+        // driver's first view.
+        let view_id = match view.or(target_view.as_deref()) {
+            Some(v) => v.to_string(),
+            None => manifest
+                .views
+                .first()
+                .map(|v| v.id.clone())
+                .ok_or_else(|| PavoError::UnknownView {
+                    driver: driver.clone(),
+                    view: "<default>".to_string(),
+                })?,
+        };
+        if !manifest.views.iter().any(|v| v.id == view_id) {
+            return Err(PavoError::UnknownView {
+                driver,
+                view: view_id,
+            });
+        }
+        let result = self.with_client(&driver, |client| {
+            client.invoke(Some(&view_id), action, action_target.as_ref(), params)
+        })?;
+        // Actions mutate state — drop every cached params variant of
         // this view so the next resolve re-fetches.
         self.view_cache
             .invalidate_prefix(&format!("{driver}:{view_id}\u{1f}"));
