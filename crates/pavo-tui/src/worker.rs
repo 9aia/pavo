@@ -12,10 +12,15 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
 use pavo_core::discovery::DriverInfo;
-use pavo_core::{host::ViewEntry, Chrome, Host, Params, ResolvedView, RouteEntry};
-use pavo_protocol::wire::SubmitResult;
-use pavo_protocol::RenderModel;
+use pavo_core::{
+    collect_actions, host::ViewEntry, menu_entries, ops_actions, Chrome, Host, Params,
+    ResolvedView, RouteEntry,
+};
+use pavo_protocol::wire::{ActionResult, SubmitResult};
+use pavo_protocol::{Action, MenuEntry, RenderModel};
 use std::collections::HashMap;
+
+use crate::actions::{dedupe_ui_actions, UiAction};
 
 /// One discovered driver, flattened for the rail.
 #[derive(Clone, Debug)]
@@ -48,6 +53,24 @@ pub enum Cmd {
         /// Field `key` → JSON value (editable fields only).
         values: Params,
     },
+    /// Invoke an interaction [`Action`] — the `invoke` wire op.
+    /// `target` is the namespaced `driver:view` (driver resolution +
+    /// default view context); `view` optionally overrides the bare
+    /// view-id context; `action_target` is the opaque target JSON
+    /// (tree-item `{"id": …}`); `params` maps `ParamSchema.name` →
+    /// value.
+    Invoke {
+        /// Namespaced view ref (`demo:board`).
+        target: String,
+        /// The action id.
+        action: String,
+        /// Bare view-id context override.
+        view: Option<String>,
+        /// Opaque action target (selected item/row context).
+        action_target: Option<serde_json::Value>,
+        /// ParamSchema name → submitted value.
+        params: Params,
+    },
 }
 
 /// Events the host worker sends back.
@@ -77,6 +100,13 @@ pub enum Ev {
         /// driver claims kinds on the `tui` surface or every plugin
         /// call failed (built-in rendering covers those nodes).
         renders: HashMap<String, RenderModel>,
+        /// Interaction actions collected for this view — manifest +
+        /// node + tree-item scopes (deduped by id, scope precedence
+        /// item > node > manifest), plus ops-derived actions.
+        actions: Vec<UiAction>,
+        /// The resolved driver's `contributes.menus[]` palette
+        /// entries.
+        menus: Vec<MenuEntry>,
     },
     /// A [`Cmd::Reload`] finished.
     Reloaded {
@@ -92,6 +122,18 @@ pub enum Ev {
     Submit {
         /// The submit outcome.
         result: Result<SubmitResult, String>,
+    },
+    /// A [`Cmd::Invoke`] finished — `Err` carries the display string
+    /// (transport/driver `ok:false`). When the result carried a fresh
+    /// view, `actions`/`menus` are recollected for it so the canvas
+    /// and palette stay in sync.
+    Invoke {
+        /// The invoke outcome.
+        result: Result<ActionResult, String>,
+        /// Actions for the swapped-in view (empty otherwise).
+        actions: Vec<UiAction>,
+        /// Menus for the swapped-in view's driver (empty otherwise).
+        menus: Vec<MenuEntry>,
     },
 }
 
@@ -111,6 +153,10 @@ pub fn spawn() -> Worker {
     let (ev_tx, ev_rx) = channel::<Ev>();
     thread::spawn(move || {
         let mut host = Host::discover();
+        // Ops-manifest → actions fallback, fetched once per driver
+        // (the `query "ops"` round-trip is cached; drivers without an
+        // ops surface answer an error → no derived actions).
+        let mut ops_cache: HashMap<String, Vec<Action>> = HashMap::new();
         boot(&mut host, &ev_tx);
         while let Ok(cmd) = rx.recv() {
             match cmd {
@@ -129,11 +175,18 @@ pub fn spawn() -> Worker {
                         .ok()
                         .map(|rv| host.render_view_plugins(rv, "tui", None))
                         .unwrap_or_default();
+                    let (actions, menus) = resolved
+                        .as_ref()
+                        .ok()
+                        .map(|rv| collect_view_actions(&host, rv, &mut ops_cache))
+                        .unwrap_or_default();
                     let result = resolved.map(Box::new);
                     let _ = ev_tx.send(Ev::View {
                         target,
                         result,
                         renders,
+                        actions,
+                        menus,
                     });
                 }
                 Cmd::Reload => {
@@ -155,6 +208,33 @@ pub fn spawn() -> Worker {
                         .submit(&target, form.as_deref(), values)
                         .map_err(|e| e.to_string());
                     let _ = ev_tx.send(Ev::Submit { result });
+                }
+                Cmd::Invoke {
+                    target,
+                    action,
+                    view,
+                    action_target,
+                    params,
+                } => {
+                    let result = host
+                        .invoke(&target, &action, view.as_deref(), action_target, params)
+                        .map_err(|e| e.to_string());
+                    // A fresh ViewResult in the result gets its own
+                    // action/menu collection so the app can swap
+                    // them in with the view.
+                    let (actions, menus) = match &result {
+                        Ok(res) => res
+                            .view
+                            .as_ref()
+                            .map(|v| collect_for_view_result(&host, &target, v, &mut ops_cache))
+                            .unwrap_or_default(),
+                        Err(_) => (Vec::new(), Vec::new()),
+                    };
+                    let _ = ev_tx.send(Ev::Invoke {
+                        result,
+                        actions,
+                        menus,
+                    });
                 }
             }
         }
@@ -185,6 +265,69 @@ fn boot(host: &mut Host, ev_tx: &Sender<Ev>) {
         chrome,
         routes,
     });
+}
+
+/// Collect the interaction surface for a resolved view: declared
+/// actions (manifest + node + tree-item scopes) plus the
+/// ops-manifest fallback, deduped by id; and the driver's
+/// `contributes.menus[]` for the palette.
+fn collect_view_actions(
+    host: &Host,
+    rv: &ResolvedView,
+    ops_cache: &mut HashMap<String, Vec<Action>>,
+) -> (Vec<UiAction>, Vec<MenuEntry>) {
+    collect_for_view_result(host, &rv.namespaced, &rv.result, ops_cache)
+}
+
+/// [`collect_view_actions`] for an arbitrary [`ViewResult`] — used
+/// both for resolves (`namespaced` = `driver:view`) and for fresh
+/// views returned inside an [`ActionResult`]. `target` supplies the
+/// driver kind (`"drv:view"` or bare `"drv"`).
+fn collect_for_view_result(
+    host: &Host,
+    target: &str,
+    view_result: &pavo_protocol::wire::ViewResult,
+    ops_cache: &mut HashMap<String, Vec<Action>>,
+) -> (Vec<UiAction>, Vec<MenuEntry>) {
+    let driver = target.split(':').next().unwrap_or(target).to_string();
+    let Ok(manifest) = host.manifest(&driver) else {
+        return (Vec::new(), Vec::new());
+    };
+    let menus = menu_entries(&manifest).to_vec();
+    let namespaced = format!("{driver}:{}", view_result.view.id);
+    let mut ui: Vec<UiAction> = collect_actions(&manifest, view_result)
+        .into_iter()
+        .map(|s| UiAction {
+            action: s.action.into_owned(),
+            scope: s.scope,
+            target: namespaced.clone(),
+            view: s.view,
+            item_id: s.item_id.map(|id| id.into_owned()),
+        })
+        .collect();
+    // Zero-declaration fallback: the driver's ops manifest derives
+    // one action per op (fetched once per driver, cached).
+    let derived = ops_cache
+        .entry(driver.clone())
+        .or_insert_with(|| ops_manifest_actions(host, &driver));
+    for action in derived.iter().cloned() {
+        ui.push(UiAction {
+            action,
+            scope: pavo_core::ActionScope::Manifest,
+            target: namespaced.clone(),
+            view: Some(view_result.view.id.clone()),
+            item_id: None,
+        });
+    }
+    (dedupe_ui_actions(ui), menus)
+}
+
+/// `query "ops"` → [`ops_actions`]. Best-effort: drivers without an
+/// ops surface (or a failing query) yield no derived actions.
+fn ops_manifest_actions(host: &Host, driver: &str) -> Vec<Action> {
+    host.query(driver, "ops", Params::new())
+        .map(|qr| ops_actions(&qr.data))
+        .unwrap_or_default()
 }
 
 /// `--list` path — synchronous discovery + listing, no TUI.
@@ -299,6 +442,7 @@ mod tests {
                 target,
                 result,
                 renders,
+                ..
             } => {
                 assert_eq!(target, "definitely-not-a-driver:nope");
                 assert!(result.is_err());

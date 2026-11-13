@@ -19,6 +19,7 @@ use crossterm::event::KeyCode;
 use pavo_core::Params;
 use serde_json::{Map, Value};
 
+use crate::actions::UiAction;
 use crate::model::{FormFieldSpec, FormSpec};
 
 /// A minimal single-line editor: text plus a char-index cursor.
@@ -183,6 +184,12 @@ pub struct FormSession {
     pub message: Option<String>,
     /// A submit is in flight — input is ignored except `Esc`.
     pub busy: bool,
+    /// Set when this session is an action auto-form (params compiled
+    /// via [`crate::actions::action_form_spec`]) — Enter validates
+    /// against the action's `ParamSchema`s and routes to `invoke`
+    /// (danger gate included) instead of the `submit` wire op.
+    /// `None` for hand-authored driver forms.
+    pub action: Option<UiAction>,
 }
 
 impl FormSession {
@@ -215,6 +222,7 @@ impl FormSession {
             errors: HashMap::new(),
             message: None,
             busy: false,
+            action: None,
         };
         session.focus = session
             .order

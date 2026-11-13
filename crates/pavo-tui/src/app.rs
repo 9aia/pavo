@@ -21,19 +21,24 @@
 //! bar, no feed polling — so they render as contribution sections on
 //! the dashboard (see `model::build_dashboard`).
 
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton};
-use pavo_core::{Chrome, Params, ResolvedView, RouteEntry, RouteKind, ViewEntry};
-use pavo_protocol::RenderModel;
+use pavo_core::{ActionScope, Chrome, Params, ResolvedView, RouteEntry, RouteKind, ViewEntry};
+use pavo_protocol::{DangerLevel, MenuEntry, RenderModel};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
-use std::collections::HashMap;
 
-use crate::form::{FieldEdit, FormSession, SessionCmd};
+use crate::actions::{
+    action_form_spec, coerce_params, palette_entries, parse_key_spec, plan_action, ConfirmCmd,
+    ConfirmSession, InvokeStep, PaletteCmd, PaletteEntry, PaletteSession, PendingInvoke,
+    TypeTargetCmd, TypeTargetSession, UiAction, CHORD_TIMEOUT,
+};
+use crate::form::{FieldEdit, FormSession, LineEdit, SessionCmd};
 use crate::model::{self, FormMark, Model, RowStyle, Selection};
 use crate::worker::{Cmd, DriverRow, Ev, Worker};
 
@@ -128,8 +133,34 @@ pub struct App {
     open_armed: Option<usize>,
     /// Open form-editing session (overlay) — Enter on a form field
     /// or submit row in the canvas opens one; `submit` wire op
-    /// fires from inside it.
+    /// fires from inside it. Also hosts action auto-forms (a
+    /// `FormSession` with `action` set routes to `invoke` instead).
     form_session: Option<FormSession>,
+    /// Interaction actions collected for the current view (worker
+    /// ships them with [`Ev::View`]) — palette entries and key
+    /// chords derive from these.
+    actions: Vec<UiAction>,
+    /// `contributes.menus[]` of the current view's driver.
+    menus: Vec<MenuEntry>,
+    /// Open command palette (`:` key) — fuzzy filter over actions +
+    /// menu entries.
+    palette: Option<PaletteSession>,
+    /// Open `danger: confirm` modal.
+    confirm: Option<ConfirmSession>,
+    /// Open `danger: type-target` modal.
+    type_target: Option<TypeTargetSession>,
+    /// Pending chord prefix + when it was pressed — multi-char
+    /// action `keys[]` specs (`"dd"`) resolve through this; a lone
+    /// prefix char waits [`CHORD_TIMEOUT`] before replaying as a
+    /// normal keypress.
+    pending_key: Option<(String, Instant)>,
+    /// Full key spec → action for bound keys. Item-scoped actions
+    /// are excluded — they carry a row target the canvas doesn't
+    /// track, so they stay palette-only.
+    key_chords: HashMap<String, UiAction>,
+    /// Proper prefixes of multi-char specs — tells `chord_or_key`
+    /// whether a lone char might continue into a chord.
+    chord_prefixes: HashSet<String>,
 }
 
 impl App {
@@ -165,6 +196,14 @@ impl App {
             initial,
             open_armed: None,
             form_session: None,
+            actions: Vec::new(),
+            menus: Vec::new(),
+            palette: None,
+            confirm: None,
+            type_target: None,
+            pending_key: None,
+            key_chords: HashMap::new(),
+            chord_prefixes: HashSet::new(),
         }
     }
 
@@ -176,6 +215,14 @@ impl App {
         }
         // Poll ~100ms so worker events land even without input.
         if !crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
+            // A stale chord prefix replays as normal keypresses.
+            if self
+                .pending_key
+                .as_ref()
+                .is_some_and(|(_, t)| t.elapsed() > CHORD_TIMEOUT)
+            {
+                self.flush_pending();
+            }
             return true;
         }
         match crossterm::event::read() {
@@ -216,6 +263,8 @@ impl App {
                 target,
                 result,
                 renders,
+                actions,
+                menus,
             } => {
                 self.loading = None;
                 self.plugin_renders = renders;
@@ -228,6 +277,10 @@ impl App {
                         self.scroll = (0, 0);
                         self.detail = None;
                         self.form_session = None;
+                        self.palette = None;
+                        self.confirm = None;
+                        self.type_target = None;
+                        self.apply_actions(actions, menus);
                         self.pane = Pane::Canvas;
                         self.status = format!("loaded {}", self.last_target);
                     }
@@ -249,6 +302,11 @@ impl App {
                 self.status = "chrome reloaded".to_string();
             }
             Ev::Submit { result } => self.on_submit(result),
+            Ev::Invoke {
+                result,
+                actions,
+                menus,
+            } => self.on_invoke(result, actions, menus),
         }
     }
 
@@ -277,28 +335,11 @@ impl App {
                     .collect();
                 session.message = res.message.clone();
                 if let Some(view) = res.view {
-                    // Fresh ViewResult — swap it into the canvas.
-                    // Plugin renders keyed to the old tree are stale;
-                    // built-in rendering covers the new one.
-                    if let Some(Canvas::View(rv)) = &self.current {
-                        let fresh = pavo_core::ResolvedView {
-                            driver: rv.driver.clone(),
-                            view: rv.view.clone(),
-                            namespaced: rv.namespaced.clone(),
-                            result: *view,
-                        };
-                        self.current = Some(Canvas::View(Box::new(fresh)));
-                        self.plugin_renders.clear();
-                        self.sel_pos = 0;
-                        self.scroll = (0, 0);
-                        self.detail = None;
-                        self.form_session = None;
-                        self.pane = Pane::Canvas;
-                        self.status = res
-                            .message
-                            .clone()
-                            .unwrap_or_else(|| "submitted".to_string());
-                    }
+                    self.swap_result_view(*view);
+                    self.status = res
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| "submitted".to_string());
                 } else {
                     self.status = res
                         .message
@@ -311,6 +352,277 @@ impl App {
                 self.status = format!("submit failed: {e}");
             }
         }
+    }
+
+    /// Swap a fresh [`ViewResult`] into the canvas — shared by the
+    /// `submit` and `invoke` result paths. Plugin renders keyed to
+    /// the old tree are stale; built-in rendering covers the new
+    /// one until the next resolve.
+    fn swap_result_view(&mut self, view: pavo_protocol::wire::ViewResult) {
+        if let Some(Canvas::View(rv)) = &self.current {
+            let fresh = pavo_core::ResolvedView {
+                driver: rv.driver.clone(),
+                view: rv.view.clone(),
+                namespaced: rv.namespaced.clone(),
+                result: view,
+            };
+            self.current = Some(Canvas::View(Box::new(fresh)));
+            self.plugin_renders.clear();
+            self.sel_pos = 0;
+            self.scroll = (0, 0);
+            self.detail = None;
+            self.form_session = None;
+            self.pane = Pane::Canvas;
+        }
+    }
+
+    /// Store the worker-collected action/menu lists and rebuild the
+    /// key-chord table.
+    fn apply_actions(&mut self, actions: Vec<UiAction>, menus: Vec<MenuEntry>) {
+        self.actions = actions;
+        self.menus = menus;
+        self.pending_key = None; // chord prefixes reference the old bindings
+        self.rebuild_keybinds();
+    }
+
+    /// (Re)build `key_chords`/`chord_prefixes` from the current
+    /// actions' `keys[]`. Item-scoped actions are skipped — they
+    /// carry a row target the canvas doesn't track, so binding them
+    /// globally would invoke against the wrong item (they remain
+    /// palette entries).
+    fn rebuild_keybinds(&mut self) {
+        self.key_chords.clear();
+        self.chord_prefixes.clear();
+        for ui in &self.actions {
+            if ui.scope == ActionScope::Item {
+                continue;
+            }
+            for spec in &ui.action.keys {
+                let Some(seq) = parse_key_spec(spec) else {
+                    continue;
+                };
+                if seq.is_empty() {
+                    continue;
+                }
+                // First declaration of a spec wins.
+                self.key_chords
+                    .entry(seq.clone())
+                    .or_insert_with(|| ui.clone());
+                let chars: Vec<char> = seq.chars().collect();
+                for i in 1..chars.len() {
+                    self.chord_prefixes
+                        .insert(chars[..i].iter().collect::<String>());
+                }
+            }
+        }
+    }
+
+    /// An `invoke` wire-op answer landed. `result.view` swaps the
+    /// canvas (with freshly collected actions/menus); without one
+    /// the host already invalidated its view cache, so a refresh
+    /// refetches — unless `errors` rejected the invoke, in which
+    /// case the status line carries them and nothing navigates.
+    fn on_invoke(
+        &mut self,
+        result: Result<pavo_protocol::wire::ActionResult, String>,
+        actions: Vec<UiAction>,
+        menus: Vec<MenuEntry>,
+    ) {
+        match result {
+            Ok(res) => {
+                let mut msg = res.message.clone().unwrap_or_else(|| "invoked".to_string());
+                if !res.errors.is_empty() {
+                    let errs = res
+                        .errors
+                        .iter()
+                        .map(|(k, v)| {
+                            format!(
+                                "{k}: {}",
+                                v.as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| v.to_string())
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    msg = format!("{msg} ({errs})");
+                }
+                if let Some(view) = res.view {
+                    self.swap_result_view(*view);
+                    self.apply_actions(actions, menus);
+                    self.status = msg;
+                } else if res.errors.is_empty() {
+                    // No fresh view — the host invalidated its cache;
+                    // refetch so the canvas reflects the mutation.
+                    self.refresh();
+                    self.status = msg;
+                } else {
+                    self.status = msg;
+                }
+            }
+            Err(e) => {
+                self.status = format!("invoke failed: {e}");
+            }
+        }
+    }
+
+    /// Activate a collected action: params open the auto-form;
+    /// everything else goes straight to the danger gate.
+    fn activate_action(&mut self, ui: UiAction) {
+        match plan_action(&ui.action) {
+            InvokeStep::Form => self.open_action_form(ui),
+            _ => self.gate_action(ui, Params::new()),
+        }
+    }
+
+    /// Open the auto-form for an action's `params` — the existing
+    /// [`FormSession`] editor, tagged so Enter routes to `invoke`
+    /// (with param validation + the danger gate) instead of `submit`.
+    fn open_action_form(&mut self, ui: UiAction) {
+        let spec = action_form_spec(&ui.action);
+        let mut session = FormSession::open(spec, ui.target.clone(), None);
+        session.action = Some(ui);
+        self.status = format!("{} — Enter invokes, Esc closes", session.spec.title);
+        self.form_session = Some(session);
+    }
+
+    /// The danger gate after params are collected (or immediately
+    /// for parameterless actions): `none` invokes, `confirm` opens
+    /// the modal, `type-target` opens the type-the-id modal.
+    fn gate_action(&mut self, ui: UiAction, params: Params) {
+        let pending = PendingInvoke::new(ui, params);
+        match pending.ui.action.danger {
+            DangerLevel::None => self.send_invoke(pending),
+            DangerLevel::Confirm => {
+                self.status = format!("confirm: {} — y/n", pending.ui.action.label);
+                self.confirm = Some(ConfirmSession::new(pending));
+            }
+            DangerLevel::TypeTarget => {
+                self.status = format!("type to confirm: {}", pending.ui.action.label);
+                self.type_target = Some(TypeTargetSession::new(pending));
+            }
+        }
+    }
+
+    /// Fire `Cmd::Invoke` for a fully-gated pending action.
+    fn send_invoke(&mut self, pending: PendingInvoke) {
+        let _ = self.worker.tx.send(Cmd::Invoke {
+            target: pending.ui.target.clone(),
+            action: pending.ui.action.id.clone(),
+            view: pending.ui.view.clone(),
+            action_target: pending.target.clone(),
+            params: pending.params.clone(),
+        });
+        self.status = format!("invoking {}…", pending.ui.action.label);
+    }
+
+    /// `:` — open the command palette over the current view's
+    /// actions + menu entries.
+    fn open_palette(&mut self) {
+        let entries = palette_entries(&self.actions, &self.menus);
+        if entries.is_empty() {
+            self.status = "no actions or menu entries".to_string();
+            return;
+        }
+        self.palette = Some(PaletteSession::open(entries));
+        self.status = "palette — type to filter, Enter runs".to_string();
+    }
+
+    /// Activate a palette entry: actions run the normal
+    /// danger/param flow; menu entries resolve their `action` (by
+    /// id, `driver:` prefix tolerated — v1 stays driver-local) or
+    /// `route` (chrome route → view, or a bare `driver:view` link).
+    fn activate_palette_entry(&mut self, entry: PaletteEntry) {
+        match entry {
+            PaletteEntry::Action(ui) => self.activate_action(ui),
+            PaletteEntry::Menu(m) => {
+                if let Some(aid) = &m.action {
+                    let bare = aid.rsplit(':').next().unwrap_or(aid);
+                    match self
+                        .actions
+                        .iter()
+                        .find(|u| u.action.id == *aid || u.action.id == bare)
+                        .cloned()
+                    {
+                        Some(ui) => self.activate_action(ui),
+                        None => self.status = format!("unknown action: {aid}"),
+                    }
+                } else if let Some(route) = &m.route {
+                    self.activate_route(route);
+                } else {
+                    self.status = format!("menu entry {} has no action/route", m.id);
+                }
+            }
+        }
+    }
+
+    /// Navigate to a menu `route`: chrome routes resolve through
+    /// [`App::route_target`]; a `driver:view`-shaped route resolves
+    /// directly.
+    fn activate_route(&mut self, route: &str) {
+        if let Some(t) = self.route_target(route) {
+            self.resolve(&t);
+        } else if route.contains(':') {
+            self.resolve(route);
+        } else {
+            self.status = format!("unresolvable route: {route}");
+        }
+    }
+
+    /// Keys while the palette is open — the session owns the
+    /// keyboard; Enter activates the selected entry.
+    fn on_palette_key(&mut self, code: KeyCode) -> bool {
+        let cmd = match self.palette.as_mut() {
+            Some(s) => s.key(code),
+            None => return true,
+        };
+        match cmd {
+            PaletteCmd::Close => self.palette = None,
+            PaletteCmd::Activate(entry) => {
+                self.palette = None;
+                self.activate_palette_entry(*entry);
+            }
+            PaletteCmd::None => {}
+        }
+        true
+    }
+
+    /// Keys while the confirm modal is open — y/Enter invokes, n/Esc
+    /// cancels.
+    fn on_confirm_key(&mut self, code: KeyCode) -> bool {
+        let cmd = match self.confirm.as_mut() {
+            Some(s) => s.key(code),
+            None => return true,
+        };
+        match cmd {
+            ConfirmCmd::Close => self.confirm = None,
+            ConfirmCmd::Confirm => {
+                if let Some(s) = self.confirm.take() {
+                    self.send_invoke(s.pending);
+                }
+            }
+            ConfirmCmd::None => {}
+        }
+        true
+    }
+
+    /// Keys while the type-target modal is open — Enter on an exact
+    /// id match invokes; Esc cancels.
+    fn on_type_target_key(&mut self, code: KeyCode) -> bool {
+        let cmd = match self.type_target.as_mut() {
+            Some(s) => s.key(code),
+            None => return true,
+        };
+        match cmd {
+            TypeTargetCmd::Close => self.type_target = None,
+            TypeTargetCmd::Submit => {
+                if let Some(s) = self.type_target.take() {
+                    self.send_invoke(s.pending);
+                }
+            }
+            TypeTargetCmd::None => {}
+        }
+        true
     }
 
     /// First view of the first driver — the default landing.
@@ -386,6 +698,11 @@ impl App {
 
     fn resolve(&mut self, target: &str) {
         self.form_session = None;
+        self.palette = None;
+        self.confirm = None;
+        self.type_target = None;
+        self.pending_key = None;
+        self.apply_actions(Vec::new(), Vec::new());
         if target == "dashboard" {
             self.current = Some(Canvas::Dashboard);
             self.load_error = None;
@@ -477,17 +794,49 @@ impl App {
     }
 
     /// Enter inside the session → `submit` wire op (after a local
-    /// required-field check).
+    /// required-field check). Sessions tagged with an action
+    /// (auto-forms) validate against the action's `ParamSchema`s and
+    /// route through the danger gate to `invoke` instead.
     fn submit_session(&mut self, values: Params) {
+        let action_ui = {
+            let Some(s) = &mut self.form_session else {
+                return;
+            };
+            let missing = s.required_errors();
+            if !missing.is_empty() {
+                s.errors = missing;
+                s.message = Some("missing required fields".to_string());
+                return;
+            }
+            s.action.clone()
+        };
+        if let Some(ui) = action_ui {
+            let params = coerce_params(&ui.action, values);
+            let errors = pavo_core::validate_params(&ui.action, &params);
+            if !errors.is_empty() {
+                if let Some(s) = &mut self.form_session {
+                    s.errors = errors
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                v.as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| v.to_string()),
+                            )
+                        })
+                        .collect();
+                    s.message = Some("invalid params".to_string());
+                }
+                return;
+            }
+            self.form_session = None;
+            self.gate_action(ui, params);
+            return;
+        }
         let Some(s) = &mut self.form_session else {
             return;
         };
-        let missing = s.required_errors();
-        if !missing.is_empty() {
-            s.errors = missing;
-            s.message = Some("missing required fields".to_string());
-            return;
-        }
         s.busy = true;
         s.message = None;
         s.errors.clear();
@@ -578,6 +927,26 @@ impl App {
     }
 
     fn on_key(&mut self, code: KeyCode) -> bool {
+        // A chord prefix that outlived its timeout replays as normal
+        // keypresses before the new key is handled.
+        if self
+            .pending_key
+            .as_ref()
+            .is_some_and(|(_, t)| t.elapsed() > CHORD_TIMEOUT)
+        {
+            self.flush_pending();
+        }
+        // Overlays own the keyboard, topmost first: palette, the two
+        // danger modals, the form editor, then help.
+        if self.palette.is_some() {
+            return self.on_palette_key(code);
+        }
+        if self.type_target.is_some() {
+            return self.on_type_target_key(code);
+        }
+        if self.confirm.is_some() {
+            return self.on_confirm_key(code);
+        }
         // An open form editor owns the keyboard — printable chars
         // edit fields, they must never trigger app bindings.
         if self.form_session.is_some() {
@@ -591,6 +960,79 @@ impl App {
             }
             return true;
         }
+        match code {
+            KeyCode::Char(c) => self.chord_or_key(c),
+            // Non-char keys can't continue a chord — flush any
+            // pending prefix, then handle normally.
+            other => {
+                self.flush_pending();
+                self.key_now(other)
+            }
+        }
+    }
+
+    /// Replay a pending chord prefix as ordinary keypresses (used on
+    /// timeout and when the next char can't continue the chord).
+    fn flush_pending(&mut self) {
+        if let Some((buf, _)) = self.pending_key.take() {
+            for c in buf.chars() {
+                if !self.key_now(KeyCode::Char(c)) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Char-key dispatch with chord support: a pending prefix plus
+    /// `c` may complete a multi-char action `keys[]` spec; a lone
+    /// char that prefixes some spec waits for [`CHORD_TIMEOUT`]; an
+    /// exact single-char spec activates its action; anything else
+    /// falls through to the built-in [`App::key_now`] bindings.
+    /// Returns `false` when the app should quit (propagated from
+    /// `q`/`Esc` replayed out of a dead chord).
+    fn chord_or_key(&mut self, c: char) -> bool {
+        if let Some((buf, _)) = self.pending_key.take() {
+            let combined = format!("{buf}{c}");
+            if let Some(ui) = self.key_chords.get(&combined).cloned() {
+                self.activate_action(ui);
+                return true;
+            }
+            if self.chord_prefixes.contains(&combined) {
+                self.pending_key = Some((combined, Instant::now()));
+                return true;
+            }
+            // Dead end — replay the buffered prefix, then treat `c`
+            // fresh (it may start a chord of its own).
+            for pc in buf.chars() {
+                if !self.key_now(KeyCode::Char(pc)) {
+                    return false;
+                }
+            }
+            return self.chord_or_key(c);
+        }
+        let s = c.to_string();
+        if self.chord_prefixes.contains(&s) {
+            self.pending_key = Some((s, Instant::now()));
+            return true;
+        }
+        // Built-in single-char bindings win over action keys — a
+        // driver binding `q`/`j`/`d`/… can't shadow navigation.
+        // (Chords starting with those chars still work: the prefix
+        // waits, and the completed spec matches before `key_now`.)
+        const BUILTIN_CHARS: &[char] = &['q', '?', 'r', 'd', 'g', 'x', 'j', 'k', 'h', 'l', ':'];
+        if !BUILTIN_CHARS.contains(&c) {
+            if let Some(ui) = self.key_chords.get(&s).cloned() {
+                self.activate_action(ui);
+                return true;
+            }
+        }
+        self.key_now(KeyCode::Char(c))
+    }
+
+    /// The built-in key bindings — everything that isn't an action
+    /// chord or a single-char action spec lands here. Returns
+    /// `false` only for the quit path.
+    fn key_now(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 if self.pane == Pane::Detail {
@@ -627,6 +1069,7 @@ impl App {
             KeyCode::Enter => self.enter(),
             KeyCode::Char('h') => self.scroll.0 = self.scroll.0.saturating_sub(4),
             KeyCode::Char('l') => self.scroll.0 += 4,
+            KeyCode::Char(':') => self.open_palette(),
             _ => {}
         }
         true
@@ -807,6 +1250,10 @@ impl App {
                 self.scroll = (0, 0);
                 self.detail = None;
                 self.form_session = None;
+                self.palette = None;
+                self.confirm = None;
+                self.type_target = None;
+                self.apply_actions(Vec::new(), Vec::new());
                 self.pane = Pane::Canvas;
                 self.status = tab.label.clone();
             }
@@ -879,6 +1326,15 @@ impl App {
         }
         if self.form_session.is_some() {
             self.draw_form(f, area);
+        }
+        if let Some(s) = &self.palette {
+            self.draw_palette(f, area, s);
+        }
+        if let Some(s) = &self.confirm {
+            self.draw_confirm(f, area, s);
+        }
+        if let Some(s) = &self.type_target {
+            self.draw_type_target(f, area, s);
         }
     }
 
@@ -1255,8 +1711,201 @@ impl App {
             .render(rect, f.buffer_mut());
     }
 
+    /// The command palette: filter line on top, fuzzy-matched
+    /// entries below (section headers when the group changes),
+    /// detail of the selected entry, footer hints.
+    fn draw_palette(&self, f: &mut Frame, area: Rect, s: &PaletteSession) {
+        let w = 76u16.min(area.width.saturating_sub(4));
+        let inner_h = area.height.saturating_sub(4) as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        // Input line with a cursor block at the edit position.
+        let mut input = vec![Span::styled("> ", Style::default().fg(Color::Cyan))];
+        input.extend(line_edit_spans(&s.edit, Style::default()));
+        lines.push(Line::from(input));
+        lines.push(Line::from(""));
+        // Entries — section header whenever the group changes,
+        // capped so the box never overflows.
+        let mut last_section: Option<String> = None;
+        let mut shown = 0usize;
+        for (row, &i) in s.matches.iter().enumerate() {
+            if row < s.sel.saturating_sub(inner_h.saturating_sub(1)) {
+                continue; // scrolled off the top
+            }
+            if shown >= inner_h {
+                break;
+            }
+            let e = &s.entries[i];
+            let section = e.section();
+            if section != last_section {
+                last_section = section.clone();
+                if let Some(sec) = &section {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {sec} "),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    shown += 1;
+                    if shown >= inner_h {
+                        break;
+                    }
+                }
+            }
+            let selected = row == s.sel;
+            let marker = if selected { "▸" } else { " " };
+            let mut spans = vec![
+                Span::styled(
+                    format!("{marker} "),
+                    if selected {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::styled(
+                    e.label().to_string(),
+                    if selected {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::styled(
+                    format!("  {}", e.detail()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ];
+            if selected {
+                for sp in &mut spans {
+                    sp.style = sp.style.bg(Color::Rgb(40, 40, 60));
+                }
+            }
+            lines.push(Line::from(spans));
+            shown += 1;
+        }
+        if s.matches.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no matches)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " ↑↓/jk select · Enter run · Esc close ",
+            Style::default().fg(Color::DarkGray),
+        )));
+        let h = (lines.len() as u16 + 2)
+            .min(area.height.saturating_sub(2))
+            .max(4);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let rect = Rect::new(x, y, w, h);
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Span::styled(
+                " actions ",
+                Style::default().fg(Color::Yellow),
+            ));
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .render(rect, f.buffer_mut());
+    }
+
+    /// The `danger: confirm` modal — action label, optional
+    /// description, context hint; y/Enter confirms.
+    fn draw_confirm(&self, f: &mut Frame, area: Rect, s: &ConfirmSession) {
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(" Run “{}”? ", s.pending.ui.action.label),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        if let Some(d) = &s.pending.ui.action.description {
+            lines.push(Line::from(Span::styled(
+                format!(" {d}"),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+        if let Some(t) = &s.pending.ui.action.target {
+            lines.push(Line::from(Span::styled(
+                format!(" context: {t}"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if !s.pending.params.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!(" params: {}", s.pending.params.len()),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " [y] confirm · [n/Esc] cancel ",
+            Style::default().fg(Color::DarkGray),
+        )));
+        let w = 56u16.min(area.width.saturating_sub(4));
+        let h = (lines.len() as u16 + 2)
+            .min(area.height.saturating_sub(2))
+            .max(4);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let rect = Rect::new(x, y, w, h);
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" confirm ");
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .render(rect, f.buffer_mut());
+    }
+
+    /// The `danger: type-target` modal — "Type <id> to confirm"
+    /// with the input buffer and a mismatch error line.
+    fn draw_type_target(&self, f: &mut Frame, area: Rect, s: &TypeTargetSession) {
+        let mut lines: Vec<Line> = Vec::new();
+        let prompt = match &s.expect {
+            Some(id) => format!(" Type {id} to confirm: "),
+            None => " Type to confirm: ".to_string(),
+        };
+        let mut prompt = vec![Span::styled(
+            prompt,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )];
+        prompt.extend(line_edit_spans(&s.edit, Style::default()));
+        lines.push(Line::from(prompt));
+        if let Some(e) = &s.error {
+            lines.push(Line::from(Span::styled(
+                format!(" {e}"),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Enter confirm · Esc cancel ",
+            Style::default().fg(Color::DarkGray),
+        )));
+        let w = 56u16.min(area.width.saturating_sub(4));
+        let h = (lines.len() as u16 + 2)
+            .min(area.height.saturating_sub(2))
+            .max(5);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let rect = Rect::new(x, y, w, h);
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title(" type to confirm ");
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .render(rect, f.buffer_mut());
+    }
+
     fn draw_help(&self, f: &mut Frame, area: Rect) {
-        let text = Text::from(vec![
+        let mut lines: Vec<Line> = vec![
             Line::from(Span::styled(
                 " keys ",
                 Style::default().add_modifier(Modifier::BOLD),
@@ -1272,12 +1921,42 @@ impl App {
             Line::from("  r            refresh current view / reload chrome"),
             Line::from("  d            dump view JSON → tmp file"),
             Line::from("  g            dump graph DOT → tmp file"),
+            Line::from("  :            command palette (actions + menus)"),
             Line::from("  x            close detail pane"),
             Line::from("  ?            this help"),
             Line::from("  q · Esc      quit (Esc closes detail/help first)"),
-        ]);
-        let w = 46u16.min(area.width.saturating_sub(4));
-        let h = 17u16.min(area.height.saturating_sub(2));
+        ];
+        // Bound action keys for the current view — the discoverable
+        // half of the interaction protocol.
+        let bound: Vec<&UiAction> = self
+            .actions
+            .iter()
+            .filter(|u| u.scope != ActionScope::Item && !u.action.keys.is_empty())
+            .collect();
+        if !bound.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " view actions ",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            for u in bound {
+                let keys = u.action.keys.join(" / ");
+                let mut text = format!("  {keys:<10} {}", u.action.label);
+                if u.action.danger != DangerLevel::None {
+                    text.push_str("  ⚠");
+                }
+                lines.push(Line::from(Span::styled(
+                    text,
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+        }
+        let text = Text::from(lines);
+        let w = 52u16.min(area.width.saturating_sub(4));
+        let h = u16::try_from(text.height() + 2)
+            .unwrap_or(u16::MAX)
+            .min(area.height.saturating_sub(2))
+            .max(4);
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(h)) / 2;
         let rect = Rect::new(x, y, w, h);
@@ -1390,6 +2069,27 @@ fn field_value_line<'a>(field: &'a FieldEdit, focused: bool) -> Line<'a> {
             Line::from(spans)
         }
     }
+}
+
+/// Render a [`LineEdit`] as spans with the cursor char in reversed
+/// video — shared by the palette filter and the type-target prompt.
+fn line_edit_spans<'a>(edit: &'a LineEdit, base: Style) -> Vec<Span<'a>> {
+    let chars: Vec<char> = edit.text.chars().collect();
+    let cursor = edit.cursor.min(chars.len());
+    let (before, cur, after) = if cursor < chars.len() {
+        (
+            chars[..cursor].iter().collect::<String>(),
+            chars[cursor].to_string(),
+            chars[cursor + 1..].iter().collect::<String>(),
+        )
+    } else {
+        (edit.text.clone(), " ".to_string(), String::new())
+    };
+    vec![
+        Span::styled(before, base),
+        Span::styled(cur, base.add_modifier(Modifier::REVERSED)),
+        Span::styled(after, base),
+    ]
 }
 
 fn row_style(s: RowStyle) -> Style {
@@ -1600,6 +2300,8 @@ mod tests {
             target: "demo:board".to_string(),
             result: Ok(Box::new(resolved("board"))),
             renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
         });
         draw(&mut app, 120, 40);
     }
@@ -1694,6 +2396,8 @@ mod tests {
             target: "demo:board".to_string(),
             result: Ok(Box::new(resolved("board"))),
             renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
         });
         assert!(matches!(app.current, Some(Canvas::View(_))));
         assert_eq!(app.pane, Pane::Canvas);
@@ -1731,6 +2435,8 @@ mod tests {
             target: "demo:missing".to_string(),
             result: Err("driver exploded".to_string()),
             renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
         });
         assert!(app.load_error.is_some());
         draw(&mut app, 120, 40);
@@ -1745,6 +2451,8 @@ mod tests {
             target: "dashboard".to_string(),
             result: Ok(Box::new(resolved("board"))),
             renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
         });
         app.resolve("dashboard");
         assert!(matches!(app.current, Some(Canvas::Dashboard)));
@@ -1767,6 +2475,8 @@ mod tests {
             target: "demo:board".to_string(),
             result: Ok(Box::new(resolved("board"))),
             renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
         });
         draw(&mut app, 120, 40);
         // Scroll events adjust offsets.
@@ -1843,6 +2553,8 @@ mod tests {
             target: "demo:new".to_string(),
             result: Ok(Box::new(resolved_form())),
             renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
         });
         while rx_cmd.try_recv().is_ok() {} // drain boot Resolve
                                            // Enter on the 'title' field row opens the editor.
@@ -1929,6 +2641,8 @@ mod tests {
             target: "demo:new".to_string(),
             result: Ok(Box::new(resolved_form())),
             renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
         });
         while rx_cmd.try_recv().is_ok() {}
         // Submit row (field: None) opens the session at first field.
@@ -1950,6 +2664,146 @@ mod tests {
         draw(&mut app, 120, 40);
     }
 
+    /// A manifest-scope [`UiAction`] for invoke-flow tests.
+    fn ui_action(id: &str, danger: DangerLevel, keys: &[&str]) -> UiAction {
+        UiAction {
+            action: pavo_protocol::Action {
+                id: id.to_string(),
+                label: format!("{id} label"),
+                icon: None,
+                danger,
+                keys: keys.iter().map(|s| s.to_string()).collect(),
+                params: Vec::new(),
+                target: None,
+                description: None,
+                driver: None,
+            },
+            scope: pavo_core::ActionScope::Manifest,
+            target: "demo:board".to_string(),
+            view: Some("board".to_string()),
+            item_id: None,
+        }
+    }
+
+    fn view_with_actions(actions: Vec<UiAction>) -> Ev {
+        Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+            actions,
+            menus: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn action_key_invokes_and_chord_works() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(view_with_actions(vec![
+            ui_action("refresh", DangerLevel::None, &["R"]),
+            ui_action("archive", DangerLevel::None, &["gz"]),
+        ]));
+        // Single-char spec 'R' fires immediately → Cmd::Invoke.
+        app.on_key(KeyCode::Char('R'));
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Invoke {
+                target,
+                action,
+                view,
+                action_target,
+                params,
+            }) => {
+                assert_eq!(target, "demo:board");
+                assert_eq!(action, "refresh");
+                assert_eq!(view.as_deref(), Some("board"));
+                assert!(action_target.is_none());
+                assert!(params.is_empty());
+            }
+            other => panic!("expected Invoke, got {other:?}"),
+        }
+        // Chord "gz": first 'g' is a builtin (dump graph) AND a
+        // chord prefix — it must wait, not dump.
+        app.on_key(KeyCode::Char('g'));
+        assert!(rx_cmd.try_recv().is_err(), "chord prefix consumed");
+        app.on_key(KeyCode::Char('z'));
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Invoke { action, .. }) => assert_eq!(action, "archive"),
+            other => panic!("expected Invoke, got {other:?}"),
+        }
+        // Invoke result with a fresh view swaps the canvas.
+        app.on_event(Ev::Invoke {
+            result: Ok(pavo_protocol::wire::ActionResult {
+                message: Some("done".to_string()),
+                ..Default::default()
+            }),
+            actions: Vec::new(),
+            menus: Vec::new(),
+        });
+        assert_eq!(app.status, "done");
+        // Result without a view refetches via Resolve(refresh).
+        app.on_event(Ev::Invoke {
+            result: Ok(pavo_protocol::wire::ActionResult::default()),
+            actions: Vec::new(),
+            menus: Vec::new(),
+        });
+        assert!(matches!(
+            rx_cmd.try_recv(),
+            Ok(Cmd::Resolve { refresh: true, .. })
+        ));
+        draw(&mut app, 120, 40);
+    }
+
+    #[test]
+    fn confirm_modal_gates_invoke() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(view_with_actions(vec![ui_action(
+            "delete",
+            DangerLevel::Confirm,
+            &["D"],
+        )]));
+        app.on_key(KeyCode::Char('D'));
+        // No Cmd yet — the modal is open.
+        assert!(rx_cmd.try_recv().is_err());
+        assert!(app.confirm.is_some());
+        draw(&mut app, 120, 40);
+        // 'n' cancels.
+        app.on_key(KeyCode::Char('n'));
+        assert!(app.confirm.is_none());
+        assert!(rx_cmd.try_recv().is_err());
+        // 'D' again, then 'y' → invoke fires.
+        app.on_key(KeyCode::Char('D'));
+        app.on_key(KeyCode::Char('y'));
+        assert!(matches!(rx_cmd.try_recv(), Ok(Cmd::Invoke { .. })));
+    }
+
+    #[test]
+    fn palette_filters_and_invokes_action() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(view_with_actions(vec![ui_action(
+            "todo.done",
+            DangerLevel::None,
+            &[],
+        )]));
+        app.on_key(KeyCode::Char(':'));
+        assert!(app.palette.is_some());
+        draw(&mut app, 120, 40);
+        // Filter to the action, Enter activates → invoke.
+        for c in "done".chars() {
+            app.on_key(KeyCode::Char(c));
+        }
+        app.on_key(KeyCode::Enter);
+        assert!(app.palette.is_none());
+        assert!(matches!(
+            rx_cmd.try_recv(),
+            Ok(Cmd::Invoke { action, .. }) if action == "todo.done"
+        ));
+    }
+
     #[test]
     fn small_terminal_still_draws() {
         let (mut app, _rx, _ev) = make_app();
@@ -1958,6 +2812,8 @@ mod tests {
             target: "demo:board".to_string(),
             result: Ok(Box::new(resolved("board"))),
             renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
         });
         app.help = true;
         draw(&mut app, 40, 10);
