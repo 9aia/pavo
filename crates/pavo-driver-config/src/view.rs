@@ -59,6 +59,8 @@ fn show_view() -> ViewSpec {
                      project-level file."}
             ]
         })),
+        item_route: None,
+        filter_param: None,
     }
 }
 
@@ -97,6 +99,8 @@ fn edit_view() -> ViewSpec {
                      parse as JSON when possible, else strings."}
             ]
         })),
+        item_route: None,
+        filter_param: None,
     }
 }
 
@@ -131,6 +135,8 @@ fn sources_view() -> ViewSpec {
                      doesn't exist yet (`set` will create it)."}
             ]
         })),
+        item_route: None,
+        filter_param: None,
     }
 }
 

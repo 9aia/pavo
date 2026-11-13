@@ -105,6 +105,8 @@ fn spec(id: &str) -> ViewSpec {
             },
             ..Default::default()
         }),
+        item_route: None,
+        filter_param: None,
     }
 }
 

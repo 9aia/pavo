@@ -21,12 +21,16 @@
 //! bar, no feed polling — so they render as contribution sections on
 //! the dashboard (see `model::build_dashboard`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton};
-use pavo_core::{ActionScope, Chrome, Params, ResolvedView, RouteEntry, RouteKind, ViewEntry};
-use pavo_protocol::{DangerLevel, MenuEntry, RenderModel};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton};
+use pavo_core::{
+    builtin_binding_sources, effective_bindings, menu_binding_source, menu_command, ActionScope,
+    Chrome, Command, CommandBinding, HostBuiltin, KeySpec, Params, ResolveContext, Resolved,
+    ResolvedInvoke, ResolvedView, RouteEntry, RouteKind, ViewEntry,
+};
+use pavo_protocol::{DangerLevel, DriverManifest, MenuEntry, RenderModel};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -34,11 +38,13 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::actions::{
-    action_form_spec, coerce_params, palette_entries, parse_key_spec, plan_action, ConfirmCmd,
-    ConfirmSession, InvokeStep, PaletteCmd, PaletteEntry, PaletteSession, PendingInvoke,
+    action_form_spec, builtin_menu_entries, coerce_params, filter_params, key_event_spec,
+    palette_entries, plan_action, ui_binding_source, ConfirmCmd, ConfirmSession, FilterCmd,
+    FilterSession, InvokeStep, PaletteCmd, PaletteEntry, PaletteSession, PendingInvoke,
     TypeTargetCmd, TypeTargetSession, UiAction, CHORD_TIMEOUT,
 };
 use crate::form::{FieldEdit, FormSession, LineEdit, SessionCmd};
+use crate::keymap::UserKeymap;
 use crate::model::{self, FormMark, Model, RowStyle, Selection};
 use crate::worker::{Cmd, DriverRow, Ev, Worker};
 
@@ -80,6 +86,12 @@ struct Tab {
     /// Fields for the note pane when `target` is `None`.
     note: Vec<(String, String)>,
 }
+
+/// Chars with hard-wired [`App::key_now`] bindings — command
+/// bindings on these chars are ignored on the char path (they can
+/// still be reached via the palette or a different spec). Keeps
+/// driver `keys[]` from shadowing pane navigation/quit/dump.
+const NAV_CHARS: &[char] = &['q', '?', 'r', 'd', 'g', 'x', 'j', 'k', 'h', 'l', ':'];
 
 /// Rects from the last draw — mouse hit-testing.
 #[derive(Clone, Copy, Debug, Default)]
@@ -154,22 +166,75 @@ pub struct App {
     /// prefix char waits [`CHORD_TIMEOUT`] before replaying as a
     /// normal keypress.
     pending_key: Option<(String, Instant)>,
-    /// Full key spec → action for bound keys. Item-scoped actions
-    /// are excluded — they carry a row target the canvas doesn't
-    /// track, so they stay palette-only.
-    key_chords: HashMap<String, UiAction>,
-    /// Proper prefixes of multi-char specs — tells `chord_or_key`
-    /// whether a lone char might continue into a chord.
+    /// Full key spec → command for bound keys. Specs are normalized
+    /// [`KeySpec`] strings: bare chars/sequences match the char path,
+    /// `ctrl+…` chords and named keys (`enter`, `f5`, …) match the
+    /// modified/named-key path. Item-scoped actions are excluded —
+    /// they carry a row target the canvas doesn't track, so they
+    /// stay palette-only.
+    key_chords: HashMap<String, Command>,
+    /// Proper prefixes of multi-char sequence specs — tells
+    /// `chord_or_key` whether a lone char might continue into a
+    /// chord.
     chord_prefixes: HashSet<String>,
+    /// The merged binding list `key_chords` was built from — the
+    /// help overlay's "commands" section renders this.
+    bindings: Vec<CommandBinding>,
+    /// Driver manifests by kind (worker ships them at boot/reload) —
+    /// the command layer's `ResolveContext` table.
+    manifests: BTreeMap<String, DriverManifest>,
+    /// Manifest used when the current driver has none (never in
+    /// practice — every discovered driver reports one; keeps
+    /// `ResolveContext.manifest` total).
+    fallback_manifest: DriverManifest,
+    /// The parsed user keymap (`keys.toml`) — overlay source for
+    /// [`effective_bindings`].
+    keymap: UserKeymap,
+    /// View params of the current/last resolve — route `?query`
+    /// args and the `host.filter` param live here; refresh and
+    /// command resolution read them back.
+    view_params: Params,
+    /// Synthesized `host.*` builtin palette entries (built once —
+    /// `$EDITOR` gating happens here).
+    builtin_menus: Vec<MenuEntry>,
+    /// Open `host.filter` overlay.
+    filter: Option<FilterSession>,
+    /// The last invoke's dispatch context — `ActionResult.route`
+    /// templates interpolate over it.
+    last_dispatch: Option<DispatchCtx>,
+}
+
+/// The invoke context remembered for `ActionResult.route`
+/// interpolation — driver, opaque target JSON, and params (the same
+/// shape `pavo_core::commands::interpolate_ctx_value` consumes).
+#[derive(Clone, Debug)]
+struct DispatchCtx {
+    /// Driver kind the invoke targeted.
+    driver: String,
+    /// The invoke `target` JSON (item `{"id":…}`, selection, …).
+    target: Option<serde_json::Value>,
+    /// The invoke `params` map.
+    params: Params,
 }
 
 impl App {
-    /// Build the app around a spawned worker. `initial` is the
+    /// Build the app around a spawned worker — no user keymap (the
+    /// production entry point is [`App::with_keymap`]; tests and
+    /// embedders get declaration suggestions only). `initial` is the
     /// deep-link target (`--view`, `--driver`, or positional
     /// `driver:view`) resolved after boot.
+    #[allow(dead_code)] // production uses with_keymap; tests embed this
     #[must_use]
     pub fn new(worker: Worker, initial: Option<String>) -> Self {
-        Self {
+        Self::with_keymap(worker, initial, UserKeymap::default())
+    }
+
+    /// [`App::new`] plus a parsed user keymap — `main` passes
+    /// [`crate::keymap::load`]'s result so `keys.toml` overrides
+    /// apply.
+    #[must_use]
+    pub fn with_keymap(worker: Worker, initial: Option<String>, keymap: UserKeymap) -> Self {
+        let mut app = Self {
             worker,
             booted: false,
             drivers: Vec::new(),
@@ -204,7 +269,17 @@ impl App {
             pending_key: None,
             key_chords: HashMap::new(),
             chord_prefixes: HashSet::new(),
-        }
+            bindings: Vec::new(),
+            manifests: BTreeMap::new(),
+            fallback_manifest: empty_manifest(),
+            keymap,
+            view_params: Params::new(),
+            builtin_menus: builtin_menu_entries(),
+            filter: None,
+            last_dispatch: None,
+        };
+        app.rebuild_keybinds();
+        app
     }
 
     /// Drain pending worker events, then handle one input event.
@@ -226,7 +301,7 @@ impl App {
             return true;
         }
         match crossterm::event::read() {
-            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => self.on_key(k.code),
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => self.on_key_event(k),
             Ok(Event::Mouse(m)) => {
                 self.on_mouse(m);
                 true
@@ -243,11 +318,13 @@ impl App {
                 views,
                 chrome,
                 routes,
+                manifests,
             } => {
                 self.drivers = drivers;
                 self.views = views;
                 self.chrome = chrome;
                 self.routes = routes;
+                self.manifests = manifests;
                 self.booted = true;
                 self.rebuild_tabs();
                 self.rail_sel = 0;
@@ -280,6 +357,7 @@ impl App {
                         self.palette = None;
                         self.confirm = None;
                         self.type_target = None;
+                        self.filter = None;
                         self.apply_actions(actions, menus);
                         self.pane = Pane::Canvas;
                         self.status = format!("loaded {}", self.last_target);
@@ -294,11 +372,14 @@ impl App {
                 views,
                 chrome,
                 routes,
+                manifests,
             } => {
                 self.views = views;
                 self.chrome = chrome;
                 self.routes = routes;
+                self.manifests = manifests;
                 self.rebuild_tabs();
+                self.rebuild_keybinds();
                 self.status = "chrome reloaded".to_string();
             }
             Ev::Submit { result } => self.on_submit(result),
@@ -385,36 +466,148 @@ impl App {
         self.rebuild_keybinds();
     }
 
-    /// (Re)build `key_chords`/`chord_prefixes` from the current
-    /// actions' `keys[]`. Item-scoped actions are skipped — they
-    /// carry a row target the canvas doesn't track, so binding them
-    /// globally would invoke against the wrong item (they remain
-    /// palette entries).
+    /// (Re)build `key_chords`/`chord_prefixes`/`bindings` from the
+    /// unified binding sources: host builtins + menu entries
+    /// (driver menus *and* the synthesized `host.*` entries) +
+    /// non-item action `keys[]`, merged with the user keymap overlay
+    /// via [`effective_bindings`]. Item-scoped actions are skipped —
+    /// they carry a row target the canvas doesn't track, so binding
+    /// them globally would invoke against the wrong item (they
+    /// remain palette entries).
     fn rebuild_keybinds(&mut self) {
         self.key_chords.clear();
         self.chord_prefixes.clear();
-        for ui in &self.actions {
-            if ui.scope == ActionScope::Item {
+        let mut sources = builtin_binding_sources();
+        // TUI extras on top of the shared suggestions: `:` keeps the
+        // legacy palette key alongside `ctrl+p`; `F` joins `/` for
+        // filter; `host.editor` is only bindable when `$EDITOR`
+        // exists (same gate as its palette entry).
+        sources.retain(|s| {
+            !matches!(s.command, Command::Host(HostBuiltin::Editor))
+                || std::env::var_os("EDITOR").is_some()
+        });
+        for s in &mut sources {
+            match s.command {
+                Command::Host(HostBuiltin::Palette) => s.keys.push(":".to_string()),
+                Command::Host(HostBuiltin::Filter) => s.keys.push("F".to_string()),
+                _ => {}
+            }
+        }
+        for m in self.menus.iter().chain(self.builtin_menus.iter()) {
+            if let Some(s) = menu_binding_source(m) {
+                sources.push(s);
+            }
+        }
+        for u in &self.actions {
+            if u.scope == ActionScope::Item {
                 continue;
             }
-            for spec in &ui.action.keys {
-                let Some(seq) = parse_key_spec(spec) else {
+            sources.push(ui_binding_source(u));
+        }
+        let overlay = self
+            .keymap
+            .overlay_for(self.current_driver(), self.current_view_id());
+        let bindings = effective_bindings(sources, &overlay);
+        for b in &bindings {
+            for key in &b.keys {
+                // Declared/suggested keys may predate KeySpec
+                // normalization — re-validate; overlay entries were
+                // already validated by effective_bindings.
+                let Some(spec) = KeySpec::parse(key) else {
                     continue;
                 };
-                if seq.is_empty() {
-                    continue;
-                }
-                // First declaration of a spec wins.
+                let norm = spec.as_str().to_string();
+                // First binding (sorted command-id order) of a spec
+                // wins.
                 self.key_chords
-                    .entry(seq.clone())
-                    .or_insert_with(|| ui.clone());
-                let chars: Vec<char> = seq.chars().collect();
-                for i in 1..chars.len() {
-                    self.chord_prefixes
-                        .insert(chars[..i].iter().collect::<String>());
+                    .entry(norm.clone())
+                    .or_insert_with(|| b.command.clone());
+                if spec.is_sequence() {
+                    let chars: Vec<char> = norm.chars().collect();
+                    for i in 1..chars.len() {
+                        self.chord_prefixes
+                            .insert(chars[..i].iter().collect::<String>());
+                    }
                 }
             }
         }
+        self.bindings = bindings;
+    }
+
+    /// The driver kind of the current view (`None` off-view).
+    fn current_driver(&self) -> Option<&str> {
+        match &self.current {
+            Some(Canvas::View(rv)) => Some(rv.driver.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The bare view id of the current view.
+    fn current_view_id(&self) -> Option<&str> {
+        match &self.current {
+            Some(Canvas::View(rv)) => Some(rv.view.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The selected canvas row's [`Selection`] (cloned — the model
+    /// is rebuilt per call anyway).
+    fn selection(&self) -> Option<Selection> {
+        let model = self.model_for_input()?;
+        let &row_idx = model.selectables.get(self.sel_pos)?;
+        let sel_id = model.rows[row_idx].sel?;
+        model.selections.get(sel_id).cloned()
+    }
+
+    /// The selected row's item-context JSON (`item_value` shape) —
+    /// `{item.*}` template data for route interpolation.
+    fn selection_item(&self) -> Option<serde_json::Value> {
+        self.selection()?.item
+    }
+
+    /// The invoke `target` JSON for the current selection —
+    /// `{"id": <item id>}` for tree items (the same shape item-scoped
+    /// actions send), `None` otherwise.
+    fn selection_target(&self) -> Option<serde_json::Value> {
+        let item = self.selection_item()?;
+        item.get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| serde_json::json!({"id": id}))
+    }
+
+    /// Run `f` against a [`ResolveContext`] built from the current
+    /// canvas state — driver/manifest/view/drivers/target/params all
+    /// borrowed from `self`, so the result must be owned (`R` can't
+    /// borrow the context).
+    fn with_resolve_ctx<R>(&self, f: impl FnOnce(&ResolveContext<'_>) -> R) -> R {
+        let target = self.selection_target();
+        let (driver, view, manifest) = match &self.current {
+            Some(Canvas::View(rv)) => (
+                rv.driver.as_str(),
+                Some(&rv.result),
+                self.manifests
+                    .get(rv.driver.as_str())
+                    .unwrap_or(&self.fallback_manifest),
+            ),
+            _ => ("", None, &self.fallback_manifest),
+        };
+        let ctx = ResolveContext {
+            driver,
+            manifest,
+            view,
+            drivers: &self.manifests,
+            target: target.as_ref(),
+            params: &self.view_params,
+        };
+        f(&ctx)
+    }
+
+    /// Interpolate a `{…}` route template over the current context —
+    /// `item` is the selected row's `item_value` JSON when the caller
+    /// has one (route commands use the live selection; action routes
+    /// pass their own item-scoped `{"id":…}`).
+    fn interpolate_route(&self, template: &str, item: Option<&serde_json::Value>) -> String {
+        self.with_resolve_ctx(|ctx| pavo_core::interpolate(template, &ctx.interpolate_ctx(item)))
     }
 
     /// An `invoke` wire-op answer landed. `result.view` swaps the
@@ -447,6 +640,17 @@ impl App {
                         .join(", ");
                     msg = format!("{msg} ({errs})");
                 }
+                // `ActionResult.route` — a driver-requested redirect:
+                // interpolate over the invoke context and navigate
+                // instead of swapping/refreshing (route wins).
+                if let Some(template) = res.route.clone() {
+                    let route = self.invoke_route(&template, res.view.as_deref());
+                    if !route.is_empty() {
+                        self.navigate_to_route(&route);
+                        self.status = msg;
+                        return;
+                    }
+                }
                 if let Some(view) = res.view {
                     self.swap_result_view(*view);
                     self.apply_actions(actions, menus);
@@ -466,9 +670,41 @@ impl App {
         }
     }
 
-    /// Activate a collected action: params open the auto-form;
-    /// everything else goes straight to the danger gate.
+    /// Interpolate an [`ActionResult.route`] template over the invoke
+    /// context remembered by [`App::send_invoke`] (`last_dispatch`),
+    /// with the result's fresh view supplying `{view}`/`{data}` when
+    /// present. Empty when there's no dispatch context to interpolate
+    /// against (defensive — `send_invoke` always sets it).
+    fn invoke_route(
+        &self,
+        template: &str,
+        result_view: Option<&pavo_protocol::wire::ViewResult>,
+    ) -> String {
+        let Some(d) = &self.last_dispatch else {
+            return String::new();
+        };
+        let ctx = pavo_core::interpolate_ctx_value(
+            &d.driver,
+            result_view,
+            d.target.as_ref(),
+            &d.params,
+            None,
+        );
+        pavo_core::interpolate(template, &ctx)
+    }
+
+    /// Activate a collected action: an `Action.route` declaration
+    /// navigates instead of invoking (interpolated like
+    /// `resolve_command` does — item context `{"id":…}` for
+    /// item-scoped actions); params open the auto-form; everything
+    /// else goes straight to the danger gate.
     fn activate_action(&mut self, ui: UiAction) {
+        if let Some(template) = ui.action.route.clone() {
+            let item = ui.item_id.as_ref().map(|i| serde_json::json!({"id": i}));
+            let route = self.interpolate_route(&template, item.as_ref());
+            self.navigate_to_route(&route);
+            return;
+        }
         match plan_action(&ui.action) {
             InvokeStep::Form => self.open_action_form(ui),
             _ => self.gate_action(ui, Params::new()),
@@ -490,7 +726,13 @@ impl App {
     /// for parameterless actions): `none` invokes, `confirm` opens
     /// the modal, `type-target` opens the type-the-id modal.
     fn gate_action(&mut self, ui: UiAction, params: Params) {
-        let pending = PendingInvoke::new(ui, params);
+        self.gate_pending(PendingInvoke::new(ui, params));
+    }
+
+    /// [`App::gate_action`] over an already-assembled
+    /// [`PendingInvoke`] — the command layer's dispatch path builds
+    /// one with an explicit (possibly non-`{"id"}`) target JSON.
+    fn gate_pending(&mut self, pending: PendingInvoke) {
         match pending.ui.action.danger {
             DangerLevel::None => self.send_invoke(pending),
             DangerLevel::Confirm => {
@@ -504,8 +746,22 @@ impl App {
         }
     }
 
-    /// Fire `Cmd::Invoke` for a fully-gated pending action.
+    /// Fire `Cmd::Invoke` for a fully-gated pending action — and
+    /// remember the dispatch context for `ActionResult.route`
+    /// interpolation.
     fn send_invoke(&mut self, pending: PendingInvoke) {
+        let driver = pending
+            .ui
+            .target
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        self.last_dispatch = Some(DispatchCtx {
+            driver,
+            target: pending.target.clone(),
+            params: pending.params.clone(),
+        });
         let _ = self.worker.tx.send(Cmd::Invoke {
             target: pending.ui.target.clone(),
             action: pending.ui.action.id.clone(),
@@ -516,10 +772,14 @@ impl App {
         self.status = format!("invoking {}…", pending.ui.action.label);
     }
 
-    /// `:` — open the command palette over the current view's
-    /// actions + menu entries.
+    /// `:`/`ctrl+p` — open the command palette over the current
+    /// view's actions + menu entries + synthesized host builtins.
+    /// Builtins sort *last* — driver menus/actions are the primary
+    /// surface; host chrome is the fallback (and fuzzy queries like
+    /// "done" shouldn't land on `host.editor` first).
     fn open_palette(&mut self) {
-        let entries = palette_entries(&self.actions, &self.menus);
+        let mut entries = palette_entries(&self.actions, &self.menus);
+        entries.extend(palette_entries(&[], &self.builtin_menus));
         if entries.is_empty() {
             self.status = "no actions or menu entries".to_string();
             return;
@@ -528,44 +788,60 @@ impl App {
         self.status = "palette — type to filter, Enter runs".to_string();
     }
 
-    /// Activate a palette entry: actions run the normal
-    /// danger/param flow; menu entries resolve their `action` (by
-    /// id, `driver:` prefix tolerated — v1 stays driver-local) or
-    /// `route` (chrome route → view, or a bare `driver:view` link).
-    fn activate_palette_entry(&mut self, entry: PaletteEntry) {
+    /// Activate a palette entry. Returns `false` only when the
+    /// entry resolves to `host.quit` (palette/menu commands can
+    /// reach builtins — plain action entries never quit).
+    fn activate_palette_entry(&mut self, entry: PaletteEntry) -> bool {
         match entry {
-            PaletteEntry::Action(ui) => self.activate_action(ui),
-            PaletteEntry::Menu(m) => {
-                if let Some(aid) = &m.action {
-                    let bare = aid.rsplit(':').next().unwrap_or(aid);
-                    match self
-                        .actions
-                        .iter()
-                        .find(|u| u.action.id == *aid || u.action.id == bare)
-                        .cloned()
-                    {
-                        Some(ui) => self.activate_action(ui),
-                        None => self.status = format!("unknown action: {aid}"),
-                    }
-                } else if let Some(route) = &m.route {
-                    self.activate_route(route);
-                } else {
-                    self.status = format!("menu entry {} has no action/route", m.id);
-                }
+            PaletteEntry::Action(ui) => {
+                self.activate_action(ui);
+                true
             }
+            PaletteEntry::Menu(m) => match menu_command(&m) {
+                Some(cmd) => self.run_command(cmd),
+                None => {
+                    self.status = format!("menu entry {} is display-only", m.id);
+                    true
+                }
+            },
         }
     }
 
-    /// Navigate to a menu `route`: chrome routes resolve through
-    /// [`App::route_target`]; a `driver:view`-shaped route resolves
-    /// directly.
-    fn activate_route(&mut self, route: &str) {
-        if let Some(t) = self.route_target(route) {
-            self.resolve(&t);
-        } else if route.contains(':') {
-            self.resolve(route);
-        } else {
-            self.status = format!("unresolvable route: {route}");
+    /// Navigate to an interpolated route string: `?query` pairs
+    /// become view params; the path resolves through chrome routes,
+    /// declared view routes, or a bare `driver:view` target. Routes
+    /// like `/myco/item?id=T-1` (from `item_route`, `Action.route`,
+    /// `route:` commands, `ActionResult.route`) land here.
+    fn navigate_to_route(&mut self, route: &str) {
+        let (path, query) = match route.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (route, ""),
+        };
+        let params = parse_route_query(query);
+        if path.is_empty() {
+            self.status = format!("empty route: {route}");
+            return;
+        }
+        if path == "/" || path == "dashboard" {
+            self.resolve_with_params("dashboard", Params::new());
+            return;
+        }
+        let target = self
+            .route_target(path)
+            .or_else(|| {
+                self.views
+                    .iter()
+                    .find(|v| v.route == path)
+                    .map(|v| v.namespaced.clone())
+            })
+            .or_else(|| {
+                // Bare `driver:view` (or `driver`) route — no leading
+                // slash, contains a namespace separator.
+                (path.contains(':') && !path.starts_with('/')).then(|| path.to_string())
+            });
+        match target {
+            Some(t) => self.resolve_with_params(&t, params),
+            None => self.status = format!("unresolvable route: {route}"),
         }
     }
 
@@ -580,11 +856,213 @@ impl App {
             PaletteCmd::Close => self.palette = None,
             PaletteCmd::Activate(entry) => {
                 self.palette = None;
-                self.activate_palette_entry(*entry);
+                return self.activate_palette_entry(*entry);
             }
             PaletteCmd::None => {}
         }
         true
+    }
+
+    /// Keys while the filter overlay is open — Enter applies the
+    /// text as the view's `filter_param`, Esc cancels.
+    fn on_filter_key(&mut self, code: KeyCode) -> bool {
+        let cmd = match self.filter.as_mut() {
+            Some(s) => s.key(code),
+            None => return true,
+        };
+        match cmd {
+            FilterCmd::Close => self.filter = None,
+            FilterCmd::Submit => {
+                if let Some(s) = self.filter.take() {
+                    let params = filter_params(&self.view_params, &s.param, &s.edit.text);
+                    self.resolve_with_params(&s.target, params);
+                }
+            }
+            FilterCmd::None => {}
+        }
+        true
+    }
+
+    /// `host.filter` — open the filter overlay bound to the current
+    /// view's `filter_param` (convention `"q"` when undeclared).
+    fn open_filter(&mut self) {
+        let Some(Canvas::View(rv)) = &self.current else {
+            self.status = "no view to filter".to_string();
+            return;
+        };
+        let param = rv
+            .result
+            .view
+            .filter_param
+            .clone()
+            .unwrap_or_else(|| "q".to_string());
+        self.filter = Some(FilterSession::new(param.clone(), rv.namespaced.clone()));
+        self.status = format!("filter {param} — Enter applies, Esc cancels");
+    }
+
+    /// Run a parsed [`Command`] — the single entry point for
+    /// palette entries, menu `keys[]`, keybindings, and builtin
+    /// invocations. Returns `false` only for `host.quit`.
+    ///
+    /// `action:`/`driver:<current>:` ids first match the collected
+    /// [`UiAction`]s (preserving auto-form/danger/route semantics —
+    /// ops-derived actions aren't in any manifest); misses fall
+    /// through to `resolve_command` (manifest scope, `driver:`
+    /// foreign dispatch, `Unsupported`).
+    fn run_command(&mut self, command: Command) -> bool {
+        match command {
+            Command::Host(b) => self.run_builtin(b),
+            Command::Route { template } => {
+                // Route templates interpolate over the live
+                // selection (`{item.*}` = selected tree item).
+                let item = self.selection_item();
+                let route = self.interpolate_route(&template, item.as_ref());
+                self.navigate_to_route(&route);
+                true
+            }
+            Command::Action { id } => {
+                if self.current_driver().is_none() {
+                    self.status = "no active view for action".to_string();
+                    return true;
+                }
+                match self.actions.iter().find(|u| u.action.id == id).cloned() {
+                    Some(ui) => {
+                        self.activate_action(ui);
+                        true
+                    }
+                    None => self.resolve_and_run(Command::Action { id }),
+                }
+            }
+            Command::Driver { driver, id } => {
+                if Some(driver.as_str()) == self.current_driver() {
+                    match self.actions.iter().find(|u| u.action.id == id).cloned() {
+                        Some(ui) => {
+                            self.activate_action(ui);
+                            return true;
+                        }
+                        None => return self.resolve_and_run(Command::Driver { driver, id }),
+                    }
+                }
+                self.resolve_and_run(Command::Driver { driver, id })
+            }
+        }
+    }
+
+    /// `resolve_command` + execute the [`Resolved`] — the fallback
+    /// for commands with no collected [`UiAction`] (foreign-driver
+    /// `driver:` dispatches, manifest-declared ids the worker didn't
+    /// collect, `route:`/`host.*` reached via `resolve_command`).
+    fn resolve_and_run(&mut self, command: Command) -> bool {
+        let resolved = self.with_resolve_ctx(|ctx| pavo_core::resolve_command(&command, ctx));
+        self.run_resolved(resolved)
+    }
+
+    /// Execute a [`Resolved`] — dispatches become invokes (through
+    /// the same danger gate), routes navigate, builtins run.
+    fn run_resolved(&mut self, resolved: Resolved) -> bool {
+        match resolved {
+            Resolved::Dispatch(inv) => {
+                self.dispatch_invoke(*inv);
+                true
+            }
+            Resolved::Navigate { route } => {
+                self.navigate_to_route(&route);
+                true
+            }
+            Resolved::Builtin(b) => self.run_builtin(b),
+            Resolved::Unsupported => {
+                self.status = "unsupported command".to_string();
+                true
+            }
+        }
+    }
+
+    /// Turn a [`ResolvedInvoke`] into the normal invoke flow —
+    /// declared actions keep their params/danger; undeclared ids get
+    /// a synthetic parameterless action (the driver answers
+    /// `ok:false` on unknowns, same as the wire contract).
+    fn dispatch_invoke(&mut self, inv: ResolvedInvoke) {
+        let action = inv.declared.unwrap_or_else(|| pavo_protocol::Action {
+            id: inv.action.clone(),
+            label: inv.action.clone(),
+            icon: None,
+            danger: DangerLevel::None,
+            keys: Vec::new(),
+            params: Vec::new(),
+            target: None,
+            description: None,
+            driver: None,
+            route: None,
+        });
+        // `{"id": …}` targets recover `item_id`; arbitrary target
+        // JSON is preserved on the pending invoke verbatim.
+        let item_id = inv
+            .target
+            .as_ref()
+            .and_then(|t| t.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let ui = UiAction {
+            action,
+            scope: ActionScope::Manifest,
+            target: match &inv.view {
+                Some(v) => format!("{}:{v}", inv.driver),
+                None => inv.driver.clone(),
+            },
+            view: inv.view.clone(),
+            item_id,
+        };
+        let mut pending = PendingInvoke::new(ui, inv.params);
+        pending.target = inv.target;
+        self.gate_pending(pending);
+    }
+
+    /// A `host.*` builtin — returns `false` for `host.quit` (the only
+    /// builtin that ends the event loop).
+    fn run_builtin(&mut self, b: HostBuiltin) -> bool {
+        match b {
+            HostBuiltin::Filter => self.open_filter(),
+            HostBuiltin::Help => self.help = true,
+            HostBuiltin::Reload => self.refresh(),
+            HostBuiltin::Palette => self.open_palette(),
+            HostBuiltin::Editor => self.open_in_editor(),
+            HostBuiltin::Quit => return false,
+        }
+        true
+    }
+
+    /// `host.editor` — dump the current view's JSON to a tmp file
+    /// (same artifact as `d`) and hand it to `$EDITOR`. The TUI
+    /// can't suspend the alt screen cleanly, so the editor inherits
+    /// the raw terminal — vim-style editors cope; GUI editors
+    /// (`code`, …) just open alongside. Only offered when `$EDITOR`
+    /// is set (see [`builtin_menu_entries`]).
+    fn open_in_editor(&mut self) {
+        let Some(path) = self.dump_view_json() else {
+            self.status = "host.editor: no view to dump".to_string();
+            return;
+        };
+        let Some(editor) = std::env::var_os("EDITOR") else {
+            self.status = "host.editor: $EDITOR is not set".to_string();
+            return;
+        };
+        let words: Vec<String> = editor
+            .to_string_lossy()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let Some((prog, args)) = words.split_first() else {
+            self.status = "host.editor: empty $EDITOR".to_string();
+            return;
+        };
+        match std::process::Command::new(prog)
+            .args(args)
+            .arg(&path)
+            .status()
+        {
+            Ok(_) => self.status = format!("editor closed ({})", path.display()),
+            Err(e) => self.status = format!("host.editor failed: {e}"),
+        }
     }
 
     /// Keys while the confirm modal is open — y/Enter invokes, n/Esc
@@ -697,11 +1175,21 @@ impl App {
     }
 
     fn resolve(&mut self, target: &str) {
+        self.resolve_with_params(target, Params::new());
+    }
+
+    /// [`App::resolve`] with explicit view params — route `?query`
+    /// args and `host.filter` submissions land here. Params are
+    /// remembered in `view_params` so refreshes and the command
+    /// layer's interpolation context see them.
+    fn resolve_with_params(&mut self, target: &str, params: Params) {
         self.form_session = None;
         self.palette = None;
         self.confirm = None;
         self.type_target = None;
+        self.filter = None;
         self.pending_key = None;
+        self.view_params = params.clone();
         self.apply_actions(Vec::new(), Vec::new());
         if target == "dashboard" {
             self.current = Some(Canvas::Dashboard);
@@ -720,6 +1208,7 @@ impl App {
         let _ = self.worker.tx.send(Cmd::Resolve {
             target: target.to_string(),
             refresh: false,
+            params,
         });
     }
 
@@ -733,6 +1222,7 @@ impl App {
                 let _ = self.worker.tx.send(Cmd::Resolve {
                     target: t,
                     refresh: true,
+                    params: self.view_params.clone(),
                 });
             }
             Some(Canvas::Dashboard) => {
@@ -765,6 +1255,19 @@ impl App {
             if let Some(t) = field(&sel, "resolves to").or_else(|| field(&sel, "view")) {
                 self.resolve(&t);
                 return;
+            }
+        }
+        // `ViewSpec.item_route` — Enter/click on a tree item
+        // navigates to the interpolated route (`{item.*}` = the
+        // item) instead of opening the detail pane. Rows without an
+        // item payload (tables, kv, notes) keep the detail pane.
+        if let Some(Canvas::View(rv)) = &self.current {
+            if let Some(template) = rv.result.view.item_route.clone() {
+                if let Some(item) = sel.item.clone() {
+                    let route = self.interpolate_route(&template, Some(&item));
+                    self.navigate_to_route(&route);
+                    return;
+                }
             }
         }
         // Form field / submit rows open the edit session instead of
@@ -926,7 +1429,19 @@ impl App {
         // canvas rect.
     }
 
+    /// Key entry point — tests call this (no modifiers); the event
+    /// loop calls [`App::on_key_event`] with the full event.
+    #[allow(dead_code)] // tests drive keys through this shim
     fn on_key(&mut self, code: KeyCode) -> bool {
+        self.on_key_event(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// Key dispatch with modifiers — plain chars go through the
+    /// chord/sequence engine; modified chars (`ctrl+p`) and named
+    /// keys (`enter`, `f5`, `shift+tab`) match the binding table's
+    /// normalized [`KeySpec`]s before falling back to built-ins.
+    fn on_key_event(&mut self, ev: KeyEvent) -> bool {
+        let code = ev.code;
         // A chord prefix that outlived its timeout replays as normal
         // keypresses before the new key is handled.
         if self
@@ -937,7 +1452,7 @@ impl App {
             self.flush_pending();
         }
         // Overlays own the keyboard, topmost first: palette, the two
-        // danger modals, the form editor, then help.
+        // danger modals, the filter input, the form editor, then help.
         if self.palette.is_some() {
             return self.on_palette_key(code);
         }
@@ -946,6 +1461,9 @@ impl App {
         }
         if self.confirm.is_some() {
             return self.on_confirm_key(code);
+        }
+        if self.filter.is_some() {
+            return self.on_filter_key(code);
         }
         // An open form editor owns the keyboard — printable chars
         // edit fields, they must never trigger app bindings.
@@ -960,42 +1478,71 @@ impl App {
             }
             return true;
         }
-        match code {
-            KeyCode::Char(c) => self.chord_or_key(c),
-            // Non-char keys can't continue a chord — flush any
-            // pending prefix, then handle normally.
-            other => {
-                self.flush_pending();
-                self.key_now(other)
+        // Plain chars (no ctrl/alt/cmd) feed the chord engine —
+        // sequences like "dd" and single-char specs live there.
+        let plain_char = matches!(code, KeyCode::Char(_))
+            && !ev.modifiers.intersects(
+                KeyModifiers::CONTROL
+                    | KeyModifiers::ALT
+                    | KeyModifiers::SUPER
+                    | KeyModifiers::HYPER
+                    | KeyModifiers::META,
+            );
+        if plain_char {
+            if let KeyCode::Char(c) = code {
+                return self.chord_or_key(c);
             }
         }
+        // Modified chars and named keys: a normalized KeySpec lookup
+        // in the binding table, then the built-in bindings.
+        self.flush_pending();
+        if let Some(spec) = key_event_spec(code, ev.modifiers) {
+            if let Some(cmd) = self.key_chords.get(&spec).cloned() {
+                return self.run_command(cmd);
+            }
+        }
+        self.key_now(code)
     }
 
     /// Replay a pending chord prefix as ordinary keypresses (used on
     /// timeout and when the next char can't continue the chord).
+    /// Each char goes through [`App::press_char`] — a lone prefix
+    /// char that is itself bound still fires its binding.
     fn flush_pending(&mut self) {
         if let Some((buf, _)) = self.pending_key.take() {
             for c in buf.chars() {
-                if !self.key_now(KeyCode::Char(c)) {
+                if !self.press_char(c) {
                     break;
                 }
             }
         }
     }
 
+    /// A char pressed outside chord continuation — single-char
+    /// command binding (unprotected chars only) else the built-in
+    /// [`App::key_now`] bindings.
+    fn press_char(&mut self, c: char) -> bool {
+        let s = c.to_string();
+        if !NAV_CHARS.contains(&c) {
+            if let Some(cmd) = self.key_chords.get(&s).cloned() {
+                return self.run_command(cmd);
+            }
+        }
+        self.key_now(KeyCode::Char(c))
+    }
+
     /// Char-key dispatch with chord support: a pending prefix plus
-    /// `c` may complete a multi-char action `keys[]` spec; a lone
-    /// char that prefixes some spec waits for [`CHORD_TIMEOUT`]; an
-    /// exact single-char spec activates its action; anything else
-    /// falls through to the built-in [`App::key_now`] bindings.
+    /// `c` may complete a multi-char sequence spec; a lone char that
+    /// prefixes some spec waits for [`CHORD_TIMEOUT`]; an exact
+    /// single-char spec runs its command; anything else falls
+    /// through to the built-in [`App::key_now`] bindings.
     /// Returns `false` when the app should quit (propagated from
-    /// `q`/`Esc` replayed out of a dead chord).
+    /// `q`/`Esc` or `host.quit` reached via bindings).
     fn chord_or_key(&mut self, c: char) -> bool {
         if let Some((buf, _)) = self.pending_key.take() {
             let combined = format!("{buf}{c}");
-            if let Some(ui) = self.key_chords.get(&combined).cloned() {
-                self.activate_action(ui);
-                return true;
+            if let Some(cmd) = self.key_chords.get(&combined).cloned() {
+                return self.run_command(cmd);
             }
             if self.chord_prefixes.contains(&combined) {
                 self.pending_key = Some((combined, Instant::now()));
@@ -1004,7 +1551,7 @@ impl App {
             // Dead end — replay the buffered prefix, then treat `c`
             // fresh (it may start a chord of its own).
             for pc in buf.chars() {
-                if !self.key_now(KeyCode::Char(pc)) {
+                if !self.press_char(pc) {
                     return false;
                 }
             }
@@ -1015,15 +1562,13 @@ impl App {
             self.pending_key = Some((s, Instant::now()));
             return true;
         }
-        // Built-in single-char bindings win over action keys — a
+        // Hard-wired navigation keys win over command bindings — a
         // driver binding `q`/`j`/`d`/… can't shadow navigation.
         // (Chords starting with those chars still work: the prefix
         // waits, and the completed spec matches before `key_now`.)
-        const BUILTIN_CHARS: &[char] = &['q', '?', 'r', 'd', 'g', 'x', 'j', 'k', 'h', 'l', ':'];
-        if !BUILTIN_CHARS.contains(&c) {
-            if let Some(ui) = self.key_chords.get(&s).cloned() {
-                self.activate_action(ui);
-                return true;
+        if !NAV_CHARS.contains(&c) {
+            if let Some(cmd) = self.key_chords.get(&s).cloned() {
+                return self.run_command(cmd);
             }
         }
         self.key_now(KeyCode::Char(c))
@@ -1253,6 +1798,8 @@ impl App {
                 self.palette = None;
                 self.confirm = None;
                 self.type_target = None;
+                self.filter = None;
+                self.pending_key = None;
                 self.apply_actions(Vec::new(), Vec::new());
                 self.pane = Pane::Canvas;
                 self.status = tab.label.clone();
@@ -1262,9 +1809,17 @@ impl App {
 
     /// `d` — dump the current view as pretty JSON to a temp file.
     fn dump_view(&mut self) {
+        match self.dump_view_json() {
+            Some(path) => self.status = format!("wrote {}", path.display()),
+            None => self.status = "nothing to dump (not a driver view)".to_string(),
+        }
+    }
+
+    /// Write the current view's `{view, data}` JSON to a tmp file —
+    /// shared by `d` (dump) and `host.editor`. `None` off-view.
+    fn dump_view_json(&self) -> Option<std::path::PathBuf> {
         let Some(Canvas::View(rv)) = &self.current else {
-            self.status = "nothing to dump (not a driver view)".to_string();
-            return;
+            return None;
         };
         let value = serde_json::json!({
             "view": rv.result.view,
@@ -1274,13 +1829,11 @@ impl App {
             "pavo-view-{}.json",
             rv.namespaced.replace(':', "-")
         ));
-        match serde_json::to_string_pretty(&value)
+        serde_json::to_string_pretty(&value)
             .map_err(std::io::Error::other)
             .and_then(|s| std::fs::write(&path, s))
-        {
-            Ok(()) => self.status = format!("wrote {}", path.display()),
-            Err(e) => self.status = format!("dump failed: {e}"),
-        }
+            .ok()?;
+        Some(path)
     }
 
     /// `g` — dump the current view's graph nodes as DOT.
@@ -1335,6 +1888,9 @@ impl App {
         }
         if let Some(s) = &self.type_target {
             self.draw_type_target(f, area, s);
+        }
+        if let Some(s) = &self.filter {
+            self.draw_filter(f, area, s);
         }
     }
 
@@ -1813,6 +2369,41 @@ impl App {
 
     /// The `danger: confirm` modal — action label, optional
     /// description, context hint; y/Enter confirms.
+    /// The `host.filter` overlay — a centered prompt line echoing the
+    /// active param name + the typed filter text with a cursor.
+    fn draw_filter(&self, f: &mut Frame, area: Rect, s: &FilterSession) {
+        let w = (area.width.saturating_sub(4)).clamp(20, 72);
+        let h = 3u16;
+        let x = area.x + area.width.saturating_sub(w) / 2;
+        let y = area.y + area.height.saturating_sub(h) / 2;
+        let rect = Rect::new(x, y, w, h);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(format!(" filter · {} ", s.param));
+        f.render_widget(Clear, rect);
+        f.render_widget(block, rect);
+        let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), 1);
+        let buf = &s.edit;
+        let prefix: String = buf
+            .text
+            .chars()
+            .take(buf.cursor.min(buf.text.chars().count()))
+            .collect();
+        let suffix: String = buf
+            .text
+            .chars()
+            .skip(buf.cursor.min(buf.text.chars().count()))
+            .collect();
+        let line = Line::from(vec![
+            Span::raw(format!(" {prefix}")),
+            Span::styled("█".to_string(), Style::default().bg(Color::Cyan)),
+            Span::raw(suffix),
+        ])
+        .style(Style::default().fg(Color::White));
+        f.render_widget(Paragraph::new(line).block(Block::default()), inner);
+    }
+
     fn draw_confirm(&self, f: &mut Frame, area: Rect, s: &ConfirmSession) {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(Span::styled(
@@ -1921,13 +2512,36 @@ impl App {
             Line::from("  r            refresh current view / reload chrome"),
             Line::from("  d            dump view JSON → tmp file"),
             Line::from("  g            dump graph DOT → tmp file"),
-            Line::from("  :            command palette (actions + menus)"),
+            Line::from("  :            command palette (actions + menus + builtins)"),
+            Line::from("  / · F        filter current view (filter_param)"),
             Line::from("  x            close detail pane"),
             Line::from("  ?            this help"),
             Line::from("  q · Esc      quit (Esc closes detail/help first)"),
         ];
-        // Bound action keys for the current view — the discoverable
-        // half of the interaction protocol.
+        // The effective binding table — commands include host
+        // builtins (`host.*`), menu `keys[]`, action `keys[]`, and
+        // user `keys.toml` overrides. This is the discoverable half
+        // of the unified command layer.
+        let mut commands: Vec<String> = Vec::new();
+        for b in &self.bindings {
+            for key in &b.keys {
+                commands.push(format!("  {key:<10} {}", b.id));
+            }
+        }
+        commands.sort();
+        commands.dedup();
+        if !commands.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " keybindings ",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(
+                commands
+                    .into_iter()
+                    .map(|t| Line::from(Span::styled(t, Style::default().fg(Color::Gray)))),
+            );
+        }
         let bound: Vec<&UiAction> = self
             .actions
             .iter()
@@ -1971,8 +2585,86 @@ impl App {
     }
 }
 
+/// An empty [`DriverManifest`] — the `ResolveContext.manifest`
+/// fallback when the current driver isn't in `self.manifests`.
+fn empty_manifest() -> DriverManifest {
+    DriverManifest {
+        name: String::new(),
+        title: String::new(),
+        icon: None,
+        version: String::new(),
+        verbs: Vec::new(),
+        capabilities: Vec::new(),
+        deps: None,
+        contributes: Default::default(),
+        views: Vec::new(),
+        renderers: Vec::new(),
+        actions: Vec::new(),
+    }
+}
+
 fn in_rect(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
+/// Parse a route's `?query` string into view [`Params`] — `&`-separated
+/// `k=v` pairs, `%XX`/`+` decoding, values kept as strings unless
+/// they parse as JSON objects/arrays (route templates interpolate
+/// scalars; drivers coerce). Bare `k` pairs get an empty string.
+fn parse_route_query(query: &str) -> Params {
+    let mut params = Params::new();
+    if query.is_empty() {
+        return params;
+    }
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = percent_decode(k);
+        if key.is_empty() {
+            continue;
+        }
+        let raw = percent_decode(v);
+        let value = if raw.starts_with('{') || raw.starts_with('[') {
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
+        } else {
+            serde_json::Value::String(raw)
+        };
+        params.insert(key, value);
+    }
+    params
+}
+
+/// Minimal percent-decoding for route query strings (`%XX` → byte,
+/// `+` → space). Invalid sequences pass through literally.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = &s[i + 1..i + 3];
+                match u8::from_str_radix(hex, 16) {
+                    Ok(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The value line under a form field's header in the edit overlay.
@@ -2161,6 +2853,8 @@ mod tests {
             description: None,
             queries: Vec::new(),
             root: serde_json::from_value(kv_root()).unwrap(),
+            item_route: None,
+            filter_param: None,
         }
     }
 
@@ -2225,6 +2919,36 @@ mod tests {
                 target: "demo:board".to_string(),
                 kind: RouteKind::View,
             }],
+            manifests: BTreeMap::from([("demo".to_string(), demo_manifest())]),
+        }
+    }
+
+    /// A minimal `demo` manifest — carries one manifest action so
+    /// `resolve_command`-driven tests have something to find.
+    fn demo_manifest() -> DriverManifest {
+        DriverManifest {
+            name: "demo".to_string(),
+            title: "Demo".to_string(),
+            icon: None,
+            version: "0.0.0".to_string(),
+            verbs: vec!["serve".to_string()],
+            capabilities: vec!["pavo".to_string()],
+            deps: None,
+            contributes: pavo_protocol::Contributes::default(),
+            views: Vec::new(),
+            renderers: Vec::new(),
+            actions: vec![pavo_protocol::Action {
+                id: "manifest.act".to_string(),
+                label: "Manifest act".to_string(),
+                icon: None,
+                danger: DangerLevel::None,
+                keys: vec![],
+                params: Vec::new(),
+                target: None,
+                description: None,
+                driver: None,
+                route: None,
+            }],
         }
     }
 
@@ -2261,6 +2985,7 @@ mod tests {
             views: vec![],
             chrome: Chrome::default(),
             routes: vec![],
+            manifests: BTreeMap::new(),
         });
         // step() drains worker events then polls crossterm — on a
         // non-TTY poll errors → returns true immediately.
@@ -2287,6 +3012,7 @@ mod tests {
             views: vec![view_entry("board"), view_entry("item")],
             chrome: Chrome::default(),
             routes: vec![],
+            manifests: BTreeMap::new(),
         });
         // No navbar chrome → per-driver fallback tabs; boot resolves
         // the first view of the first driver.
@@ -2445,6 +3171,7 @@ mod tests {
             views: vec![view_entry("board")],
             chrome: Chrome::default(),
             routes: vec![],
+            manifests: BTreeMap::new(),
         });
         // Refresh on dashboard sends Reload.
         app.on_event(Ev::View {
@@ -2677,6 +3404,7 @@ mod tests {
                 target: None,
                 description: None,
                 driver: None,
+                route: None,
             },
             scope: pavo_core::ActionScope::Manifest,
             target: "demo:board".to_string(),
@@ -2818,5 +3546,343 @@ mod tests {
         app.help = true;
         draw(&mut app, 40, 10);
         draw(&mut app, 20, 5);
+    }
+
+    // ---------- PL-020: commands, keymap, filter, item_route ----------
+
+    /// A resolved view whose spec declares `item_route` +
+    /// `filter_param` and whose root is a tree with one item —
+    /// exercises navigation + filter plumbing end to end.
+    fn tree_resolved() -> ResolvedView {
+        let mut spec = view_spec("board");
+        spec.item_route = Some("/demo/item?id={item.id}".to_string());
+        spec.filter_param = Some("q".to_string());
+        spec.root = serde_json::from_value(serde_json::json!({
+            "kind": "tree",
+            "id": "root",
+            "items": [
+                {"id": "T-1", "label": "Task one", "props": {"prio": "high"}}
+            ]
+        }))
+        .unwrap();
+        ResolvedView {
+            driver: "demo".to_string(),
+            view: "board".to_string(),
+            namespaced: "demo:board".to_string(),
+            result: ViewResult {
+                view: spec,
+                data: Map::new(),
+            },
+        }
+    }
+
+    /// Point `sel_pos` at the first selectable row carrying an item
+    /// payload (a tree row).
+    fn select_first_item(app: &mut App) {
+        let m = app.model_for_input().unwrap();
+        for (pos, &row) in m.selectables.iter().enumerate() {
+            if let Some(sel_id) = m.rows[row].sel {
+                if m.selections[sel_id].item.is_some() {
+                    app.sel_pos = pos;
+                    return;
+                }
+            }
+        }
+        panic!("no item-carrying selectable row");
+    }
+
+    #[test]
+    fn item_route_enter_navigates_with_item_params() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(tree_resolved())),
+            renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
+        });
+        select_first_item(&mut app);
+        draw(&mut app, 120, 40);
+        app.on_key(KeyCode::Enter);
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Resolve {
+                target,
+                refresh,
+                params,
+            }) => {
+                assert_eq!(target, "demo:item");
+                assert!(!refresh);
+                assert_eq!(params["id"], serde_json::json!("T-1"));
+            }
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_builtin_binds_slash_and_f() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(tree_resolved())),
+            renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
+        });
+        // '/' opens the overlay bound to filter_param "q".
+        app.on_key(KeyCode::Char('/'));
+        let s = app.filter.as_ref().expect("filter open");
+        assert_eq!(s.param, "q");
+        assert_eq!(s.target, "demo:board");
+        draw(&mut app, 120, 40);
+        for c in "high".chars() {
+            app.on_key(KeyCode::Char(c));
+        }
+        app.on_key(KeyCode::Enter);
+        assert!(app.filter.is_none());
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Resolve {
+                target,
+                params,
+                refresh,
+            }) => {
+                assert_eq!(target, "demo:board");
+                assert!(!refresh);
+                assert_eq!(params["q"], serde_json::json!("high"));
+            }
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+        // 'F' opens it too; empty submit clears the param.
+        app.on_key(KeyCode::Char('F'));
+        assert!(app.filter.is_some());
+        app.on_key(KeyCode::Enter);
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Resolve { params, .. }) => assert!(params.get("q").is_none()),
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_command_navigates_with_query_params() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
+        });
+        while rx_cmd.try_recv().is_ok() {}
+        let cmd = Command::parse("route:/demo/item?id=T-9&tag=a%20b").unwrap();
+        assert!(app.run_command(cmd));
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Resolve {
+                target,
+                params,
+                refresh: false,
+            }) => {
+                assert_eq!(target, "demo:item");
+                assert_eq!(params["id"], serde_json::json!("T-9"));
+                assert_eq!(params["tag"], serde_json::json!("a b"));
+            }
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+        // Unresolvable route → status, no command.
+        app.run_command(Command::parse("route:/nope/nowhere").unwrap());
+        assert!(rx_cmd.try_recv().is_err());
+        assert!(app.status.contains("unresolvable"));
+    }
+
+    #[test]
+    fn menu_entry_command_resolves_builtins_and_routes() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        let menu = |id: &str, command: &str| MenuEntry {
+            id: id.to_string(),
+            title: id.to_string(),
+            icon: None,
+            action: None,
+            route: None,
+            command: Some(command.to_string()),
+            keys: Vec::new(),
+            keywords: Vec::new(),
+            section: None,
+            priority: 0,
+        };
+        // host.* command → builtin handler.
+        assert!(app.activate_palette_entry(PaletteEntry::Menu(menu("h", "host.help"))));
+        assert!(app.help);
+        app.help = false;
+        // route: command → navigation.
+        assert!(
+            app.activate_palette_entry(PaletteEntry::Menu(menu("g", "route:/demo/item?id=T-4")))
+        );
+        assert!(matches!(
+            rx_cmd.try_recv(),
+            Ok(Cmd::Resolve { target, .. }) if target == "demo:item"
+        ));
+        // Display-only entry (no command/action/route) → status.
+        let mut display = menu("d", "");
+        display.command = None;
+        assert!(app.activate_palette_entry(PaletteEntry::Menu(display)));
+        assert!(app.status.contains("display-only"));
+    }
+
+    #[test]
+    fn action_route_field_navigates_instead_of_invoking() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        let mut a = ui_action("open", DangerLevel::None, &["O"]);
+        a.action.route = Some("/demo/item?id={item.id}".to_string());
+        a.item_id = Some("T-3".to_string());
+        app.on_event(view_with_actions(vec![a]));
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_key(KeyCode::Char('O'));
+        // No Cmd::Invoke — the declared route navigated instead,
+        // interpolated over the action's item context.
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Resolve {
+                target,
+                params,
+                refresh: false,
+            }) => {
+                assert_eq!(target, "demo:item");
+                assert_eq!(params["id"], serde_json::json!("T-3"));
+            }
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+        draw(&mut app, 120, 40);
+    }
+
+    #[test]
+    fn action_result_route_navigates_after_invoke() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        let mut a = ui_action("go", DangerLevel::None, &["G"]);
+        a.item_id = Some("T-7".to_string());
+        app.on_event(view_with_actions(vec![a]));
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_key(KeyCode::Char('G'));
+        assert!(matches!(rx_cmd.try_recv(), Ok(Cmd::Invoke { .. })));
+        app.on_event(Ev::Invoke {
+            result: Ok(pavo_protocol::wire::ActionResult {
+                message: Some("done".to_string()),
+                route: Some("/demo/item?id={target.id}".to_string()),
+                ..Default::default()
+            }),
+            actions: Vec::new(),
+            menus: Vec::new(),
+        });
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Resolve {
+                target,
+                params,
+                refresh: false,
+            }) => {
+                assert_eq!(target, "demo:item");
+                assert_eq!(params["id"], serde_json::json!("T-7"));
+            }
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+        assert_eq!(app.status, "done");
+    }
+
+    #[test]
+    fn command_layer_fallback_dispatch_and_unsupported() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+            actions: Vec::new(), // nothing collected — resolve_command path
+            menus: Vec::new(),
+        });
+        while rx_cmd.try_recv().is_ok() {}
+        // action: id absent from UiActions but present in the demo
+        // manifest → resolve_command → Dispatch → Cmd::Invoke.
+        assert!(app.run_command(Command::parse("action:manifest.act").unwrap()));
+        match rx_cmd.try_recv() {
+            Ok(Cmd::Invoke {
+                target,
+                action,
+                view,
+                ..
+            }) => {
+                assert_eq!(target, "demo:board");
+                assert_eq!(action, "manifest.act");
+                assert_eq!(view.as_deref(), Some("board"));
+            }
+            other => panic!("expected Invoke, got {other:?}"),
+        }
+        // Unknown driver command → Unsupported.
+        assert!(app.run_command(Command::parse("driver:ghost:nope").unwrap()));
+        assert_eq!(app.status, "unsupported command");
+        // host.quit propagates false.
+        assert!(!app.run_command(Command::parse("host.quit").unwrap()));
+    }
+
+    #[test]
+    fn user_keymap_overrides_builtin_binding() {
+        let (tx, rx_cmd) = channel::<Cmd>();
+        let (ev_tx, ev_rx) = channel::<Ev>();
+        let keymap = crate::keymap::parse(r#""host.filter" = "ctrl+f""#);
+        let mut app = App::with_keymap(Worker { tx, rx: ev_rx }, None, keymap);
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(tree_resolved())),
+            renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
+        });
+        while rx_cmd.try_recv().is_ok() {}
+        // ctrl+f (the override) opens the filter; '/' no longer does.
+        app.on_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(app.filter.is_some());
+        app.filter = None;
+        app.on_key(KeyCode::Char('/'));
+        assert!(app.filter.is_none());
+        let _ = ev_tx;
+    }
+
+    #[test]
+    fn user_keymap_scoped_action_binding() {
+        let (tx, rx_cmd) = channel::<Cmd>();
+        let (_ev_tx, ev_rx) = channel::<Ev>();
+        let keymap = crate::keymap::parse(
+            r#"
+            [demo]
+            "action:refresh" = "ctrl+r"
+            "#,
+        );
+        let mut app = App::with_keymap(Worker { tx, rx: ev_rx }, None, keymap);
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(resolved("board"))),
+            renders: HashMap::new(),
+            actions: vec![ui_action("refresh", DangerLevel::None, &[])],
+            menus: Vec::new(),
+        });
+        while rx_cmd.try_recv().is_ok() {}
+        // The scoped override binds ctrl+r → the action invoke
+        // ('r' alone stays the builtin refresh).
+        app.on_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            rx_cmd.try_recv(),
+            Ok(Cmd::Invoke { action, .. }) if action == "refresh"
+        ));
     }
 }

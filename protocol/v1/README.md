@@ -139,6 +139,51 @@ One type, three declaration sites:
   context rides the invoke request's `target`.
 - `driver`: reserved cross-driver target (same convention as
   `QueryBinding.driver`); v1 hosts may treat the action as local.
+- `route`: **navigate instead of dispatch** — a route template the
+  host interpolates and navigates to locally (no `invoke`
+  round-trip). See "Route templates" below.
+
+### Route templates & navigation
+
+Three additive fields turn actions/rows into navigation:
+
+- `Action.route` — activating the action navigates instead of
+  dispatching (danger/params still apply host-side; a form may
+  collect params the template consumes).
+- `ActionResult.route` — a driver-requested redirect *after* a
+  successful invoke; the host interpolates it over the invoke
+  context and navigates (apply `view`/`data` first).
+- `ViewSpec.item_route` — per-view template over a `TreeItem`;
+  Enter/click on a row navigates (e.g.
+  `"/myco/item?id={item.id}"`).
+
+Templates use `{path.to.value}` placeholders resolved against the
+invoke context — `target`, `params`, `item` (the selected
+`TreeItem`: `id`/`label`/`detail`/`icon` plus flattened `props`),
+`view` (id), `driver`, `data` (the view's query-binding map).
+Missing keys interpolate to empty; `{{`/`}}` escape literal
+braces. Full rules: `pavo_core::commands::interpolate`.
+
+### Commands — one grammar for everything invocable
+
+Everything a host can activate resolves to a **command**:
+
+```
+action:<id>              invoke the action (driver dispatch)
+route:<path>             host navigation (template over context)
+host.<builtin>           host capability — filter, help, reload,
+                         editor, palette, quit
+driver:<name>:<id>       cross-driver action (reserved; v1 resolves
+                         locally against that driver's manifest)
+```
+
+`MenuEntry.command` carries this grammar verbatim and **wins** over
+the legacy `action`/`route` fields (kept for compat: `"<id>"` →
+`action:<id>`, `"<drv>:<id>"` → `driver:<drv>:<id>`, `route` →
+`route:<path>`). `MenuEntry.keys` adds suggested bindings.
+`pavo_core::commands` is the single resolver
+(`resolve_command` → dispatch / navigate / builtin / unsupported);
+the host builtin catalog is `pavo_core::commands::BUILTINS`.
 
 ### Menus — the command palette
 
@@ -146,16 +191,34 @@ One type, three declaration sites:
 
 ```json
 {"id":"new-task","title":"New task","icon":"plus",
- "action":"todo.add","keywords":["create","todo"],
- "section":"myco","priority":10}
+ "command":"action:todo.add","keys":["n"],
+ "keywords":["create","todo"],"section":"myco","priority":10}
 ```
 
-An entry either `action`s (invoke, resolved like the wire op —
-`"<action-id>"` or `"<driver>:<action-id>"`) or `route`s (navigate,
-same as `Contribution.route`). `keywords` feed host-side fuzzy
-matching (dmenu-style). Hosts also synthesize palette entries from
-declared `actions[]` and ops-derived actions — `menus[]` is for
-curated grouping/ordering/aliases, not a requirement.
+An entry resolves to a command (see above) or is display-only.
+`keywords` feed host-side fuzzy matching (dmenu-style). Hosts also
+synthesize palette entries from declared `actions[]`, ops-derived
+actions, and the host builtins — `menus[]` is for curated
+grouping/ordering/aliases, not a requirement.
+
+### Keybindings — declarations suggest, users override
+
+`Action.keys[]`, `MenuEntry.keys[]`, and `BUILTINS` default keys
+are **suggestions**. A host keymap file (`keys.toml` — host config,
+*not* protocol) remaps by **command id** (`action:todo.done`,
+`host.filter`, …). `pavo_core::commands::effective_bindings`
+merges declarations + overlay into the effective sorted binding
+list; `pavo_core::keymap::KeySpec` is the shared spec grammar
+(named keys, `ctrl+`-style chords, `dd`-style sequences).
+
+### Filtering — a view param, not a widget
+
+`ViewSpec.filter_param` names the view's free-text query param
+(convention `"q"`). The `host.filter` builtin opens a host filter
+dialog; submit re-resolves the view with
+`params[<filter_param>]` set — no new wire op. When the view
+exposes `ref_query` data the dialog may upgrade to a fuzzy picker.
+CLI hosts pass the param directly (`--param q=…`).
 
 ### Ops-derived actions (zero-declaration fallback)
 

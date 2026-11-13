@@ -92,15 +92,57 @@ export function viewHref(ref: string): string {
 /** A `driver:view` ref with no slashes/spaces — e.g. `myco:item`. */
 const VIEW_REF_RE = /^[^/\s:]+:[^/\s:]+$/
 
+/** Percent-decode one component — bad escapes pass through. */
+function dec(s: string): string {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
+}
+
+/** `a=b&c=d` query string → ordered view params (bare-key form —
+ *  same precedence slot as `?k=v` on a `/view/…` URL). Repeated
+ *  keys are kept; downstream is last-wins. */
+function queryParams(qs: string): ViewParam[] {
+  const out: ViewParam[] = []
+  if (!qs) return out
+  for (const pair of qs.split('&')) {
+    if (!pair) continue
+    const eq = pair.indexOf('=')
+    const key = eq === -1 ? pair : pair.slice(0, eq)
+    if (!key) continue
+    out.push([dec(key), dec(eq === -1 ? '' : pair.slice(eq + 1))])
+  }
+  return out
+}
+
+/** Split `path?query#hash` → `[path, query]` (hash dropped). */
+function splitPathQuery(r: string): [string, string] {
+  let end = r.length
+  for (const ch of ['?', '#']) {
+    const i = r.indexOf(ch)
+    if (i !== -1 && i < end) end = i
+  }
+  const path = r.slice(0, end)
+  let qs = r.slice(end)
+  if (!qs.startsWith('?')) return [path, '']
+  qs = qs.slice(1)
+  const hash = qs.indexOf('#')
+  return [path, hash === -1 ? qs : qs.slice(0, hash)]
+}
+
 /**
- * Resolve a chrome/feed `route` string to a view link, or `null`
- * when it isn't a view route.
+ * Resolve a chrome/feed/command `route` string to a view link, or
+ * `null` when it isn't a view route.
  *
  * Contribution `route`s are driver-relative view routes
  * (`/demo/board` — the `ViewSpec.route` form), `/view/…` deep links,
  * or bare `driver:view` refs; anything else (host routes like
  * `/dashboard`, driver-owned `routes[]` pages) returns `null` and
- * the caller falls back to plain navigation.
+ * the caller falls back to plain navigation. Query strings on view
+ * routes (`/myco/item?id=T-1` — the `item_route`/`Action.route`
+ * template style) ride along as view params.
  *
  * `views` is the `/api/views` list used to map `ViewSpec.route` →
  * `namespaced` ref; pass `[]` for the synchronous subset
@@ -116,27 +158,28 @@ export function routeToViewLink(
 
   // Already a web deep link — reuse the page grammar verbatim.
   if (r.startsWith('/view/')) {
-    const rest = r.slice('/view/'.length).split(/[?#]/)[0] ?? ''
+    const [pathPart, qs] = splitPathQuery(r.slice('/view/'.length))
     // vue-router hands the page decoded segments; a raw route string
     // still carries %XX — decode to match (bad escapes pass through).
-    const segments = rest
+    const segments = pathPart
       .split('/')
       .filter((s) => s !== '')
-      .map((s) => {
-        try {
-          return decodeURIComponent(s)
-        } catch {
-          return s
-        }
-      })
+      .map(dec)
     if (!segments.length) return null
-    return parseViewLink(segments, {})
+    const link = parseViewLink(segments, {})
+    // `?k=v` on the route string appends after path params (wins).
+    link.params.push(...queryParams(qs))
+    return link
   }
 
   // Bare `driver:view` ref.
   if (VIEW_REF_RE.test(r)) return { ref: r, params: [] }
 
-  // ViewSpec.route (`/demo/board`) → namespaced ref via /api/views.
-  const hit = views.find((v) => v.route === r || v.route === r.replace(/\/+$/, ''))
-  return hit ? { ref: hit.namespaced, params: [] } : null
+  // ViewSpec.route (`/demo/board`, optionally `?params`) →
+  // namespaced ref via /api/views.
+  const [path, qs] = splitPathQuery(r)
+  const hit = views.find(
+    (v) => v.route === path || v.route === path.replace(/\/+$/, ''),
+  )
+  return hit ? { ref: hit.namespaced, params: queryParams(qs) } : null
 }

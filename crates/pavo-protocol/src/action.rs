@@ -182,6 +182,22 @@ pub struct Action {
     /// [`crate::manifest::QueryBinding::driver`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
+    /// Navigate-instead-of-dispatch — a route **template** the host
+    /// interpolates and navigates to locally when the action is
+    /// activated, *instead of* sending `invoke` to the driver.
+    ///
+    /// Template syntax: `{path.to.value}` placeholders resolved
+    /// against the invoke context — `target`, `params`, `item`,
+    /// `view`, `driver` (see `pavo_core::commands::interpolate`
+    /// for the exact rules; missing keys interpolate to empty).
+    /// Example: `"/myco/item?id={target.id}"` or
+    /// `"/myco/item?id={item.id}&tab={params.tab}"`.
+    ///
+    /// `danger`/`params` still apply host-side when a route is set
+    /// (a form may collect params the template consumes), but no
+    /// wire round-trip happens — navigation is host-local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
 }
 
 #[cfg(test)]
@@ -235,6 +251,25 @@ mod tests {
             assert_eq!(p.kind, kind, "wire spelling {wire}");
             assert_eq!(serde_json::to_value(p.kind).unwrap(), wire);
         }
+    }
+
+    #[test]
+    fn action_route_roundtrips_and_defaults_none() {
+        // Absent → None, omitted on serialize.
+        let a: Action = serde_json::from_value(json!({"id":"x","label":"X"})).unwrap();
+        assert!(a.route.is_none());
+        assert!(serde_json::to_value(&a).unwrap().get("route").is_none());
+
+        // Present → round-trips; unknown sibling fields ignored.
+        let a: Action = serde_json::from_value(json!({
+            "id":"open","label":"Open","route":"/myco/item?id={item.id}",
+            "future_field": {"x": 1}
+        }))
+        .unwrap();
+        assert_eq!(a.route.as_deref(), Some("/myco/item?id={item.id}"));
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["route"], "/myco/item?id={item.id}");
+        assert!(v.get("future_field").is_none());
     }
 
     #[test]

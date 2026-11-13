@@ -265,6 +265,8 @@ pub fn view(id: &str, title: &str, route: &str, root: ViewNode) -> View {
             description: None,
             queries: Vec::new(),
             root,
+            item_route: None,
+            filter_param: None,
         },
     }
 }
@@ -282,6 +284,24 @@ impl View {
     #[must_use]
     pub fn query(mut self, binding: QueryBinding) -> Self {
         self.spec.queries.push(binding);
+        self
+    }
+
+    /// Row-navigation template — Enter/click on a tree item
+    /// navigates the host to this interpolated route
+    /// (`{item.id}`, `{item.<prop>}`, …; see
+    /// `pavo_core::commands::interpolate`).
+    #[must_use]
+    pub fn item_route(mut self, route: impl Into<String>) -> Self {
+        self.spec.item_route = Some(route.into());
+        self
+    }
+
+    /// Name the view's free-text filter query param (convention
+    /// `"q"`) — enables the host's `host.filter` builtin.
+    #[must_use]
+    pub fn filter_param(mut self, param: impl Into<String>) -> Self {
+        self.spec.filter_param = Some(param.into());
         self
     }
 

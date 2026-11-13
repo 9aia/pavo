@@ -675,6 +675,10 @@
         "driver": {
           "type": "string",
           "description": "Cross-driver target — reserved; v1 hosts may ignore it."
+        },
+        "route": {
+          "type": "string",
+          "description": "Navigate-instead-of-dispatch — a route template ({target.id}, {params.x}, {item.id}, …) the host interpolates and navigates to locally; no invoke round-trip."
         }
       }
     }
