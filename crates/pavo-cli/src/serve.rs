@@ -23,6 +23,12 @@
 //! - `POST /api/call?driver=<kind>` → cross-driver wire proxy: the
 //!   JSON body is a wire [`Request`] forwarded verbatim to that
 //!   driver's `serve`; its `result` comes back in the envelope
+//! - `POST /api/invoke` → action dispatch: body
+//!   `{"ref":"<driver>:<view>"}` (or `"driver"` + optional `"view"`),
+//!   `"action"`, optional `"view"` context override, `"target"`,
+//!   `"params"` — answered with the `ActionResult` JSON. Confirmation
+//!   UX (`confirm`/`type-target` danger) is the client's job — the
+//!   bridge dispatches like `--yes`.
 //! - `GET /api/view?ref=<driver>:<view>` (+ `param.<k>=<v>`) → ViewResult
 //! - `GET /api/raw?ref=…` → same as `/api/view`
 //! - `GET /api/query?driver=<d>&query=<q>` (+ `param.<k>=<v>`) → QueryResult
@@ -150,15 +156,17 @@ fn route(req: &Request, host: &Arc<Host>, web_root: Option<&Path>) -> (Response,
     }
 
     // /api/* — JSON envelope, CORS on. POST is accepted only for
-    // /api/call (the cross-driver wire proxy needs a body);
+    // /api/call (the cross-driver wire proxy) and /api/invoke (the
+    // action verb) — both need a body; /api/invoke is POST-only,
     // everything else stays GET/HEAD.
-    let post_call = req.method == "POST" && path == "/api/call";
-    if req.method != "GET" && !head_only && !post_call {
+    let post_ok = req.method == "POST" && matches!(path.as_str(), "/api/call" | "/api/invoke");
+    let get_ok = (req.method == "GET" || head_only) && path != "/api/invoke";
+    if !post_ok && !get_ok {
         let mut resp = api_error(405, "method not allowed", true);
-        let allow = if path == "/api/call" {
-            "GET, HEAD, POST"
-        } else {
-            "GET, HEAD"
+        let allow = match path.as_str() {
+            "/api/call" => "GET, HEAD, POST",
+            "/api/invoke" => "POST",
+            _ => "GET, HEAD",
         };
         resp.extra.push(("allow".to_string(), allow.to_string()));
         return (resp, false);
@@ -189,6 +197,7 @@ fn api_route(path: &str, pairs: &[(String, String)], host: &Host, body: &[u8]) -
         "jobs" => api_jobs(host),
         "notifications" => api_notifications(host),
         "call" => api_call(host, pairs, body),
+        "invoke" => api_invoke(host, body),
         "view" | "raw" => api_view(host, pairs),
         "query" => api_query(host, pairs),
         "submit" => api_submit(host, pairs),
@@ -353,6 +362,57 @@ fn api_call(host: &Host, pairs: &[(String, String)], body: &[u8]) -> Result<Valu
         .lock()
         .map_err(|_| ApiFail::new(500, "driver client lock poisoned"))?;
     guard.request::<Value>(&request).map_err(ApiFail::from)
+}
+
+/// `POST /api/invoke` — the `invoke` wire op over HTTP, the web
+/// host's action path. Body JSON:
+///
+/// ```json
+/// {"ref": "myco:board", "action": "todo.done",
+///  "target": {"id": "T-012"}, "params": {"note": "shipped"}}
+/// ```
+///
+/// `ref` (`<driver>:<view>` or bare `<driver>`) wins; else `driver`
+/// is required and optional `view` completes the ref. With `ref`,
+/// `view` is instead the view-context override passed to
+/// [`Host::invoke`]. `target` is the opaque action target (any
+/// JSON), `params` a `ParamSchema.name` → value object. No
+/// confirmation gate — web clients own the `danger` UX; this is the
+/// `--yes` path.
+fn api_invoke(host: &Host, body: &[u8]) -> Result<Value, ApiFail> {
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| ApiFail::new(400, format!("body isn't a JSON object: {e}")))?;
+    let field = |k: &str| v.get(k).and_then(Value::as_str);
+    let action = field("action").ok_or_else(|| ApiFail::new(400, "missing 'action' field"))?;
+    let (reference, view_ctx) = match field("ref") {
+        Some(r) => (r.to_string(), field("view")),
+        None => {
+            let driver = field("driver")
+                .ok_or_else(|| ApiFail::new(400, "missing 'ref' or 'driver' field"))?;
+            match field("view") {
+                Some(view) => (format!("{driver}:{view}"), None),
+                None => (driver.to_string(), None),
+            }
+        }
+    };
+    if let Some(p) = v.get("params") {
+        if !p.is_object() {
+            return Err(ApiFail::new(400, "'params' must be a JSON object"));
+        }
+    }
+    let params: Params = v
+        .get("params")
+        .and_then(Value::as_object)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    let result = host.invoke(
+        &reference,
+        action,
+        view_ctx,
+        v.get("target").cloned(),
+        params,
+    )?;
+    serde_json::to_value(&result).map_err(|e| ApiFail::new(500, e.to_string()))
 }
 
 /// Resolve the `driver:view` target: `?ref=` wins, else `?driver=` +
@@ -970,6 +1030,7 @@ if [ "$1" = serve ]; then
       *'"op":"view"'*) printf '%s\n' '{"ok":true,"result":{"view":{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[{"key":"k","value":"v"}]},"queries":[{"name":"items","op":"query"}]},"data":{}}}' ;;
       *'"op":"query"'*) printf '%s\n' '{"ok":true,"result":{"query":"items","data":[1,2]}}' ;;
       *'"op":"submit"'*) printf '%s\n' '{"ok":true,"result":{"message":"saved","data":{"applied":1}}}' ;;
+      *'"op":"invoke"'*) printf '%s\n' '{"ok":true,"result":{"message":"invoked","data":{"applied":1}}}' ;;
       *'"op":"jobs"'*) printf '%s\n' '{"ok":true,"result":[{"id":"j1","title":"Build","status":"running","detail":"step 2/5","route":"/demo/job/j1"}]}' ;;
       *'"op":"notifications"'*) printf '%s\n' '{"ok":true,"result":[{"id":"n1","title":"Heads up","severity":"info","read":false}]}' ;;
       *'"op":"manifest"'*) printf '%s\n' '{"ok":true,"result":{"name":"demo","title":"Demo","version":"1.0.0","verbs":["serve"],"capabilities":["pavo"],"contributes":{"jobs":[{"id":"job","title":"Jobs","route":"/demo/jobs"}],"notifications":[{"id":"ntf","title":"Notify","route":"/demo/ntf"}]},"views":[{"id":"board","title":"Board","route":"/demo/board","root":{"kind":"kv","pairs":[]}}]}}' ;;
@@ -1218,6 +1279,59 @@ exit 1
         assert_eq!(resp.status, 400);
         let resp = api(&host, "/api/submit?ref=demo:nope");
         assert_eq!(resp.status, 404);
+    }
+
+    #[test]
+    fn api_invoke_dispatches_actions() {
+        let host = fixture_host();
+        // ref + action + params + target.
+        let resp = api_call_post(
+            &host,
+            "/api/invoke",
+            r#"{"ref":"demo:board","action":"refresh","target":{"id":"T-1"},"params":{"x":1}}"#,
+        );
+        let body = envelope(&resp);
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(body["result"]["message"], "invoked");
+
+        // driver+view form; bare driver also works.
+        let resp = api_call_post(
+            &host,
+            "/api/invoke",
+            r#"{"driver":"demo","view":"board","action":"a"}"#,
+        );
+        assert_eq!(envelope(&resp)["ok"], true);
+        let resp = api_call_post(&host, "/api/invoke", r#"{"driver":"demo","action":"a"}"#);
+        assert_eq!(envelope(&resp)["ok"], true);
+
+        // With `ref`, `view` is the context override — still ok.
+        let resp = api_call_post(
+            &host,
+            "/api/invoke",
+            r#"{"ref":"demo:board","view":"board","action":"a"}"#,
+        );
+        assert_eq!(envelope(&resp)["ok"], true);
+
+        // Bad bodies → 400; unknown driver → 404.
+        let resp = api_call_post(&host, "/api/invoke", "{bad");
+        assert_eq!(resp.status, 400);
+        let resp = api_call_post(&host, "/api/invoke", r#"{"ref":"demo:board"}"#);
+        assert_eq!(resp.status, 400);
+        let resp = api_call_post(&host, "/api/invoke", r#"{"action":"a"}"#);
+        assert_eq!(resp.status, 400);
+        let resp = api_call_post(
+            &host,
+            "/api/invoke",
+            r#"{"driver":"demo","action":"a","params":[1]}"#,
+        );
+        assert_eq!(resp.status, 400);
+        let resp = api_call_post(&host, "/api/invoke", r#"{"driver":"ghost","action":"a"}"#);
+        assert_eq!(resp.status, 404);
+
+        // GET is rejected — invoke is POST-only.
+        let (resp, _) = route(&req("GET", "/api/invoke"), &host, None);
+        assert_eq!(resp.status, 405);
+        assert!(resp.extra.iter().any(|(k, v)| k == "allow" && v == "POST"));
     }
 
     #[test]
