@@ -11,6 +11,7 @@ import type { Action } from '~/utils/interactions'
 // Explicit import — the recursive tree renderer calls h(ItemActions)
 // inside a render function, where Nuxt's template auto-import doesn't reach.
 import ItemActions from '~/components/ItemActions.vue'
+import ItemLink from '~/components/ItemLink.vue'
 
 const props = defineProps<{
   node: Record<string, any>
@@ -123,11 +124,16 @@ interface TreeItem {
   icon?: string
   children?: TreeItem[]
   actions?: Action[]
+  [k: string]: any
 }
 
 function normTreeItem(x: any): TreeItem {
   if (typeof x === 'string') return { label: x }
+  // Spread the raw item first — `props` and driver-defined fields
+  // must survive for `item_route` template interpolation
+  // (`{item.<prop>}`) and ItemActions context.
   return {
+    ...x,
     id: x?.id,
     label: String(x?.label ?? x?.id ?? x?.title ?? '?'),
     detail: x?.detail ?? x?.description,
@@ -199,7 +205,9 @@ const ViewNodeTreeItems = defineComponent({
       tprops.items.map((item: any, i: number) =>
         h('li', { key: item.id ?? item.label ?? i }, [
           item.icon ? h('span', item.icon + ' ') : null,
-          item.label,
+          // ItemLink renders the label as a button when the view
+          // declares `item_route` (ViewSpec row navigation).
+          h(ItemLink, { item }, () => item.label),
           item.detail ? h('span', { class: 'muted' }, ' ' + item.detail) : null,
           item.actions?.length
             ? h(ItemActions, { actions: item.actions, itemId: item.id })
@@ -340,7 +348,7 @@ function fmt(v: any): string {
     <ul v-else-if="kind === 'tree'" class="tree">
       <li v-for="item in treeItems" :key="item.id ?? item.label">
         <span v-if="item.icon">{{ item.icon }}</span>
-        {{ item.label }}
+        <ItemLink :item="item">{{ item.label }}</ItemLink>
         <span v-if="item.detail" class="muted">{{ item.detail }}</span>
         <ItemActions
           v-if="item.actions?.length"

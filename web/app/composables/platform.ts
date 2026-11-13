@@ -14,7 +14,7 @@
 //   /api/notifications → { ok, result: NotificationRow[] }
 //   /api/views         → { ok, result: ViewListEntry[] }
 import type { ViewLink, ViewListEntry } from '~/utils/view-link'
-import { routeToViewLink } from '~/utils/view-link'
+import { routeToViewLink, viewLinkHref } from '~/utils/view-link'
 
 // ---- types ---------------------------------------------------------
 
@@ -133,6 +133,22 @@ export function routeTargetWithViews(
 ): RouteTarget {
   const link = routeToViewLink(route, views)
   return link ? { type: 'view', link } : { type: 'link', to: route }
+}
+
+/**
+ * Router navigation through the same route resolution chrome uses —
+ * the web half of `Resolved::Navigate`: `route:` commands,
+ * `Action.route`, `ViewSpec.item_route`, `ActionResult.route`, and
+ * menu `route`s all land here. View routes (`/demo/board`,
+ * `/view/…`, `driver:view`) become `/view/…` deep links; anything
+ * else pushes the raw path (host routes, driver-owned pages).
+ */
+export function useNavigateRoute(): (route: string) => Promise<void> {
+  const router = useRouter()
+  return async (route: string) => {
+    const target = await resolveRoute(route)
+    await router.push(target.type === 'view' ? viewLinkHref(target.link) : target.to)
+  }
 }
 
 // ---- feed helpers -----------------------------------------------------

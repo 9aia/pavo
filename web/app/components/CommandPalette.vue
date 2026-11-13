@@ -5,21 +5,31 @@
 // grouping, priority ordering). Hand-rolled subsequence fuzzy
 // match — no dep.
 //
-// Selection: menu `route`s navigate (view routes resolve through
-// the same routeToViewLink rules as chrome); `action`s — declared
-// or menu-synthesized — run through `useActionFlow`, so params
-// forms and danger gates behave identically to ActionBar clicks.
+// Selection rides the unified command layer (utils/commands.ts —
+// the TS mirror of pavo-core's commands.rs): `MenuEntry.command`
+// wins over the legacy `action`/`route` pair; `route:`/`Action.route`
+// navigate via `useNavigateRoute`, `action:`/`driver:` dispatch
+// through `useActionFlow` (params forms + danger gates identical to
+// ActionBar), `host.*` builtins map to web equivalents. `MenuEntry.keys`
+// are display-only hints (the web host has no keymap).
 import type { Action, MenuEntry, ScopedAction } from '~/utils/interactions'
 import { fuzzyScore } from '~/utils/interactions'
+import {
+  BUILTINS,
+  commandId,
+  menuCommand,
+  resolveCommand,
+  type Command,
+  type HostBuiltin,
+  type Resolved,
+} from '~/utils/commands'
 import {
   fetchAllManifests,
   usePaletteActions,
 } from '~/composables/actions'
 import { useActionFlow } from '~/composables/useActionFlow'
-import { resolveRoute } from '~/composables/platform'
-import { viewLinkHref } from '~/utils/view-link'
+import { useNavigateRoute } from '~/composables/platform'
 
-const router = useRouter()
 const open = ref(false)
 const query = ref('')
 const cursor = ref(0)
@@ -27,6 +37,37 @@ const inputEl = ref<HTMLInputElement | null>(null)
 
 const flow = useActionFlow()
 const palette = usePaletteActions()
+const navigate = useNavigateRoute()
+
+// ---- host builtins ---------------------------------------------------------
+
+/** Builtins the web host implements — `editor`/`quit` have no web
+ *  equivalent and stay hidden (they'd resolve Unsupported anyway). */
+const SUPPORTED_BUILTINS = new Set<HostBuiltin>([
+  'filter',
+  'help',
+  'reload',
+  'palette',
+])
+
+/** Builtin activation — window events the owning surface (the view
+ *  page) listens for; `palette` is a no-op here because selecting a
+ *  palette row already closed the palette. */
+function runBuiltin(b: HostBuiltin): void {
+  window.dispatchEvent(new Event(`pavo:host:${b}`))
+}
+
+function builtinItems(): PaletteItem[] {
+  return BUILTINS.filter((b) => SUPPORTED_BUILTINS.has(b.builtin)).map((b) => ({
+    key: `host:${b.id}`,
+    title: b.label,
+    section: 'host',
+    keywords: [b.id, ...b.keys],
+    priority: 100,
+    hint: b.keys.join('/'),
+    run: () => runBuiltin(b.builtin),
+  }))
+}
 
 // ---- entry model ---------------------------------------------------------
 
@@ -50,61 +91,98 @@ async function ensureManifests(): Promise<void> {
   manifests.value = await fetchAllManifests()
 }
 
-/** Menus → palette items. `action` entries resolve against the
- *  owning manifest's `actions[]` first (params/danger/label come
- *  from the declaration); unknown ids degrade to a bare invoke. */
+/** Resolve one menu entry's command against the palette context —
+ *  `action:` resolves on the *current* driver (the view on screen,
+ *  full node/item scope via its ViewResult; off-view pages fall
+ *  back to the entry's owning driver, manifest scope), `driver:` on
+ *  the named driver's manifest, `route:`/`Action.route` navigate,
+ *  `host.*` hits the builtin map. Returns the palette `run` or
+ *  `null` when the entry resolves Unsupported (hidden). */
+function resolveMenuRun(
+  cmd: Command,
+  entry: MenuEntry,
+  owner: string,
+): (() => void) | null {
+  // `action:` commands target the current driver; with no view on
+  // screen the owning driver is the only sensible context.
+  const ctxDriver = palette.driver || owner
+  const ctxManifest = manifests.value.find((r) => r.driver === ctxDriver)?.manifest
+  const resolved: Resolved = resolveCommand(cmd, {
+    driver: ctxDriver,
+    manifest: ctxManifest,
+    viewResult: ctxDriver === palette.driver ? palette.viewResult : null,
+    drivers: manifests.value.map((r) => ({ driver: r.driver, manifest: r.manifest })),
+  })
+  switch (resolved.type) {
+    case 'navigate':
+      return () => void navigate(resolved.route)
+    case 'builtin':
+      return SUPPORTED_BUILTINS.has(resolved.builtin)
+        ? () => runBuiltin(resolved.builtin)
+        : null
+    case 'unsupported':
+      return null
+    case 'dispatch': {
+      // Rebuild a ScopedAction for the flow — `declared` carries
+      // params/danger when the id was found in scope; undeclared
+      // ids degrade to a bare invoke (driver answers ok:false).
+      const itemId =
+        resolved.target && typeof resolved.target === 'object'
+          ? (resolved.target as Record<string, any>).id
+          : undefined
+      const scoped: ScopedAction = {
+        action:
+          resolved.declared ??
+          ({
+            id: resolved.action,
+            label: entry.title,
+            icon: entry.icon,
+            danger: 'none',
+            params: [],
+          } satisfies Action),
+        scope: typeof itemId === 'string' ? 'item' : 'manifest',
+        driver: resolved.driver,
+        view: resolved.view,
+        itemId: typeof itemId === 'string' ? itemId : undefined,
+      }
+      return () => flow.activate(scoped)
+    }
+  }
+}
+
+/** Menus → palette items via `menuCommand` + `resolveCommand`.
+ *  `command` wins over the legacy `action`/`route` pair; a legacy
+ *  bare `action` (no `driver:` prefix, no `command`) keeps its
+ *  historical owner-driver scope by resolving as `driver:<owner>:<id>`
+ *  — the grammar's `action:` means *current* driver, which is only
+ *  spelled explicitly via `command`. */
 function menuItems(): PaletteItem[] {
   const items: PaletteItem[] = []
   for (const { driver, manifest } of manifests.value) {
-    const declared = new Map<string, Action>(
-      (manifest.actions ?? []).map((a: Action) => [a.id, a]),
-    )
     for (const m of (manifest.contributes?.menus ?? []) as MenuEntry[]) {
-      const section = m.section ?? manifest.title ?? driver
-      const base = {
+      let cmd = menuCommand(m)
+      if (
+        !m.command &&
+        m.action &&
+        !m.action.includes(':') &&
+        cmd?.type === 'action'
+      ) {
+        cmd = { type: 'driver', driver, id: m.action }
+      }
+      if (!cmd) continue // display-only entry (section label)
+      const run = resolveMenuRun(cmd, m, driver)
+      if (!run) continue // unsupported on this host — hidden
+      const keys = m.keys ?? []
+      items.push({
         key: `menu:${driver}:${m.id}`,
         title: m.title,
-        section,
-        keywords: [m.id, ...(m.keywords ?? [])],
+        section: m.section ?? manifest.title ?? driver,
+        keywords: [m.id, ...(m.keywords ?? []), ...keys],
         priority: m.priority ?? 100,
         icon: m.icon,
-        hint: m.action ? `action · ${driver}` : `route · ${driver}`,
-      }
-      if (m.route) {
-        const route = m.route
-        items.push({
-          ...base,
-          run: () => {
-            void resolveRoute(route).then((t) => {
-              router.push(t.type === 'view' ? viewLinkHref(t.link) : t.to)
-            })
-          },
-        })
-      } else if (m.action) {
-        // "<action-id>" local, "<driver>:<action-id>" cross-driver.
-        const colon = m.action.indexOf(':')
-        const actionDriver =
-          colon > 0 && manifests.value.some((r) => r.driver === m.action!.slice(0, colon))
-            ? m.action!.slice(0, colon)
-            : driver
-        const actionId = colon > 0 && actionDriver !== driver ? m.action!.slice(colon + 1) : m.action!
-        const local = actionDriver === driver ? declared.get(actionId) : undefined
-        const action: Action = local ?? {
-          id: actionId,
-          label: m.title,
-          icon: m.icon,
-          danger: 'none',
-          params: [],
-        }
-        const scoped: ScopedAction = {
-          action,
-          scope: 'manifest',
-          driver: actionDriver,
-        }
-        items.push({ ...base, run: () => flow.activate(scoped) })
-      }
-      // Entries with neither action nor route are section labels —
-      // skip them (sections already group the list).
+        hint: [commandId(cmd), ...keys].filter(Boolean).join(' · '),
+        run,
+      })
     }
   }
   return items
@@ -124,7 +202,11 @@ function actionItems(): PaletteItem[] {
   }))
 }
 
-const allItems = computed<PaletteItem[]>(() => [...actionItems(), ...menuItems()])
+const allItems = computed<PaletteItem[]>(() => [
+  ...actionItems(),
+  ...menuItems(),
+  ...builtinItems(),
+])
 
 const filtered = computed<{ section: string; items: PaletteItem[] }[]>(() => {
   const q = query.value

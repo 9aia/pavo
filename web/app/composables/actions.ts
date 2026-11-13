@@ -15,6 +15,7 @@ import type {
   DriverManifest,
   MenuEntry,
   ScopedAction,
+  ViewResult,
 } from '~/utils/interactions'
 import { collectActions, dedupeActions } from '~/utils/interactions'
 
@@ -172,13 +173,21 @@ const paletteState = reactive({
   /** Scoped actions of the view on screen (empty off-view pages). */
   actions: [] as ScopedAction[],
   driver: '' as string,
+  /** The live ViewResult — command resolution (`action:` scope
+   *  lookup) and `{data.*}`/`{view.*}` interpolation context. */
+  viewResult: null as ViewResult | null,
 })
 
 /** Called by view surfaces (the `/view/[...ref]` page) whenever
- *  their collected actions change. */
-export function setPaletteActions(driver: string, actions: ScopedAction[]): void {
+ *  their collected actions or view result change. */
+export function setPaletteActions(
+  driver: string,
+  actions: ScopedAction[],
+  viewResult: ViewResult | null = null,
+): void {
   paletteState.driver = driver
   paletteState.actions = actions
+  paletteState.viewResult = viewResult
 }
 
 export function usePaletteActions() {

@@ -79,6 +79,29 @@ export function useView(
     }),
   )
 
+  // `ViewSpec.item_route` — the per-view tree-row navigation
+  // template, plus the interpolation context (`{driver, view, data}`
+  // — `item` is supplied per row by ItemLink.vue). Consumed by
+  // ViewNode tree rendering; absent template → rows stay inert.
+  provide(
+    'pavoItemRoute',
+    computed(
+      () => (viewResult.value?.view as any)?.item_route ?? null,
+    ),
+  )
+  provide(
+    'pavoNavCtx',
+    computed(() => {
+      const d = data.value as any
+      const r = viewRef.value
+      return {
+        driver: r.split(':')[0] ?? '',
+        view: d?.result?.view?.id as string | undefined,
+        data: d?.result?.data as Record<string, any> | undefined,
+      }
+    }),
+  )
+
   // Register the swap callback in the module registry too — invoke
   // results dispatched outside this component's tree (the command
   // palette) reach it via `applyViewResult(driver, viewId, vr)`.

@@ -49,6 +49,11 @@ export interface Action {
   target?: string
   description?: string
   driver?: string
+  /** Navigate-instead-of-dispatch — a route **template** the host
+   *  interpolates (`{target.*}`/`{params.*}`/`{item.*}`) and
+   *  navigates to locally when the action is activated, *instead of*
+   *  sending `invoke`. `danger`/`params` still gate host-side. */
+  route?: string
   [k: string]: any
 }
 
@@ -59,6 +64,11 @@ export interface ActionResult {
   errors?: Record<string, any>
   data?: any
   view?: ViewResult
+  /** Driver-requested redirect — a route **template** (same `{…}`
+   *  syntax/context as `Action.route`) the host interpolates over
+   *  the invoke context and navigates to *after* applying
+   *  `view`/`data`. */
+  route?: string
   [k: string]: any
 }
 
@@ -68,6 +78,14 @@ export interface MenuEntry {
   icon?: string
   action?: string
   route?: string
+  /** Generic command target — the unified command grammar
+   *  (`action:<id>` | `route:<path>` | `host.<builtin>` |
+   *  `driver:<name>:<id>`; see `utils/commands.ts`). When present it
+   *  **wins** over `action`/`route`. */
+  command?: string
+  /** Suggested keyboard bindings — display-only on the web (no
+   *  keymap); shown in palette hints. */
+  keys?: string[]
   keywords?: string[]
   section?: string
   priority?: number
@@ -92,6 +110,14 @@ export interface ViewSpec {
   description?: string
   queries?: any[]
   root?: ViewNode
+  /** Per-view row-navigation template — when set, activating a tree
+   *  item navigates the host to this interpolated route
+   *  (`{item.id}`, `{item.<prop>}` — see `utils/commands.ts`). */
+  item_route?: string
+  /** Names this view's free-text filter query param — convention
+   *  `"q"`. The host's filter UI re-resolves the view with
+   *  `params[<filter_param>]` set; absent → fallback `"q"`. */
+  filter_param?: string
   [k: string]: any
 }
 
@@ -136,18 +162,22 @@ export interface ScopedAction {
   /** Owning driver name — filled by the caller (the manifest's
    *  `name`, or the ref prefix when collecting ad hoc). */
   driver?: string
+  /** The view's query-binding data map — `{data.*}` in route
+   *  template interpolation (`Action.route`, `ActionResult.route`). */
+  data?: Record<string, any>
 }
 
 function collectTreeItems(
   items: TreeItem[] | undefined,
   view: string | undefined,
+  data: Record<string, any> | undefined,
   out: ScopedAction[],
 ): void {
   for (const item of items ?? []) {
     for (const action of item.actions ?? []) {
-      out.push({ action, scope: 'item', view, itemId: item.id })
+      out.push({ action, scope: 'item', view, itemId: item.id, data })
     }
-    collectTreeItems(item.children, view, out)
+    collectTreeItems(item.children, view, data, out)
   }
 }
 
@@ -193,14 +223,14 @@ export function collectActions(
   const driver = manifest?.name
   const data = viewResult?.data
   for (const action of manifest?.actions ?? []) {
-    out.push({ action, scope: 'manifest', view, driver })
+    out.push({ action, scope: 'manifest', view, driver, data })
   }
   walkNodes(viewResult?.view?.root, (node) => {
     for (const action of node.actions ?? []) {
-      out.push({ action, scope: 'node', view, driver })
+      out.push({ action, scope: 'node', view, driver, data })
     }
     if (node.kind === 'tree' || Array.isArray(node.items)) {
-      collectTreeItems(effectiveTreeItems(node, data), view, out)
+      collectTreeItems(effectiveTreeItems(node, data), view, data, out)
     }
   })
   return out
