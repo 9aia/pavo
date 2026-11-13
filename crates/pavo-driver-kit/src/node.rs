@@ -235,6 +235,7 @@ pub fn tree_item(label: impl Into<String>) -> TreeItem {
         icon: None,
         children: Vec::new(),
         props: Map::new(),
+        actions: Vec::new(),
     }
 }
 

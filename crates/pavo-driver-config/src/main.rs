@@ -135,6 +135,7 @@ fn dispatch(req: &Request, opts: &Options) -> Response {
         Request::View { view, params } => view_result(view, params, opts),
         Request::Query { query, params } => query_op(query, params, opts),
         Request::Submit { view, form, values } => submit_op(view, form.as_deref(), values, opts),
+        Request::Invoke { .. } => Response::err("config driver implements no actions"),
         Request::Render { .. } => {
             Response::err("config driver ships no renderers — built-in rendering applies")
         }

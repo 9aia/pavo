@@ -4,7 +4,11 @@
   "title": "pavo v1 driver manifest",
   "description": "What a tamias-driver-<type> executable answers to the `manifest` verb. Mirrors crates/pavo-protocol/src/manifest.rs. Additive-only within v1.",
   "type": "object",
-  "required": ["name", "title", "version"],
+  "required": [
+    "name",
+    "title",
+    "version"
+  ],
   "properties": {
     "name": {
       "type": "string",
@@ -15,7 +19,10 @@
       "description": "Human-facing title for chrome."
     },
     "icon": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Optional icon — emoji, icon name, or renderer-resolvable path."
     },
     "version": {
@@ -24,13 +31,17 @@
     },
     "verbs": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "default": [],
       "description": "Wire verbs beyond the tamias install verbs — e.g. [\"manifest\", \"serve\"]."
     },
     "capabilities": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "default": [],
       "description": "Capability tags — \"pavo\", \"config\", \"chrome\", …"
     },
@@ -38,17 +49,30 @@
       "$ref": "#/$defs/driverDeps",
       "description": "Driver dependency declarations — names are driver names (the <type> in tamias-driver-<type>). `requires` absent = discovery error; `optional` absent = degrade gracefully. Ordering/topo-sort is a later host phase; v1 carries the declaration only."
     },
-    "contributes": { "$ref": "#/$defs/contributes" },
+    "contributes": {
+      "$ref": "#/$defs/contributes"
+    },
     "views": {
       "type": "array",
-      "items": { "$ref": "#/$defs/viewSpec" },
+      "items": {
+        "$ref": "#/$defs/viewSpec"
+      },
       "default": []
     },
     "renderers": {
       "type": "array",
-      "items": { "$ref": "#/$defs/rendererDecl" },
+      "items": {
+        "$ref": "#/$defs/rendererDecl"
+      },
       "default": [],
       "description": "View-kind renderer declarations — the driver doubles as a renderer plugin. A driver may declare renderers with zero views (renderer-only). See protocol/v1/README.md#renderer-plugins."
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/defs/action"
+      },
+      "description": "Driver-global actions — verbs offered on every view; dispatched via the invoke wire op."
     }
   },
   "$defs": {
@@ -56,49 +80,96 @@
       "type": "object",
       "description": "Contribution slots — navbar, dashboard, statusbar, routes, sidebar, headerActions, notifications, jobs, plus forward-compat extras.",
       "properties": {
-        "navbar": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] },
-        "dashboard": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] },
-        "statusbar": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] },
-        "routes": { "type": "array", "items": { "$ref": "#/$defs/contribution" }, "default": [] },
+        "navbar": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contribution"
+          },
+          "default": []
+        },
+        "dashboard": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contribution"
+          },
+          "default": []
+        },
+        "statusbar": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contribution"
+          },
+          "default": []
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contribution"
+          },
+          "default": []
+        },
         "sidebar": {
           "type": "array",
-          "items": { "$ref": "#/$defs/contribution" },
+          "items": {
+            "$ref": "#/$defs/contribution"
+          },
           "default": [],
           "description": "Grouped nav entries for a left sidebar shell; hosts may cluster later. Same Contribution shape as other slots."
         },
         "headerActions": {
           "type": "array",
-          "items": { "$ref": "#/$defs/contribution" },
+          "items": {
+            "$ref": "#/$defs/contribution"
+          },
           "default": [],
           "description": "Top-bar actions; `route` points at the view the host renders in a popover/panel."
         },
         "notifications": {
           "type": "array",
-          "items": { "$ref": "#/$defs/contribution" },
+          "items": {
+            "$ref": "#/$defs/contribution"
+          },
           "default": [],
           "description": "Marks the driver as a notification provider — display metadata only; item data comes via the `notifications` wire op (NotificationItem)."
         },
         "jobs": {
           "type": "array",
-          "items": { "$ref": "#/$defs/contribution" },
+          "items": {
+            "$ref": "#/$defs/contribution"
+          },
           "default": [],
           "description": "Marks the driver as a job/queue feed provider — display metadata only; item data comes via the `jobs` wire op (JobItem)."
+        },
+        "menus": {
+          "type": "array",
+          "items": {
+            "$ref": "#/defs/menuEntry"
+          },
+          "description": "Command-palette/menu entries — entries invoke an action or route to a view."
         }
       },
       "additionalProperties": {
         "type": "array",
-        "items": { "$ref": "#/$defs/contribution" }
+        "items": {
+          "$ref": "#/$defs/contribution"
+        }
       }
     },
     "contribution": {
       "type": "object",
-      "required": ["id", "title", "route"],
+      "required": [
+        "id",
+        "title",
+        "route"
+      ],
       "properties": {
         "id": {
           "type": "string",
           "description": "Stable id — namespaced <driver>:<id> by convention."
         },
-        "title": { "type": "string" },
+        "title": {
+          "type": "string"
+        },
         "route": {
           "type": "string",
           "description": "Host-relative route the entry navigates to."
@@ -108,31 +179,59 @@
           "default": 100,
           "description": "Ordering hint within the slot; lower sorts first."
         },
-        "icon": { "type": ["string", "null"] }
+        "icon": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "viewSpec": {
       "type": "object",
-      "required": ["id", "title", "route", "root"],
+      "required": [
+        "id",
+        "title",
+        "route",
+        "root"
+      ],
       "properties": {
-        "id": { "type": "string", "description": "View id, unique within the driver." },
-        "title": { "type": "string" },
+        "id": {
+          "type": "string",
+          "description": "View id, unique within the driver."
+        },
+        "title": {
+          "type": "string"
+        },
         "route": {
           "type": "string",
           "description": "Route the view answers — <driver>:<view> deep links resolve here."
         },
-        "description": { "type": ["string", "null"] },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "queries": {
           "type": "array",
-          "items": { "$ref": "#/$defs/queryBinding" },
+          "items": {
+            "$ref": "#/$defs/queryBinding"
+          },
           "default": []
         },
-        "root": { "$ref": "view-node.schema.json" }
+        "root": {
+          "$ref": "view-node.schema.json"
+        }
       }
     },
     "rendererDecl": {
       "type": "object",
-      "required": ["id", "kinds", "surfaces"],
+      "required": [
+        "id",
+        "kinds",
+        "surfaces"
+      ],
       "properties": {
         "id": {
           "type": "string",
@@ -140,10 +239,14 @@
         },
         "kinds": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "ViewNode kinds this renderer claims (e.g. [\"graph\"]), or [\"*\"] for a catch-all. Explicit kinds beat \"*\"; lowest priority wins conflicts; ties break by driver name then renderer id."
         },
-        "surfaces": { "$ref": "#/$defs/rendererSurfaces" },
+        "surfaces": {
+          "$ref": "#/$defs/rendererSurfaces"
+        },
         "priority": {
           "type": "integer",
           "default": 100,
@@ -159,9 +262,16 @@
       "type": "object",
       "description": "Which surfaces this renderer supports. Absent surface = unsupported there.",
       "properties": {
-        "cli": { "$ref": "#/$defs/cliSurface" },
-        "tui": { "type": "boolean", "default": false },
-        "web": { "$ref": "#/$defs/webSurface" }
+        "cli": {
+          "$ref": "#/$defs/cliSurface"
+        },
+        "tui": {
+          "type": "boolean",
+          "default": false
+        },
+        "web": {
+          "$ref": "#/$defs/webSurface"
+        }
       }
     },
     "cliSurface": {
@@ -169,7 +279,9 @@
       "properties": {
         "formats": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "CLI --format values this renderer handles (e.g. [\"svg\",\"ascii\"]). Empty = wildcard: claims every format including text. Built-in formats text/json/dot/mermaid stay available as fallback when unclaimed."
         }
@@ -195,13 +307,17 @@
       "properties": {
         "requires": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Driver names this driver cannot function without — absence is a discovery error."
         },
         "optional": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Driver names this driver uses when present — absence degrades gracefully."
         }
@@ -209,7 +325,10 @@
     },
     "queryBinding": {
       "type": "object",
-      "required": ["name", "op"],
+      "required": [
+        "name",
+        "op"
+      ],
       "properties": {
         "name": {
           "type": "string",
@@ -226,6 +345,176 @@
         "params": {
           "type": "object",
           "description": "Static params merged into every invocation."
+        }
+      }
+    },
+    "paramSchema": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Param name — the key submitted in the invoke params map."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "string",
+            "text",
+            "number",
+            "integer",
+            "bool",
+            "enum",
+            "date",
+            "ref",
+            "string[]"
+          ],
+          "default": "string",
+          "description": "Input kind — selects the host's widget."
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "label": {
+          "type": "string"
+        },
+        "doc": {
+          "type": "string",
+          "description": "Help text rendered under the field."
+        },
+        "hint": {
+          "type": "string"
+        },
+        "placeholder": {
+          "type": "string"
+        },
+        "default": {
+          "description": "Default value (JSON — string/number/bool/array per kind)."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Regex the value must match (string kinds)."
+        },
+        "min": {
+          "type": "number",
+          "description": "Numeric lower bound (number/integer kinds)."
+        },
+        "max": {
+          "type": "number",
+          "description": "Numeric upper bound (number/integer kinds)."
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Allowed values (enum kind; also documents ref choices when the picker is static)."
+        },
+        "ref_query": {
+          "type": "string",
+          "description": "For ref kind — the view query-binding name whose data populates the picker."
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": [
+        "id",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable id — unique within its declaration scope."
+        },
+        "label": {
+          "type": "string",
+          "description": "Human-facing label for buttons/menu entries."
+        },
+        "icon": {
+          "type": "string"
+        },
+        "danger": {
+          "type": "string",
+          "enum": [
+            "none",
+            "confirm",
+            "type-target"
+          ],
+          "default": "none",
+          "description": "Confirmation level — none fires immediately; confirm shows a dialog; type-target requires typing the target id."
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Keyboard shortcuts (single chars or chords like \"dd\", \"ctrl+k\")."
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/defs/paramSchema"
+          },
+          "description": "Typed params — hosts auto-generate a form from these."
+        },
+        "target": {
+          "type": "string",
+          "description": "What context the action needs — a hint; the actual context travels in the invoke target."
+        },
+        "description": {
+          "type": "string"
+        },
+        "driver": {
+          "type": "string",
+          "description": "Cross-driver target — reserved; v1 hosts may ignore it."
+        }
+      }
+    },
+    "menuEntry": {
+      "type": "object",
+      "required": [
+        "id",
+        "title"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable id — namespaced <driver>:<id> by convention."
+        },
+        "title": {
+          "type": "string",
+          "description": "Label shown in the palette/menu."
+        },
+        "icon": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "description": "Action to invoke — <action-id> or <driver>:<action-id>."
+        },
+        "route": {
+          "type": "string",
+          "description": "Route to navigate to instead of invoking."
+        },
+        "keywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra fuzzy-match terms."
+        },
+        "section": {
+          "type": "string",
+          "description": "Optional grouping label."
+        },
+        "priority": {
+          "type": "integer",
+          "default": 100,
+          "description": "Ordering hint; lower sorts first."
         }
       }
     }

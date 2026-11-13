@@ -18,6 +18,8 @@
 //! | `render`  | `kind`, `node`, `data`, `surface`,  | [`RenderModel`]   |
 //! |           | `format?`                           |                   |
 //! | `submit`  | `view`, `form?`, `values`           | [`SubmitResult`]  |
+//! | `invoke`  | `view?`, `action`, `target?`,       | [`ActionResult`]  |
+//! |           | `params?`                          |                   |
 //! | `jobs`    | —                                   | `Vec<JobItem>`    |
 //! | `notifications` | —                          | `Vec<NotificationItem>` |
 //!
@@ -37,6 +39,18 @@
 //! dispatches on the form's `submit_op`; the result may carry a
 //! message, per-field validation `errors`, driver `data`, and an
 //! updated `view` for re-render.
+//!
+//! `invoke` is the general action verb: a renderer activates an
+//! [`crate::action::Action`] (declared on the manifest, a node, a
+//! tree item, or derived from the driver's ops manifest) and posts
+//! here. `view` optionally names the view context the action was
+//! declared in (same namespace as the `view` op); `action` is the
+//! action's `id`; `target` is opaque JSON — typically the selected
+//! row's raw value or an item id the action operates on;
+//! `params` maps each [`crate::action::ParamSchema`] `name` to its
+//! submitted JSON value. The driver resolves the action and
+//! dispatches; the result carries the same shape as
+//! [`SubmitResult`].
 //!
 //! `render` is the view-kind renderer-plugin verb: a driver whose
 //! manifest declares `renderers` answers it with a canonical
@@ -132,6 +146,34 @@ pub enum Request {
         /// fields come back in [`SubmitResult::errors`].
         #[serde(default, skip_serializing_if = "Map::is_empty")]
         values: Map<String, Value>,
+    },
+    /// `{"op":"invoke","view":"item","action":"todo.done",
+    /// "target":{"id":"T-012"},"params":{"note":"shipped"}}` →
+    /// [`ActionResult`] — the action verb. `view` optionally names
+    /// the view the action was declared in (node/tree-item actions
+    /// resolve against it; manifest-global actions may omit it);
+    /// `action` is the [`crate::action::Action::id`]; `target` is
+    /// opaque JSON the driver interprets (selected row, item id,
+    /// …); `params` maps [`crate::action::ParamSchema::name`] →
+    /// submitted value. Drivers that don't implement actions
+    /// answer `ok:false`.
+    Invoke {
+        /// Optional view id from the driver's manifest — the
+        /// resolution context for node/item-scoped actions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<String>,
+        /// The action id to dispatch.
+        action: String,
+        /// Opaque action target — the selected row's raw JSON, an
+        /// item id string, or whatever the action's `target`
+        /// context calls for. Drivers interpret it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<Value>,
+        /// Submitted param values keyed by `ParamSchema::name`.
+        /// Missing `required` params come back in
+        /// [`ActionResult::errors`].
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        params: Map<String, Value>,
     },
     /// `{"op":"jobs"}` → `Vec<JobItem>` — the job/queue feed op.
     /// Drivers that declare `contributes.jobs` answer with their
@@ -295,6 +337,39 @@ pub struct SubmitResult {
     pub extra: Map<String, Value>,
 }
 
+/// Result of the `invoke` op — what an action dispatch produced.
+///
+/// Deliberately the same shape as [`SubmitResult`] (message /
+/// per-param `errors` / `data` / fresh `view` / `extra`) but a
+/// distinct type: action results key `errors` by
+/// [`crate::action::ParamSchema::name`] rather than
+/// `FormField::key`, and the two may diverge later. Every field is
+/// optional — a bare `{"message":"done"}` is a complete result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActionResult {
+    /// Human/machine-facing outcome — renderers show it as a
+    /// status line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Per-param validation errors keyed by
+    /// [`crate::action::ParamSchema::name`] — non-empty means the
+    /// invoke was rejected; hosts re-render the form/palette with
+    /// these messages rather than navigating.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub errors: Map<String, Value>,
+    /// Driver-defined result payload — hosts pass it through
+    /// verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    /// An updated [`ViewResult`] to re-render in place — the
+    /// refresh-after-mutation path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<Box<ViewResult>>,
+    /// Forward-compat catch-all.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
 /// Re-export for convenience — the `manifest` op's result type.
 pub type ManifestResult = DriverManifest;
 
@@ -327,7 +402,7 @@ pub fn parse_request(line: &str) -> Result<Request, WireError> {
             op: "<missing>".to_string(),
         })?;
     match op {
-        "manifest" | "views" | "view" | "query" | "render" | "submit" | "jobs"
+        "manifest" | "views" | "view" | "query" | "render" | "submit" | "invoke" | "jobs"
         | "notifications" => Ok(serde_json::from_value(value)?),
         other => Err(WireError::UnknownOp {
             op: other.to_string(),
@@ -407,6 +482,51 @@ mod tests {
         .unwrap();
         assert_eq!(r.errors["theme"], json!("unknown value"));
         assert!(r.view.is_some());
+    }
+
+    /// `invoke` parses from its wire shape; `view`/`target`/`params`
+    /// are all optional.
+    #[test]
+    fn invoke_request_roundtrip() {
+        let req = parse_request(
+            r#"{"op":"invoke","view":"item","action":"todo.done","target":{"id":"T-012"},"params":{"note":"shipped"}}"#,
+        )
+        .unwrap();
+        match req {
+            Request::Invoke {
+                view,
+                action,
+                target,
+                params,
+            } => {
+                assert_eq!(view.as_deref(), Some("item"));
+                assert_eq!(action, "todo.done");
+                assert_eq!(target.unwrap()["id"], json!("T-012"));
+                assert_eq!(params["note"], json!("shipped"));
+            }
+            other => panic!("expected Invoke, got {other:?}"),
+        }
+        // Minimal: only `action` required.
+        let req = parse_request(r#"{"op":"invoke","action":"refresh"}"#).unwrap();
+        match req {
+            Request::Invoke { view, params, .. } => {
+                assert!(view.is_none());
+                assert!(params.is_empty());
+            }
+            other => panic!("expected Invoke, got {other:?}"),
+        }
+        assert!(parse_request(r#"{"op":"invoke"}"#).is_err()); // missing action
+    }
+
+    /// `ActionResult` parses sparse driver answers like
+    /// `SubmitResult` does.
+    #[test]
+    fn action_result_parses() {
+        let r: ActionResult = serde_json::from_value(json!({"message":"done","future":1})).unwrap();
+        assert_eq!(r.message.as_deref(), Some("done"));
+        assert_eq!(r.extra["future"], json!(1));
+        let r: ActionResult = serde_json::from_value(json!({"errors":{"id":"required"}})).unwrap();
+        assert_eq!(r.errors["id"], json!("required"));
     }
 
     /// `jobs`/`notifications` joined the v1 op set.

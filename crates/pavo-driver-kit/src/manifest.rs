@@ -61,6 +61,7 @@ impl Manifest {
                 contributes: Contributes::default(),
                 views: Vec::new(),
                 renderers: Vec::new(),
+                actions: Vec::new(),
             },
         }
     }

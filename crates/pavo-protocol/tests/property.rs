@@ -62,6 +62,7 @@ fn base() -> BoxedStrategy<NodeBase> {
             query,
             description,
             props,
+            actions: Vec::new(),
         })
         .boxed()
 }
@@ -198,6 +199,7 @@ fn tree_node(depth: usize) -> BoxedStrategy<ViewNode> {
                 icon,
                 children,
                 props,
+                actions: Vec::new(),
             })
             .boxed()
     }
@@ -349,6 +351,7 @@ fn contributes() -> BoxedStrategy<Contributes> {
                     header_actions,
                     notifications,
                     jobs,
+                    menus: Vec::new(),
                     extra: extra.into_iter().collect(),
                 }
             },
@@ -463,6 +466,7 @@ fn manifest() -> BoxedStrategy<DriverManifest> {
                     contributes,
                     views,
                     renderers,
+                    actions: Vec::new(),
                 }
             },
         )

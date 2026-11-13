@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::action::Action;
 use crate::view_node::ViewNode;
 
 /// The driver manifest — the discoverability contract.
@@ -66,6 +67,13 @@ pub struct DriverManifest {
     /// views (pure renderer plugin) or alongside views.
     #[serde(default)]
     pub renderers: Vec<RendererDecl>,
+    /// Driver-global actions — verbs offered on every view (new
+    /// item, refresh, settings, …). View/node/item-scoped actions
+    /// live on [`crate::view_node::NodeBase::actions`] and
+    /// [`crate::view_node::TreeItem::actions`]. All dispatch through
+    /// the wire `invoke` op. See [`crate::action`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<Action>,
 }
 
 /// Driver dependency declarations — the ordering half of the plugin
@@ -237,6 +245,12 @@ pub struct Contributes {
     /// from the `jobs` wire op as [`crate::platform::JobItem`]s.
     #[serde(default)]
     pub jobs: Vec<Contribution>,
+    /// Command-palette/menu entries — the dmenu-style quick-launch
+    /// list hosts synthesize from `actions[]` + these declarations.
+    /// Entries either `invoke` an action or `route` to a view.
+    /// See [`MenuEntry`].
+    #[serde(default)]
+    pub menus: Vec<MenuEntry>,
     /// Forward-compat escape hatch: any slot name not listed above
     /// round-trips untouched. Renderers ignore slots they don't know.
     #[serde(flatten)]
@@ -270,6 +284,55 @@ pub struct Contribution {
 
 fn default_priority() -> i32 {
     100
+}
+
+/// One entry in a [`Contributes::menus`] slot — a command-palette /
+/// quick-launch item.
+///
+/// An entry either invokes an action (`action` set — the driver +
+/// action id resolved like the `invoke` op) or navigates (`route`
+/// set — same resolution as [`Contribution::route`]). At least one
+/// of the two should be present; entries with neither are display
+/// headers/section labels. `keywords` feed host-side fuzzy matching
+/// (dmenu-style): users find entries by typing any keyword, not
+/// just the title.
+///
+/// Wire shape:
+///
+/// ```json
+/// { "id": "new-task", "title": "New task", "icon": "plus",
+///   "action": "todo.add", "keywords": ["create", "todo"],
+///   "section": "myco", "priority": 10 }
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MenuEntry {
+    /// Stable id — namespaced `<driver>:<id>` by convention.
+    pub id: String,
+    /// Label shown in the palette/menu.
+    pub title: String,
+    /// Optional icon hint (same resolution rules as
+    /// [`DriverManifest::icon`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Action to invoke — resolved against the driver's
+    /// `actions[]`/node actions/ops-derived actions like the
+    /// `invoke` wire op. May be `"<action-id>"` or
+    /// `"<driver>:<action-id>"` for cross-driver entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Route to navigate to instead of invoking — same semantics
+    /// as [`Contribution::route`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// Extra fuzzy-match terms — aliases, synonyms, related ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// Optional grouping label hosts may cluster entries under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    /// Ordering hint within the merged menu; lower sorts first.
+    #[serde(default = "default_priority")]
+    pub priority: i32,
 }
 
 /// One view a driver offers — a route plus the declarative tree and

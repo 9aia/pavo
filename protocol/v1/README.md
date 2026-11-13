@@ -37,17 +37,18 @@ Design context: `project/project/proposals/proposal-0003-*` and
    (`requires`/`optional`, below); `contributes` fills the chrome
    slots — the original four (`navbar`, `dashboard`, `statusbar`,
    `routes`) plus the platform slots `sidebar`, `headerActions`,
-   `notifications`, and `jobs` (all additive; old manifests that put
-   these keys in the forward-compat `extra` map still parse).
+   `notifications`, `jobs`, and `menus` (all additive; old
+   manifests that put these keys in the forward-compat `extra`
+   map still parse).
 2. **ViewNode IR** — internally-tagged `"kind"` nodes:
    `panel`, `table`, `tree`, `graph`, `form`, `kv`, `markdown`,
    `embed`, `row`, `column`. Every kind flattens the shared
    `NodeBase` fields (`id`, `title`, `query`, `description`,
-   `props`) to the top level. `embed` is the escape hatch for rich
-   renderers.
+   `props`, `actions`) to the top level. `embed` is the escape
+   hatch for rich renderers.
 3. **Wire ops** — one JSON object per line:
-   requests `{"op":"manifest|views|view|query|render|submit|jobs|
-   notifications", …}`, responses `{"ok":true,"result":…}` /
+   requests `{"op":"manifest|views|view|query|render|submit|invoke|
+   jobs|notifications", …}`, responses `{"ok":true,"result":…}` /
    `{"ok":false,"error":"…"}`.
    Same convention as `tamias-serve`, `myco serve`, `cuora serve`,
    `sepia serve`.
@@ -80,9 +81,89 @@ updated `ViewResult` to swap in). Drivers without form support
 answer `ok:false` — unknown ops were already protocol errors, so
 `submit` joins the v1 op set additively.
 
-No separate `action` op in v1: buttons/links beyond the single
-submit are deferred — a driver needing them can model them as
-additional forms (each with its own `submit_op`) or `embed` nodes.
+## Interaction actions (`invoke`)
+
+`submit` covers forms; **`invoke` is the general action verb** —
+the protocol's answer to "any interaction a CLI/TUI would offer":
+
+```
+{"op":"invoke","view":"item","action":"todo.done",
+ "target":{"id":"T-012"},"params":{"note":"shipped"}}
+→ {"ok":true,"result":{"message":"done","errors":{},
+    "data":{…},"view":{…optional fresh ViewResult…}}}
+```
+
+- `view` — optional view-id context (node/item-scoped actions
+  resolve against it; manifest-global actions may omit it).
+- `action` — the action's `id`.
+- `target` — opaque JSON the driver interprets: the selected row's
+  raw value, an item id, …
+- `params` — `ParamSchema.name` → submitted value.
+
+The result is [`ActionResult`](#): `message`, per-param `errors`
+(non-empty = rejected, re-render don't navigate), `data`, and an
+optional fresh `view` to swap in — the same refresh-after-mutation
+contract `submit` uses.
+
+### `Action` — the declaration
+
+One type, three declaration sites:
+
+- **`DriverManifest.actions[]`** — driver-global verbs.
+- **`NodeBase.actions[]`** — scoped to any ViewNode (inherited by
+  all kinds).
+- **`TreeItem.actions[]`** — per-row actions (trees are the only
+  item type with a stable `id` today).
+
+```json
+{"id":"todo.done","label":"Mark done","icon":"check",
+ "danger":"confirm","keys":["dd","D"],"target":"item",
+ "params":[{"name":"id","kind":"ref","required":true,
+            "ref_query":"items"},
+           {"name":"note","kind":"text"}]}
+```
+
+- `danger`: `none` (fire immediately) | `confirm` (dialog/modal;
+  CLI `--yes`/TTY prompt) | `type-target` (type the target's id —
+  the destructive-op pattern). Ops-derived actions from
+  `mutates:true` ops default to `confirm`.
+- `keys`: keyboard shortcuts — TUI binds them; other hosts may
+  map or ignore.
+- `params`: [`ParamSchema`](#) — typed inputs
+  (`string|text|number|integer|bool|enum|date|ref|string[]`) with
+  `required`/`pattern`/`min`/`max`/`options`/`default`/`hint`.
+  `ref` kind names a `ref_query` binding whose data populates a
+  picker. **Hosts auto-generate forms from these** — hand-authored
+  `form` nodes remain for custom UX.
+- `target`: a context hint (`"item"`, `"row"`, …); the actual
+  context rides the invoke request's `target`.
+- `driver`: reserved cross-driver target (same convention as
+  `QueryBinding.driver`); v1 hosts may treat the action as local.
+
+### Menus — the command palette
+
+`contributes.menus[]` declares palette/quick-launch entries:
+
+```json
+{"id":"new-task","title":"New task","icon":"plus",
+ "action":"todo.add","keywords":["create","todo"],
+ "section":"myco","priority":10}
+```
+
+An entry either `action`s (invoke, resolved like the wire op —
+`"<action-id>"` or `"<driver>:<action-id>"`) or `route`s (navigate,
+same as `Contribution.route`). `keywords` feed host-side fuzzy
+matching (dmenu-style). Hosts also synthesize palette entries from
+declared `actions[]` and ops-derived actions — `menus[]` is for
+curated grouping/ordering/aliases, not a requirement.
+
+### Ops-derived actions (zero-declaration fallback)
+
+Drivers whose ops manifest params carry schemas get actions +
+auto-forms for free: `mutates:true` ops → `danger:confirm`
+actions, param kinds → `ParamSchema`s. The derivation lives in
+pavo-core/driver-kit, not the wire — drivers only enrich their
+ops-manifest `params` with schema metadata.
 
 ## Platform feeds (`jobs` / `notifications`)
 

@@ -9,20 +9,40 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["op"],
-          "properties": { "op": { "const": "manifest" } }
-        },
-        {
-          "type": "object",
-          "required": ["op"],
-          "properties": { "op": { "const": "views" } }
-        },
-        {
-          "type": "object",
-          "required": ["op", "view"],
+          "required": [
+            "op"
+          ],
           "properties": {
-            "op": { "const": "view" },
-            "view": { "type": "string", "description": "View id from the driver's manifest." },
+            "op": {
+              "const": "manifest"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "op"
+          ],
+          "properties": {
+            "op": {
+              "const": "views"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "op",
+            "view"
+          ],
+          "properties": {
+            "op": {
+              "const": "view"
+            },
+            "view": {
+              "type": "string",
+              "description": "View id from the driver's manifest."
+            },
             "params": {
               "type": "object",
               "description": "Caller-supplied params merged into each query binding."
@@ -31,21 +51,36 @@
         },
         {
           "type": "object",
-          "required": ["op", "query"],
+          "required": [
+            "op",
+            "query"
+          ],
           "properties": {
-            "op": { "const": "query" },
+            "op": {
+              "const": "query"
+            },
             "query": {
               "type": "string",
               "description": "Query binding name, or a raw product op for thin drivers."
             },
-            "params": { "type": "object" }
+            "params": {
+              "type": "object"
+            }
           }
         },
         {
           "type": "object",
-          "required": ["op", "kind", "node", "data", "surface"],
+          "required": [
+            "op",
+            "kind",
+            "node",
+            "data",
+            "surface"
+          ],
           "properties": {
-            "op": { "const": "render" },
+            "op": {
+              "const": "render"
+            },
             "kind": {
               "type": "string",
               "description": "The node's kind being rendered (e.g. \"graph\")."
@@ -60,7 +95,11 @@
             },
             "surface": {
               "type": "string",
-              "enum": ["cli", "tui", "web"],
+              "enum": [
+                "cli",
+                "tui",
+                "web"
+              ],
               "description": "Which surface is asking — renderers may answer different models per surface."
             },
             "format": {
@@ -71,9 +110,14 @@
         },
         {
           "type": "object",
-          "required": ["op", "view"],
+          "required": [
+            "op",
+            "view"
+          ],
           "properties": {
-            "op": { "const": "submit" },
+            "op": {
+              "const": "submit"
+            },
             "view": {
               "type": "string",
               "description": "View id the form node belongs to (same namespace as the view op)."
@@ -91,17 +135,53 @@
         },
         {
           "type": "object",
-          "required": ["op"],
+          "required": [
+            "op",
+            "action"
+          ],
           "properties": {
-            "op": { "const": "jobs" },
+            "op": {
+              "const": "invoke"
+            },
+            "view": {
+              "type": "string",
+              "description": "Optional view id — resolution context for node/item-scoped actions."
+            },
+            "action": {
+              "type": "string",
+              "description": "The action id to dispatch."
+            },
+            "target": {
+              "description": "Opaque action target — selected row JSON, item id, etc. Drivers interpret it."
+            },
+            "params": {
+              "type": "object",
+              "description": "Submitted param values keyed by ParamSchema.name.",
+              "default": {}
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "op"
+          ],
+          "properties": {
+            "op": {
+              "const": "jobs"
+            },
             "description": "Job/queue feed — optional capability; drivers without a feed answer ok:false or []."
           }
         },
         {
           "type": "object",
-          "required": ["op"],
+          "required": [
+            "op"
+          ],
           "properties": {
-            "op": { "const": "notifications" },
+            "op": {
+              "const": "notifications"
+            },
             "description": "Notification feed — optional capability; drivers without a feed answer ok:false or []."
           }
         }
@@ -112,54 +192,108 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["type", "headers"],
+          "required": [
+            "type",
+            "headers"
+          ],
           "properties": {
-            "type": { "const": "rows" },
-            "headers": { "type": "array", "items": { "type": "string" } },
+            "type": {
+              "const": "rows"
+            },
+            "headers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "aligns": {
               "type": "array",
-              "items": { "type": "string", "enum": ["left", "center", "right"] },
+              "items": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "center",
+                  "right"
+                ]
+              },
               "default": []
             },
             "rows": {
               "type": "array",
-              "items": { "type": "array", "items": { "type": "string" } },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
               "default": []
             }
           }
         },
         {
           "type": "object",
-          "required": ["type", "markup"],
+          "required": [
+            "type",
+            "markup"
+          ],
           "properties": {
-            "type": { "const": "svg" },
-            "markup": { "type": "string", "description": "Self-contained <svg>…</svg> fragment." }
+            "type": {
+              "const": "svg"
+            },
+            "markup": {
+              "type": "string",
+              "description": "Self-contained <svg>…</svg> fragment."
+            }
           }
         },
         {
           "type": "object",
-          "required": ["type", "lines"],
+          "required": [
+            "type",
+            "lines"
+          ],
           "properties": {
-            "type": { "const": "text" },
-            "lines": { "type": "array", "items": { "type": "string" } }
+            "type": {
+              "const": "text"
+            },
+            "lines": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         },
         {
           "type": "object",
-          "required": ["type", "component"],
+          "required": [
+            "type",
+            "component"
+          ],
           "properties": {
-            "type": { "const": "placeholder" },
-            "component": { "type": "string" },
-            "props": { "type": "object", "default": {} }
+            "type": {
+              "const": "placeholder"
+            },
+            "component": {
+              "type": "string"
+            },
+            "props": {
+              "type": "object",
+              "default": {}
+            }
           }
         }
       ]
     },
     "response": {
       "type": "object",
-      "required": ["ok"],
+      "required": [
+        "ok"
+      ],
       "properties": {
-        "ok": { "type": "boolean" },
+        "ok": {
+          "type": "boolean"
+        },
         "result": {
           "description": "Result payload when ok is true (absent otherwise)."
         },
@@ -171,24 +305,45 @@
     },
     "viewSummary": {
       "type": "object",
-      "required": ["id", "title", "route"],
+      "required": [
+        "id",
+        "title",
+        "route"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "title": { "type": "string" },
-        "route": { "type": "string" },
-        "description": { "type": ["string", "null"] },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "queries": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": []
         }
       }
     },
     "viewResult": {
       "type": "object",
-      "required": ["view"],
+      "required": [
+        "view"
+      ],
       "properties": {
-        "view": { "$ref": "driver-manifest.schema.json#/$defs/viewSpec" },
+        "view": {
+          "$ref": "driver-manifest.schema.json#/$defs/viewSpec"
+        },
         "data": {
           "type": "object",
           "description": "Query results keyed by binding name; failures appear as {\"error\": \"…\"} payloads."
@@ -197,51 +352,133 @@
     },
     "queryResult": {
       "type": "object",
-      "required": ["query", "data"],
+      "required": [
+        "query",
+        "data"
+      ],
       "properties": {
-        "query": { "type": "string" },
-        "data": { "description": "Driver/product-defined payload, passed through verbatim." }
+        "query": {
+          "type": "string"
+        },
+        "data": {
+          "description": "Driver/product-defined payload, passed through verbatim."
+        }
       }
     },
     "submitResult": {
       "type": "object",
       "description": "Result of a `submit` op — every field optional; a bare {\"message\":\"…\"} is complete. Non-empty `errors` means the driver rejected the submit (validation); `view`, when present, is a fresh ViewResult to re-render. Unknown fields are preserved by forward-compatible consumers.",
       "properties": {
-        "message": { "type": ["string", "null"], "description": "Human/machine-facing outcome." },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Human/machine-facing outcome."
+        },
         "errors": {
           "type": "object",
           "description": "Per-field validation errors keyed by FormField.key.",
           "default": {}
         },
-        "data": { "description": "Driver-defined result payload, passed through verbatim." },
-        "view": { "$ref": "#/$defs/viewResult", "description": "Optional updated view to swap in for the submitted one." }
+        "data": {
+          "description": "Driver-defined result payload, passed through verbatim."
+        },
+        "view": {
+          "$ref": "#/$defs/viewResult",
+          "description": "Optional updated view to swap in for the submitted one."
+        }
       }
     },
     "jobItem": {
       "type": "object",
       "description": "Result item of the `jobs` op — one job/queue entry. `status` is a driver-owned free-form string; `updated_at` is an RFC 3339 timestamp string. Unknown fields are preserved by forward-compatible consumers.",
-      "required": ["id", "title", "status"],
+      "required": [
+        "id",
+        "title",
+        "status"
+      ],
       "properties": {
-        "id": { "type": "string", "description": "Stable id within the driver — host dedup key." },
-        "title": { "type": "string", "description": "Display label." },
-        "status": { "type": "string", "description": "Free-form status owned by the driver (\"queued\", \"running\", \"done\", \"failed\", …)." },
-        "detail": { "type": "string", "description": "Optional longer description — progress note, failure reason." },
-        "route": { "type": "string", "description": "Optional route/url for \"open\" navigation." },
-        "updated_at": { "type": "string", "description": "Optional last-updated timestamp — RFC 3339 string." }
+        "id": {
+          "type": "string",
+          "description": "Stable id within the driver — host dedup key."
+        },
+        "title": {
+          "type": "string",
+          "description": "Display label."
+        },
+        "status": {
+          "type": "string",
+          "description": "Free-form status owned by the driver (\"queued\", \"running\", \"done\", \"failed\", …)."
+        },
+        "detail": {
+          "type": "string",
+          "description": "Optional longer description — progress note, failure reason."
+        },
+        "route": {
+          "type": "string",
+          "description": "Optional route/url for \"open\" navigation."
+        },
+        "updated_at": {
+          "type": "string",
+          "description": "Optional last-updated timestamp — RFC 3339 string."
+        }
       }
     },
     "notificationItem": {
       "type": "object",
       "description": "Result item of the `notifications` op — one notification. `severity` is a driver-owned free-form string; `created_at` is an RFC 3339 timestamp string; `read` defaults false (unread badge). Unknown fields are preserved by forward-compatible consumers.",
-      "required": ["id", "title"],
+      "required": [
+        "id",
+        "title"
+      ],
       "properties": {
-        "id": { "type": "string", "description": "Stable id within the driver — host dedup key." },
-        "title": { "type": "string", "description": "One-line summary." },
-        "body": { "type": "string", "description": "Optional longer detail." },
-        "severity": { "type": "string", "description": "Optional free-form severity (\"info\", \"warning\", \"error\", …)." },
-        "route": { "type": "string", "description": "Optional route/url for \"open\" navigation." },
-        "created_at": { "type": "string", "description": "Optional creation timestamp — RFC 3339 string." },
-        "read": { "type": "boolean", "default": false, "description": "Whether the notification has been read." }
+        "id": {
+          "type": "string",
+          "description": "Stable id within the driver — host dedup key."
+        },
+        "title": {
+          "type": "string",
+          "description": "One-line summary."
+        },
+        "body": {
+          "type": "string",
+          "description": "Optional longer detail."
+        },
+        "severity": {
+          "type": "string",
+          "description": "Optional free-form severity (\"info\", \"warning\", \"error\", …)."
+        },
+        "route": {
+          "type": "string",
+          "description": "Optional route/url for \"open\" navigation."
+        },
+        "created_at": {
+          "type": "string",
+          "description": "Optional creation timestamp — RFC 3339 string."
+        },
+        "read": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the notification has been read."
+        }
+      }
+    },
+    "actionResult": {
+      "type": "object",
+      "description": "Result of the invoke op — same shape as submitResult but errors key by ParamSchema.name.",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "errors": {
+          "type": "object",
+          "description": "Per-param validation errors keyed by ParamSchema.name."
+        },
+        "data": {},
+        "view": {
+          "$ref": "#/defs/viewResult"
+        }
       }
     }
   }

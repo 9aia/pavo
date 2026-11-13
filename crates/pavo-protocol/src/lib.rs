@@ -19,15 +19,17 @@
 //! fields, new enum variants, and new ops may appear; existing
 //! fields and variant spellings never change meaning.
 
+pub mod action;
 pub mod manifest;
 pub mod platform;
 pub mod render_model;
 pub mod view_node;
 pub mod wire;
 
+pub use action::{Action, DangerLevel, ParamKind, ParamSchema};
 pub use manifest::{
-    CliSurface, Contributes, Contribution, DriverDeps, DriverManifest, QueryBinding, RendererDecl,
-    RendererSurfaces, ViewSpec, WebSurface,
+    CliSurface, Contributes, Contribution, DriverDeps, DriverManifest, MenuEntry, QueryBinding,
+    RendererDecl, RendererSurfaces, ViewSpec, WebSurface,
 };
 pub use platform::{JobItem, NotificationItem};
 pub use render_model::RenderModel;
@@ -36,4 +38,4 @@ pub use view_node::{
     GraphNodeItem, KvNode, KvPair, MarkdownNode, NodeBase, PanelNode, RowNode, TableColumn,
     TableNode, TreeItem, TreeNode, ViewNode,
 };
-pub use wire::{Request, Response, SubmitResult, WireError};
+pub use wire::{ActionResult, Request, Response, SubmitResult, WireError};

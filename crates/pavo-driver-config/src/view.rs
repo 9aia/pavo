@@ -161,6 +161,7 @@ pub fn manifest() -> DriverManifest {
         },
         views: vec![show_view(), sources_view(), edit_view()],
         renderers: Vec::new(),
+        actions: Vec::new(),
     }
 }
 

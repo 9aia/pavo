@@ -203,6 +203,7 @@ fn contributes() -> BoxedStrategy<Contributes> {
                     header_actions,
                     notifications,
                     jobs,
+                    menus: Vec::new(),
                     extra: extra.into_iter().collect(),
                 }
             },
@@ -223,6 +224,7 @@ fn manifest() -> BoxedStrategy<DriverManifest> {
             contributes,
             views: vec![],
             renderers: vec![],
+            actions: vec![],
         })
         .boxed()
 }
@@ -581,6 +583,7 @@ fn renderer_manifest() -> BoxedStrategy<DriverManifest> {
                 priority,
                 entry: None,
             }],
+            actions: vec![],
         })
         .boxed()
 }

@@ -431,6 +431,7 @@ impl FixtureDriverBuilder {
             contributes: Default::default(),
             views: self.views.clone(),
             renderers: self.renderers.clone(),
+            actions: Vec::new(),
         });
 
         let mut config = Map::new();
