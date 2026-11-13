@@ -267,6 +267,7 @@ pub fn view(id: &str, title: &str, route: &str, root: ViewNode) -> View {
             root,
             item_route: None,
             filter_param: None,
+            refresh_ms: None,
         },
     }
 }
@@ -302,6 +303,16 @@ impl View {
     #[must_use]
     pub fn filter_param(mut self, param: impl Into<String>) -> Self {
         self.spec.filter_param = Some(param.into());
+        self
+    }
+
+    /// Auto-refresh hint in milliseconds — the host re-resolves
+    /// this view's data on the timer (see `ViewSpec::refresh_ms`
+    /// for the host-side bounds convention: values under 1s or over
+    /// 5min are ignored).
+    #[must_use]
+    pub fn refresh_ms(mut self, ms: u64) -> Self {
+        self.spec.refresh_ms = Some(ms);
         self
     }
 

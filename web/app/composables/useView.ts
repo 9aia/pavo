@@ -139,5 +139,39 @@ export function useView(
     if (aliasKey) unregisterViewApplier(aliasKey, applyView)
   })
 
+  // Auto-refresh — `ViewSpec.refresh_ms` (snake_case on the wire)
+  // declares the view's data goes stale on a timer; poll the same
+  // endpoint on that interval. Same 1s–5min bounds the TUI
+  // enforces; the timer re-arms whenever the resolved spec (or the
+  // ref, via `viewResult`) changes, and stops on unmount.
+  const MIN_REFRESH_MS = 1000
+  const MAX_REFRESH_MS = 300_000
+  let pollTimer: ReturnType<typeof setInterval> | null = null
+  const stopPolling = () => {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+  }
+  watch(
+    () => (viewResult.value?.view as any)?.refresh_ms as
+      | number
+      | undefined,
+    (ms) => {
+      stopPolling()
+      if (
+        typeof ms === 'number' &&
+        ms >= MIN_REFRESH_MS &&
+        ms <= MAX_REFRESH_MS
+      ) {
+        pollTimer = setInterval(() => {
+          void refresh()
+        }, ms)
+      }
+    },
+    { immediate: true },
+  )
+  onBeforeUnmount(stopPolling)
+
   return { data, pending, error, refresh, apiError, viewResult }
 }

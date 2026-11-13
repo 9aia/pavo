@@ -144,6 +144,9 @@ VIEWS = [
         "id": "jobs",
         "title": "Jobs",
         "route": "/platform/jobs",
+        # Live-ish feed — hosts auto-refresh on this timer (the
+        # ViewSpec.refresh_ms hint; ignored by one-shot CLI renders).
+        "refresh_ms": 5000,
         "description": "The driver's job feed as a table — same data the "
                        "`jobs` wire op returns for the host's /jobs page.",
         "queries": [q("jobs")],

@@ -93,6 +93,13 @@ struct Tab {
 /// driver `keys[]` from shadowing pane navigation/quit/dump.
 const NAV_CHARS: &[char] = &['q', '?', 'r', 'd', 'g', 'x', 'j', 'k', 'h', 'l', ':'];
 
+/// `ViewSpec.refresh_ms` bounds — a sub-second timer busy-loops the
+/// driver's `serve`, a multi-minute one is indistinguishable from
+/// manual refresh. Out-of-range hints are ignored entirely (the
+/// convention is documented on the protocol field).
+const MIN_REFRESH: Duration = Duration::from_secs(1);
+const MAX_REFRESH: Duration = Duration::from_secs(300);
+
 /// Rects from the last draw — mouse hit-testing.
 #[derive(Clone, Copy, Debug, Default)]
 struct LayoutRects {
@@ -202,6 +209,11 @@ pub struct App {
     /// The last invoke's dispatch context — `ActionResult.route`
     /// templates interpolate over it.
     last_dispatch: Option<DispatchCtx>,
+    /// Auto-refresh schedule for the current view —
+    /// `(interval, next_deadline)` derived from
+    /// `ViewSpec.refresh_ms` (bounds-checked). `None` on the
+    /// dashboard/notes and for views without a valid hint.
+    auto_refresh: Option<(Duration, Instant)>,
 }
 
 /// The invoke context remembered for `ActionResult.route`
@@ -277,6 +289,7 @@ impl App {
             builtin_menus: builtin_menu_entries(),
             filter: None,
             last_dispatch: None,
+            auto_refresh: None,
         };
         app.rebuild_keybinds();
         app
@@ -288,6 +301,7 @@ impl App {
         while let Ok(ev) = self.worker.rx.try_recv() {
             self.on_event(ev);
         }
+        self.maybe_auto_refresh();
         // Poll ~100ms so worker events land even without input.
         if !crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
             // A stale chord prefix replays as normal keypresses.
@@ -348,6 +362,7 @@ impl App {
                 match result {
                     Ok(rv) => {
                         self.last_target = rv.namespaced.clone();
+                        self.auto_refresh = Self::refresh_schedule(&rv);
                         self.current = Some(Canvas::View(rv));
                         self.load_error = None;
                         self.sel_pos = 0;
@@ -447,6 +462,7 @@ impl App {
                 namespaced: rv.namespaced.clone(),
                 result: view,
             };
+            self.auto_refresh = Self::refresh_schedule(&fresh);
             self.current = Some(Canvas::View(Box::new(fresh)));
             self.plugin_renders.clear();
             self.sel_pos = 0;
@@ -1189,6 +1205,7 @@ impl App {
         self.type_target = None;
         self.filter = None;
         self.pending_key = None;
+        self.auto_refresh = None; // re-armed when the new view lands
         self.view_params = params.clone();
         self.apply_actions(Vec::new(), Vec::new());
         if target == "dashboard" {
@@ -1232,6 +1249,55 @@ impl App {
             _ => {
                 self.status = "nothing to refresh".to_string();
             }
+        }
+    }
+
+    /// The auto-refresh schedule for a freshly resolved view —
+    /// `(interval, first_deadline)` from `ViewSpec.refresh_ms`, or
+    /// `None` when the hint is absent or outside
+    /// [`MIN_REFRESH`]/[`MAX_REFRESH`].
+    fn refresh_schedule(rv: &ResolvedView) -> Option<(Duration, Instant)> {
+        let d = Duration::from_millis(rv.result.view.refresh_ms?);
+        (d >= MIN_REFRESH && d <= MAX_REFRESH).then(|| (d, Instant::now() + d))
+    }
+
+    /// True while an overlay owns the keyboard/screen — palette,
+    /// the danger modals, the filter input, the form editor, or
+    /// help. Auto-refresh must not swap the canvas underneath a
+    /// dialog the user is answering.
+    fn overlay_open(&self) -> bool {
+        self.palette.is_some()
+            || self.confirm.is_some()
+            || self.type_target.is_some()
+            || self.filter.is_some()
+            || self.form_session.is_some()
+            || self.help
+    }
+
+    /// Fire the scheduled auto-refresh when its deadline passes.
+    /// The deadline always slides a full interval forward — a
+    /// skipped tick (overlay open, resolve in flight) waits rather
+    /// than bursting on dismiss. The re-resolve goes out quietly
+    /// (no status/loading churn every interval); it is the same
+    /// `Cmd::Resolve { refresh: true }` the manual `r` path sends,
+    /// so the host's view cache is invalidated identically.
+    fn maybe_auto_refresh(&mut self) {
+        let Some((interval, deadline)) = self.auto_refresh else {
+            return;
+        };
+        if Instant::now() < deadline {
+            return;
+        }
+        self.auto_refresh = Some((interval, Instant::now() + interval));
+        if self.overlay_open() || self.loading.is_some() {
+            return;
+        }
+        if matches!(self.current, Some(Canvas::View(_))) && !self.last_target.is_empty() {
+            let _ = self.worker.tx.send(Cmd::Resolve {
+                target: self.last_target.clone(),
+                refresh: true,
+                params: self.view_params.clone(),
+            });
         }
     }
 
@@ -2149,10 +2215,21 @@ impl App {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(0), Constraint::Length(rw)])
             .split(area);
-        let left = Paragraph::new(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(self.status.clone(), Style::default().fg(Color::DarkGray)),
-        ]));
+        let mut spans = vec![Span::styled(" ", Style::default())];
+        // Auto-refresh countdown — a dim `⟳ Ns` ahead of the status
+        // text so live views are visibly on a timer.
+        if let Some((_, deadline)) = self.auto_refresh {
+            let secs = deadline.saturating_duration_since(Instant::now()).as_secs();
+            spans.push(Span::styled(
+                format!("⟳ {secs}s "),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        spans.push(Span::styled(
+            self.status.clone(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        let left = Paragraph::new(Line::from(spans));
         left.render(cols[0], f.buffer_mut());
         let r = Paragraph::new(Line::from(Span::styled(
             format!(" {right} "),
@@ -2855,6 +2932,7 @@ mod tests {
             root: serde_json::from_value(kv_root()).unwrap(),
             item_route: None,
             filter_param: None,
+            refresh_ms: None,
         }
     }
 
@@ -3884,5 +3962,80 @@ mod tests {
             rx_cmd.try_recv(),
             Ok(Cmd::Invoke { action, .. }) if action == "refresh"
         ));
+    }
+
+    /// `ViewSpec.refresh_ms` arms the auto-refresh schedule; the
+    /// deadline firing sends a quiet `Cmd::Resolve { refresh: true }`
+    /// and slides forward, overlays pause the tick, and out-of-range
+    /// hints never arm it.
+    #[test]
+    fn auto_refresh_schedule() {
+        let (mut app, rx_cmd, _ev) = make_app();
+        app.on_event(boot_ev());
+        while rx_cmd.try_recv().is_ok() {}
+
+        // No hint → no schedule.
+        app.on_event(view_with_actions(Vec::new()));
+        while rx_cmd.try_recv().is_ok() {}
+        assert!(app.auto_refresh.is_none());
+
+        // In-range hint arms it.
+        let mut rv = resolved("board");
+        rv.result.view.refresh_ms = Some(2000);
+        app.on_event(Ev::View {
+            target: "demo:board".to_string(),
+            result: Ok(Box::new(rv)),
+            renders: HashMap::new(),
+            actions: Vec::new(),
+            menus: Vec::new(),
+        });
+        while rx_cmd.try_recv().is_ok() {}
+        let (interval, _) = app.auto_refresh.expect("schedule armed");
+        assert_eq!(interval, Duration::from_secs(2));
+
+        // Deadline in the future → nothing sent.
+        app.maybe_auto_refresh();
+        assert!(rx_cmd.try_recv().is_err());
+
+        // Past deadline → quiet refresh resolve, deadline slides.
+        app.auto_refresh = app
+            .auto_refresh
+            .map(|(d, _)| (d, Instant::now() - Duration::from_secs(1)));
+        app.maybe_auto_refresh();
+        assert!(matches!(
+            rx_cmd.try_recv(),
+            Ok(Cmd::Resolve { refresh: true, .. })
+        ));
+        assert!(app
+            .auto_refresh
+            .is_some_and(|(_, deadline)| deadline > Instant::now()));
+
+        // Overlay open → the tick slides but nothing is sent.
+        app.help = true;
+        app.auto_refresh = app
+            .auto_refresh
+            .map(|(d, _)| (d, Instant::now() - Duration::from_secs(1)));
+        app.maybe_auto_refresh();
+        assert!(rx_cmd.try_recv().is_err());
+        app.help = false;
+
+        // Out-of-range hints are ignored entirely.
+        for bad in [Some(500), Some(600_000)] {
+            let mut rv = resolved("board");
+            rv.result.view.refresh_ms = bad;
+            app.on_event(Ev::View {
+                target: "demo:board".to_string(),
+                result: Ok(Box::new(rv)),
+                renders: HashMap::new(),
+                actions: Vec::new(),
+                menus: Vec::new(),
+            });
+            while rx_cmd.try_recv().is_ok() {}
+            assert!(app.auto_refresh.is_none(), "hint {bad:?} armed");
+        }
+
+        // Navigating away disarms; the next view re-arms on land.
+        app.resolve("dashboard");
+        assert!(app.auto_refresh.is_none());
     }
 }

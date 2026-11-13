@@ -388,6 +388,19 @@ pub struct ViewSpec {
     /// bindings accept it, else the builtin is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_param: Option<String>,
+    /// Auto-refresh hint — milliseconds between host-initiated
+    /// re-resolves of this view's data. `None` (the default) means
+    /// the view refreshes only on explicit user/driver action.
+    ///
+    /// Hosts SHOULD ignore values below 1s or above 5min: a
+    /// sub-second timer busy-loops the driver's `serve`, and a
+    /// longer one is indistinguishable from manual refresh. The TUI
+    /// enforces this range; other surfaces may clamp. Applies to
+    /// the view only — chrome/dashboard slot contributions are not
+    /// views and do not auto-refresh. Additive within v1: old hosts
+    /// ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_ms: Option<u64>,
 }
 
 /// A named query binding inside a [`ViewSpec`]: `name` is what
@@ -423,7 +436,7 @@ mod tests {
     use serde_json::json;
 
     /// `MenuEntry.command`/`keys` and `ViewSpec.item_route`/
-    /// `filter_param` — additive optional fields: absent defaults,
+    /// `filter_param`/`refresh_ms` — additive optional fields: absent defaults,
     /// present round-trips, unknown siblings ignored.
     #[test]
     fn menu_entry_and_view_spec_new_fields() {
@@ -452,14 +465,17 @@ mod tests {
             "id":"board","title":"Board","route":"/myco/board",
             "item_route":"/myco/item?id={item.id}",
             "filter_param":"q",
+            "refresh_ms":5000,
             "root":{"kind":"kv","pairs":[]}
         }))
         .unwrap();
         assert_eq!(spec.item_route.as_deref(), Some("/myco/item?id={item.id}"));
         assert_eq!(spec.filter_param.as_deref(), Some("q"));
+        assert_eq!(spec.refresh_ms, Some(5000));
         let v = serde_json::to_value(&spec).unwrap();
         assert_eq!(v["item_route"], "/myco/item?id={item.id}");
         assert_eq!(v["filter_param"], "q");
+        assert_eq!(v["refresh_ms"], 5000);
 
         let bare: ViewSpec = serde_json::from_value(json!({
             "id":"v","title":"V","route":"/v","root":{"kind":"kv"}
@@ -467,6 +483,7 @@ mod tests {
         .unwrap();
         assert!(bare.item_route.is_none());
         assert!(bare.filter_param.is_none());
+        assert!(bare.refresh_ms.is_none());
         assert!(serde_json::to_value(&bare)
             .unwrap()
             .get("item_route")
