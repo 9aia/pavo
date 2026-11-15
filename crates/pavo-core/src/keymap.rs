@@ -117,7 +117,7 @@ impl KeySpec {
     }
 
     /// For `+`-chords, the `(modifiers, key)` split — modifiers in
-    /// canonical [`MODIFIER_ORDER`], key the normalized final token.
+    /// canonical `MODIFIER_ORDER`, key the normalized final token.
     /// `None` for bare named keys and sequences.
     #[must_use]
     pub fn chord(&self) -> Option<(Vec<&'static str>, String)> {

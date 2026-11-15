@@ -20,7 +20,7 @@
 //! - [`Resolved::Navigate`] — interpolate-free route string; the
 //!   host navigates locally (no wire round-trip). Produced by
 //!   `route:` commands, [`Action::route`], and
-//!   [`crate::pavo_protocol::ViewSpec::item_route`] templates.
+//!   [`pavo_protocol::ViewSpec::item_route`] templates.
 //! - [`Resolved::Builtin`] — a [`HostBuiltin`] the host implements
 //!   itself (see [`BUILTINS`] for the catalog + suggested keys).
 //! - [`Resolved::Unsupported`] — the command parsed but can't

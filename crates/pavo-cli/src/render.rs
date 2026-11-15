@@ -1,6 +1,6 @@
 //! ViewNode → text / Graphviz-dot / Mermaid renderers.
 //!
-//! The CLI's `view` verb renders a resolved [`pavo_protocol::ViewResult`]
+//! The CLI's `view` verb renders a resolved [`pavo_protocol::wire::ViewResult`]
 //! on a terminal: `--format text` walks the node tree and prints a
 //! human-readable summary, `--format dot`/`--format mermaid` emit the
 //! view's `graph` nodes in those graph description languages.
@@ -428,7 +428,7 @@ fn mermaid_body(graphs: &[(Vec<Value>, Vec<Value>)]) -> String {
 
 // ---------- text rendering ----------
 
-/// [`node_text`] with a tree `path` (plugin-render lookup key) and
+/// [`node_text_path`] with a tree `path` (plugin-render lookup key) and
 /// the plugin `renders` map — a claimed node emits its
 /// [`RenderModel`] instead of the built-in dispatch.
 fn node_text_path(

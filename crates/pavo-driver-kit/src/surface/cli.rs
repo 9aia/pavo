@@ -13,7 +13,7 @@
 //! Every op subcommand also accepts `--params-stdin` — read the op's
 //! params as one JSON object on stdin and merge them **over** the
 //! argv params (stdin wins per key). This is the channel for
-//! secret-bearing params ([`ParamSpec::secret`]): values never touch
+//! secret-bearing params ([`ParamSpec::secret`](crate::surface::ParamSpec::secret)): values never touch
 //! argv, shell history, or `/proc`. Required (`arg`) params may come
 //! from either side; a missing one is a usage error either way.
 
@@ -118,7 +118,7 @@ pub fn command(bin: &str, manifest: &OpsManifest) -> Command {
     cmd
 }
 
-/// Parse `argv` (argv[0] included) against [`command`], dispatch the
+/// Parse `argv` (argv\[0\] included) against [`command`], dispatch the
 /// matched op/surface through `surface`, print captured output, and
 /// return the exit code. clap errors/help print and exit `2`/`0`
 /// through clap's own rendering. `--params-stdin` reads real stdin.

@@ -114,7 +114,7 @@ pub fn load_transcript(path: &Path) -> Result<Transcript, RecordError> {
     Ok(serde_json::from_str(&text)?)
 }
 
-/// Turn a recorded [`Transcript`] into a replay [`FixtureDriver`] —
+/// Turn a recorded [`Transcript`] into a replay [`FixtureDriver`](crate::FixtureDriver) —
 /// `tamias-driver-<name>` that answers `serve` requests from the
 /// recording. Requests are matched on canonical JSON (object key
 /// order ignored); anything unrecorded gets `ok:false`.

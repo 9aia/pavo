@@ -129,7 +129,7 @@ impl Manifest {
 
     /// A driver-global action (the `actions[]` slot) — verbs offered
     /// on every view, dispatched via the `invoke` wire op. See
-    /// [`crate::action`].
+    /// [`mod@crate::action`].
     #[must_use]
     pub fn action(mut self, action: pavo_protocol::Action) -> Self {
         self.manifest.actions.push(action);

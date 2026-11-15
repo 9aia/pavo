@@ -16,7 +16,7 @@
 //! Behaviour is driven by a sibling `<name>.fixture.json` config the
 //! builder writes next to the executable — manifest, view specs,
 //! canned query payloads, a raw `views` override, per-op error
-//! injection, a failure-mode block, or a recorded [`Transcript`][crate::record::Transcript]
+//! injection, a failure-mode block, or a recorded [`Transcript`]
 //! for deterministic replay.
 
 use std::io;
@@ -478,7 +478,7 @@ impl FixtureDriverBuilder {
     }
 
     /// Canned `invoke` result for `action_id` — `result` is answered
-    /// verbatim as the `ok:true` payload (an [`ActionResult`]-shaped
+    /// verbatim as the `ok:true` payload (an [`ActionResult`](pavo_protocol::ActionResult)-shaped
     /// object: `message`/`errors`/`data`/`view`/`route`/`extra`).
     /// Overrides the default dispatch for that action; undeclared
     /// actions configured here still answer (fixture flexibility).

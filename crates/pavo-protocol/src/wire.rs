@@ -15,7 +15,7 @@
 //! | `views`   | —                                   | `Vec<ViewSummary>`|
 //! | `view`    | `view`, `params?`                   | [`ViewResult`]    |
 //! | `query`   | `query`, `params?`                  | [`QueryResult`]   |
-//! | `render`  | `kind`, `node`, `data`, `surface`,  | [`RenderModel`]   |
+//! | `render`  | `kind`, `node`, `data`, `surface`,  | [`RenderModel`](crate::RenderModel)|
 //! |           | `format?`                           |                   |
 //! | `submit`  | `view`, `form?`, `values`           | [`SubmitResult`]  |
 //! | `invoke`  | `view?`, `action`, `target?`,       | [`ActionResult`]  |
@@ -101,7 +101,7 @@ pub enum Request {
         params: Map<String, Value>,
     },
     /// `{"op":"render","kind":"graph","node":{…},"data":{…},
-    /// "surface":"cli","format":"svg"}` → [`RenderModel`] — the
+    /// "surface":"cli","format":"svg"}` → [`RenderModel`](crate::RenderModel) — the
     /// renderer-plugin verb. `node` is the raw ViewNode JSON (the
     /// host passes it untyped so unknown/future fields survive);
     /// `data` is the view's query-binding map verbatim; `surface` is

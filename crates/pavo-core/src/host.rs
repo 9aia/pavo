@@ -262,7 +262,7 @@ impl Host {
 
     /// The driver's manifest — from discovery when eager, otherwise
     /// fetched once over the `serve` wire's `manifest` op and cached
-    /// in [`Host::manifest_cache`].
+    /// in `Host::manifest_cache`.
     ///
     /// # Errors
     /// [`PavoError::UnknownDriver`] for undiscovered kinds; client
@@ -306,7 +306,7 @@ impl Host {
     /// The live `serve` client for `kind`, spawning on first use.
     ///
     /// The returned [`Arc<Mutex<DriverClient>>`] is the per-driver
-    /// serialization point — [`Host::with_client`] locks it for you.
+    /// serialization point — `Host::with_client` locks it for you.
     /// The spawn happens under the clients-map lock so two threads
     /// can't double-spawn; the lock is released before any request.
     ///

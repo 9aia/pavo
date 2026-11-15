@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Nodes bind to data through [`NodeBase::query`], which names a
-//! [`crate::manifest::QueryBinding`] in the enclosing [`ViewSpec`];
+//! [`crate::manifest::QueryBinding`] in the enclosing [`ViewSpec`](crate::ViewSpec);
 //! the host resolves bindings to view-model data before rendering.
 //! Renderers that don't know a `kind` must degrade to a generic
 //! key/value rendering rather than failing — forward compatibility

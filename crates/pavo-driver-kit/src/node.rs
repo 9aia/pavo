@@ -95,7 +95,7 @@ impl Base {
     }
 
     /// Add an action scoped to this node — dispatched via the
-    /// `invoke` wire op. See [`crate::action`].
+    /// `invoke` wire op. See [`mod@crate::action`].
     #[must_use]
     pub fn action(mut self, action: pavo_protocol::Action) -> Self {
         self.base.actions.push(action);
@@ -162,7 +162,7 @@ pub fn column(base: impl Into<NodeBase>, children: Vec<ViewNode>) -> ViewNode {
     })
 }
 
-/// [`column`] with an explicit `gap` spacing hint.
+/// [`column()`] with an explicit `gap` spacing hint.
 #[must_use]
 pub fn column_gap(base: impl Into<NodeBase>, gap: u32, children: Vec<ViewNode>) -> ViewNode {
     ViewNode::Column(ColumnNode {

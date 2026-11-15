@@ -314,7 +314,7 @@ fn collect_view_actions(
     collect_for_view_result(host, &rv.namespaced, &rv.result, ops_cache)
 }
 
-/// [`collect_view_actions`] for an arbitrary [`ViewResult`] — used
+/// [`collect_view_actions`] for an arbitrary [`ViewResult`](pavo_protocol::wire::ViewResult) — used
 /// both for resolves (`namespaced` = `driver:view`) and for fresh
 /// views returned inside an [`ActionResult`]. `target` supplies the
 /// driver kind (`"drv:view"` or bare `"drv"`).

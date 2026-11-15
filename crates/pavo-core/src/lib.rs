@@ -6,7 +6,7 @@
 //! speak pavo (a `manifest` verb answering [`pavo_protocol::DriverManifest`],
 //! or `capabilities` advertising it), merge their `contributes` slots
 //! into one chrome description, and resolve `<driver>:<view>` deep
-//! links into [`pavo_protocol::ViewResult`]s by speaking the ndjson
+//! links into [`pavo_protocol::wire::ViewResult`]s by speaking the ndjson
 //! wire (`{"op":"…"}` → `{"ok":…}`) over each driver's `serve` verb.
 //!
 //! Everything here is sync and std-only — no async runtime, no

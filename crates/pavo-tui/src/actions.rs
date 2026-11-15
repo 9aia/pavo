@@ -6,7 +6,7 @@
 //! the UI needs 'static data across frames). [`PaletteEntry`],
 //! [`PaletteSession`], [`ConfirmSession`] and [`TypeTargetSession`]
 //! are the overlay sessions; [`action_form_spec`] compiles an
-//! action's `params` into the existing [`FormSpec`]/[`FormSession`]
+//! action's `params` into the existing [`FormSpec`]/[`FormSession`](crate::form::FormSession)
 //! machinery so auto-forms reuse the form editor verbatim.
 //!
 //! Dispatch flow ([`InvokeStep`]): params → auto-form; on submit the
@@ -553,7 +553,7 @@ pub enum TypeTargetCmd {
     Submit,
 }
 
-/// The `danger: type-target` modal — "Type <id> to confirm". Proceeds
+/// The `danger: type-target` modal — "Type &lt;id&gt; to confirm". Proceeds
 /// only on an exact match of the expected id; when the target JSON
 /// carries no derivable id, any non-empty input confirms (the value
 /// is still shown back in the prompt).

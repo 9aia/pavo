@@ -333,7 +333,7 @@ impl Builder {
     }
 
     /// [`Builder::sel_row`] plus an item-context payload (tree items
-    /// carry their [`item_value`] JSON for route interpolation).
+    /// carry their [`item_value`](pavo_core::item_value) JSON for route interpolation).
     fn sel_row_with_item(
         &mut self,
         text: &str,

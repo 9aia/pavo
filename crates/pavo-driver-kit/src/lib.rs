@@ -12,16 +12,16 @@
 //!
 //! The kit is deliberately small — four modules, no framework:
 //!
-//! - [`serve`] — the ndjson request/response loop every driver
+//! - [`mod@serve`] — the ndjson request/response loop every driver
 //!   re-implements (`{"op":"…"}` in, `{"ok":…}` out, one per line).
-//! - [`manifest`] — fluent builders for [`DriverManifest`],
-//!   [`ViewSpec`], [`QueryBinding`], and [`Contribution`] — including
+//! - [`manifest`] — fluent builders for [`DriverManifest`](pavo_protocol::DriverManifest),
+//!   [`ViewSpec`](pavo_protocol::ViewSpec), [`QueryBinding`](pavo_protocol::QueryBinding), and [`Contribution`](pavo_protocol::Contribution) — including
 //!   the `deps` and cross-driver (`QueryBinding.driver`) declarations.
-//! - [`node`] — [`ViewNode`] constructors plus a [`node::Base`] builder
+//! - [`node`] — [`ViewNode`](pavo_protocol::ViewNode) constructors plus a [`node::Base`] builder
 //!   for the shared `id`/`title`/`query`/`description`/`props` fields.
-//! - [`platform`] — [`JobItem`] / [`NotificationItem`] constructors
+//! - [`platform`] — [`JobItem`](pavo_protocol::JobItem) / [`NotificationItem`](pavo_protocol::NotificationItem) constructors
 //!   for the `jobs`/`notifications` feed ops.
-//! - [`action`] — [`Action`] / [`ParamSchema`] / [`MenuEntry`]
+//! - [`mod@action`] — [`Action`](pavo_protocol::Action) / [`ParamSchema`](pavo_protocol::ParamSchema) / [`MenuEntry`](pavo_protocol::MenuEntry)
 //!   constructors for the `invoke` interaction layer.
 //! - [`surface`] — the surface-driver layer: an engine's **ops
 //!   manifest** (`ops` verb / `cli.*` wire queries) rendered onto real

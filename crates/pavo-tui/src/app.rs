@@ -11,7 +11,7 @@
 //! └───────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! All Host work happens on the [`worker`] thread; this module only
+//! All Host work happens on the [`worker`](crate::worker) thread; this module only
 //! draws [`model`] output and forwards [`Cmd`]s. Panes: `Rail`
 //! (drivers) → `Canvas` (current view/dashboard/note) → `Detail`
 //! (selected row's fields). `Tab`/`←`/`→` cycle focus.
@@ -450,7 +450,7 @@ impl App {
         }
     }
 
-    /// Swap a fresh [`ViewResult`] into the canvas — shared by the
+    /// Swap a fresh [`ViewResult`](pavo_protocol::wire::ViewResult) into the canvas — shared by the
     /// `submit` and `invoke` result paths. Plugin renders keyed to
     /// the old tree are stale; built-in rendering covers the new
     /// one until the next resolve.
@@ -686,7 +686,7 @@ impl App {
         }
     }
 
-    /// Interpolate an [`ActionResult.route`] template over the invoke
+    /// Interpolate an `ActionResult.route` template over the invoke
     /// context remembered by [`App::send_invoke`] (`last_dispatch`),
     /// with the result's fresh view supplying `{view}`/`{data}` when
     /// present. Empty when there's no dispatch context to interpolate
@@ -2530,7 +2530,7 @@ impl App {
             .render(rect, f.buffer_mut());
     }
 
-    /// The `danger: type-target` modal — "Type <id> to confirm"
+    /// The `danger: type-target` modal — "Type &lt;id&gt; to confirm"
     /// with the input buffer and a mismatch error line.
     fn draw_type_target(&self, f: &mut Frame, area: Rect, s: &TypeTargetSession) {
         let mut lines: Vec<Line> = Vec::new();

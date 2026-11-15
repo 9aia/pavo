@@ -13,7 +13,7 @@
 //! - `view <driver>:<view> [--param k=v …] [--format …]` — resolve a
 //!   deep link and render it: `text` (default) summarizes the
 //!   ViewNode tree + bound data, `json` dumps the raw
-//!   [`ViewResult`], `dot`/`mermaid` emit the view's graph nodes.
+//!   [`ViewResult`](pavo_protocol::wire::ViewResult), `dot`/`mermaid` emit the view's graph nodes.
 //!   `/path?query` routes (what `Action.route`/`item_route`
 //!   templates produce, e.g. `/myco/item?id=T-1`) resolve back to a
 //!   `<driver>:<view>` ref + params via declared view routes —
