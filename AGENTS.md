@@ -62,7 +62,9 @@ as the fallback for every unclaimed kind/surface.
 crates/    pavo-protocol · pavo-core · pavo-cli · pavo-tui · pavo-testkit
            pavo-driver-config (first-party tamias-driver-config)
            pavo-driver-kit (driver-authoring SDK)
-web/       Nuxt SSR host + serve bridge (stdio↔ws) — scaffold stage
+web/       Nuxt 4 app — dashboard + ViewNode renderer + serve bridge
+           (server/api proxy → `pavo serve`); `npm run dev` or
+           `npm run build` static export
 protocol/  driver capability spec · ViewNode IR · wire ops (versioned)
 xtask      check / test / coverage / install (myco anatomy)
 ```

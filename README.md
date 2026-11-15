@@ -1,169 +1,51 @@
-# Pavo
+# pavo
 
-Visualization **host** for the 9aia org's tool suite — the factory's
-screen. Named for *Pavo* — the peafowl genus; the display animal.
+*Visualization host for the 9aia org's tool suite — the factory's
+screen.*
 
-Products ship **tamias drivers**: executables named
-`tamias-driver-<type>` found on `PATH` or in
-`<tamias-home>/drivers/` (`$TAMIAS_HOME` or
-`~/.local/share/tamias/drivers`). A driver may answer the extra verbs
-`manifest` and `serve` beside the install verbs, emitting declarative
-**ViewNode IR** JSON trees and view models over the org's ndjson
-JSON-RPC convention. Pavo's renderers — CLI, TUI, web — interpret
-those trees natively, and **renderer plugins** let drivers claim view
-kinds outright: a manifest `renderers[]` declaration plus the `render`
-wire op returning a canonical `RenderModel` (rows / svg / text /
-placeholder). Built-in rendering remains the fallback for every
-unclaimed kind and surface — see `protocol/v1/README.md`.
+Named for *Pavo* — the peafowl genus; the display animal. Products
+ship **tamias drivers** (`tamias-driver-<type>` on `PATH` or in
+`<tamias-home>/drivers/`) that emit declarative **ViewNode IR**
+JSON trees; pavo's renderers — CLI, TUI, web — interpret those
+trees natively. **Renderer plugins** let a driver claim view kinds
+outright via a manifest `renderers[]` declaration + the `render`
+wire op; built-in rendering stays the fallback for every unclaimed
+kind. Install a driver → get visualization everywhere — there is
+no `<product> ui` per product; pavo is the single entry point.
 
-Install a driver → get visualization everywhere. There is no
-`<product> ui` per product; pavo is the single entry point.
+## Quickstart
 
-## Surfaces
+```sh
+cargo xtask install    # pavo + tamias-driver-config → ~/.cargo/bin
 
-- **CLI** (`pavo`) — `pavo drivers`, `pavo views`, `pavo chrome`,
-  `pavo view <driver>:<view> --format json|dot|mermaid|<plugin>`,
-  `pavo query`, deep links; doubles as the protocol conformance
-  harness. `--json` everywhere. `pavo serve` is the localhost HTTP
-  bridge for the web host; `pavo open [<driver>:<view>]` hands off to
-  the TUI (falls back to `view` text output off-TTY).
-- **TUI** (`pavo-tui`) — ratatui host: driver rail, ViewNode canvas,
-  detail pane, contribution-driven chrome. Launch directly or via
-  `pavo open`.
-- **Web** (`web/`, Nuxt 4 SSR shell + islands) — `pavo serve` is the
-  localhost bridge: `/api/*` JSON over the same `Host` plus static
-  serving of the Nuxt build. Dashboard, deep links
-  (`/view/myco:item/id=T-001` — path `k=v` segments, bare `?k=v`
-  query keys, or legacy `?param.k=v`; see `web/README.md`), all
-  ViewNode kinds; `graph` renders in a
-  client-only SVG island.
+export PATH="$PWD/examples/drivers/demo:$PWD/examples/drivers/viz-graph:$PATH"
+pavo drivers                          # discovered drivers
+pavo views                            # every <driver>:<view> ref
+pavo view demo:deps --format mermaid  # built-in render
+pavo view demo:deps --format svg      # renderer-plugin output
+pavo serve --port 7420                # localhost bridge + web host
+cd web && npm run dev                 # Nuxt dev server → :3000
+```
 
-Real product drivers ship from their own repos — `tamias-driver-kuda`
-(kuda), `tamias-driver-myco` (myco), `tamias-driver-cuora` (cuora) —
-discovered like any installed driver once on `PATH` or in
-`$TAMIAS_HOME/drivers`. (peregrin's `tamias-driver-peregrin` is a
-tamias *content* driver for bundle install/deploy — it does not yet
-serve pavo views.)
+`./scripts/smoke-examples.sh` runs the example drivers end-to-end.
+Real product drivers (`tamias-driver-myco`, `-kuda`, `-cuora`, …)
+ship from their own repos and are discovered the same way.
 
 ## Layout
 
-```
-crates/    pavo-protocol · pavo-core · pavo-cli · pavo-tui · pavo-testkit
-           pavo-driver-config (first-party tamias-driver-config)
-           pavo-driver-cli / pavo-driver-mcp (surface drivers —
-             ops manifest → generated clap CLI / MCP tools)
-           pavo-driver-kit (driver-authoring SDK)
-web/       Nuxt 4 app — dashboard + ViewNode renderer; `npm run dev`
-           (proxied to the bridge) or `npm run build` → static export
-protocol/  driver capability spec · contribution slots · ViewNode IR ·
-           wire ops (versioned, additive-only within v1)
-xtask      check / test / coverage / install (myco anatomy)
-```
+Rust + TypeScript monorepo — `crates/` (Rust workspace), `web/`
+(Nuxt 4), `protocol/` (versioned wire contracts, additive-only
+within v1). `pavo-protocol` is the public wire contract;
+`pavo-driver-kit` is the driver-authoring SDK; `pavo-testkit` is
+the conformance harness. Full crate table, commands, and boundary:
+[AGENTS.md](AGENTS.md).
 
-`pavo-protocol` is the canonical wire contract: driver manifests,
-ViewNode IR, and the ndjson request/response types every renderer
-speaks. JSON Schemas mirroring it live in `protocol/v1/`.
+## Docs
 
-## Examples
-
-`examples/drivers/` ships five reference `tamias-driver-*`
-executables (Python 3, stdlib only — they run anywhere python3 does),
-plus one **first-party Rust driver** and the **driver-authoring kit**
-in the workspace:
-
-| Driver | Location | Shows |
-| --- | --- | --- |
-| `tamias-driver-actions` | `examples/drivers/actions/` | interaction-actions demo — `invoke` wire op, declarative actions at all three `danger` levels, menus contributions |
-| `tamias-driver-config` | `crates/pavo-driver-config` | the common config API — `config:show`/`config:sources` views, `get`/`set`/`resolve` queries over layered TOML/JSON config; statusbar contribution |
-| `tamias-driver-demo` | `examples/drivers/demo/` | board (table+kv+markdown), deps `graph`, timeline `tree`; navbar+dashboard+statusbar |
-| `tamias-driver-myco` | `examples/drivers/myco/` | thin proxy: translates pavo ops onto `myco serve`'s JSON-RPC wire; degrades when myco is absent |
-| `tamias-driver-viz-graph` | `examples/drivers/viz-graph/` | renderer plugin — claims `graph` on cli/tui/web via `render` (svg/ascii/rows); zero views |
-| `tamias-driver-platform` | `examples/drivers/platform-demo/` | platform features — `sidebar`/`headerActions`/`notifications`/`jobs` slots + feeds, `deps`, a cross-driver `QueryBinding.driver` |
-
-Put them on `PATH` (or symlink into `$TAMIAS_HOME/drivers/`) and pavo
-discovers them like any installed driver. The config driver installs
-with the workspace — `cargo xtask install` (or
-`cargo install --path crates/pavo-driver-config`) puts
-`tamias-driver-config` on `PATH`:
-
-```bash
-cargo xtask install   # pavo + tamias-driver-config → ~/.cargo/bin
-export PATH="$PWD/examples/drivers/actions:$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PWD/examples/drivers/platform-demo:$PATH"
-pavo drivers
-pavo view demo:deps --format mermaid   # built-in (plugin doesn't claim mermaid)
-pavo view demo:deps --format svg       # viz-graph plugin SVG
-pavo view demo:deps --format ascii     # viz-graph plugin edge list
-```
-
-```
-$ pavo drivers
-config  Config  v0.1.0  views:2  renderers:0  contributes: statusbar:1
-demo  Demo  v0.1.0  views:3  renderers:0  contributes: navbar:2 dashboard:1 statusbar:1
-myco  Myco  v0.1.0  views:3  renderers:0  contributes: navbar:1
-viz-graph  Graph viz  v0.1.0  views:0  renderers:1
-
-$ pavo view demo:deps --format mermaid
-graph TD
-  n0["pavo-protocol"]
-  n1["pavo-core"]
-  n2["pavo-cli"]
-  n3["pavo-tui"]
-  n4["pavo-testkit"]
-  n5["tamias"]
-  n6["myco"]
-  n0-->|ref types|n5
-  n1-->|uses|n0
-  n1-->|drivers|n5
-  n2-->|uses|n1
-  n2-->|uses|n0
-  n3-->|uses|n1
-  n4-->|conformance|n0
-  n4-->|fixtures|n5
-```
-
-`./scripts/smoke-examples.sh` runs the whole set end-to-end
-(`pavo drivers`/`views`/`view`/`jobs`/`notifications` over the
-drivers).
-
-Rust drivers don't hand-roll the wire: **`pavo-driver-kit`**
-(`crates/pavo-driver-kit`) is the authoring SDK — the ndjson `serve`
-loop every sibling driver duplicates, fluent `DriverManifest`/`ViewSpec`/
-`QueryBinding`/`Contribution` builders, `ViewNode` constructors, and
-`JobItem`/`NotificationItem` helpers. Its module docs are the
-driver-authoring reference; `protocol/v1/README.md` → *Writing a
-driver* points at it. Forms are interactive where the surface
-supports it — the `submit` wire op carries `form` values back to the
-driver (`tamias-driver-config`'s `config:edit` and the demo driver's
-`demo:new` are the references).
-
-`pavo-testkit` (`crates/pavo-testkit`) is the conformance harness:
-`FixtureDriver` builds fake `tamias-driver-*` executables,
-`check_driver` runs the wire contract suite, and record/replay
-transcripts give renderers deterministic sessions. The example
-drivers are themselves held to the suite in its tests.
-
-## Web
-
-```bash
-pavo serve --port 7420          # bridge + static host, prints the URL
-cd web && npm run dev           # dev server → http://localhost:3000
-# …or ship the static build the bridge serves:
-cd web && npm run build         # → .output/public (auto-detected)
-```
-
-`pavo serve` binds `127.0.0.1` (`--port 0` picks a free port and
-prints it), exposes `GET /api/{health,drivers,views,chrome,view,raw,
-query,renderers,render}` as `{"ok":…}` envelopes (`/api/renderers`
-lists renderer-plugin claims; `/api/render` proxies a `render` op —
-the web surface's plugin path), and serves `web/.output/public` (or
-`web/dist`, or `$PAVO_WEB_DIR`) — falling back to a built-in
-landing page when no build exists. See `web/README.md` for the full
-workflow and env vars.
-
-## Status
-
-`pavo-protocol`, `pavo-core`, `pavo-cli` (incl. `serve`),
-`pavo-testkit`, `pavo-tui`, `pavo-driver-config`, `pavo-driver-kit`,
-`web/`, and the
-example drivers are implemented and tested (`cargo xtask check` / `cargo xtask test`,
-`cd web && npm run build`).
+- [Docs site](https://9aia.com/pavo) — tutorials, how-tos,
+  reference, explanation (VitePress + Diátaxis, `docs/` worktree)
+- [web/README.md](web/README.md) — the Nuxt host workflow
+- [protocol/v1/README.md](protocol/v1/README.md) — wire spec +
+  driver-authoring guide
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md)
+- [LICENSE](LICENSE) · [project ledger](project/index.md)

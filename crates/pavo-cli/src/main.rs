@@ -68,7 +68,7 @@ mod http;
 mod render;
 mod serve;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use pavo_core::{
     collect_actions, interpolate, interpolate_ctx_value, manifest_actions, ops_actions,
     validate_params, ActionScope, Host, Params, PavoError, ResolvedView,
@@ -250,6 +250,9 @@ enum Command {
     Manifest,
     /// Print the CLI verb schema (JSON).
     Schema,
+    /// Print the CLI reference as markdown — the docs pipeline
+    /// (`docs:cli`) renders `docs/reference/cli.md` from this.
+    GenCliDocs,
 }
 
 /// The built-in `view --format` values — all but `json` can be
@@ -378,7 +381,7 @@ fn run(cli: Cli) -> Result<u8, Fail> {
                         "drivers", "views", "chrome", "view", "query",
                         "submit", "actions", "invoke", "jobs",
                         "notifications", "serve", "open", "manifest",
-                        "schema"
+                        "schema", "gen-cli-docs"
                     ],
                 })
             );
@@ -390,6 +393,10 @@ fn run(cli: Cli) -> Result<u8, Fail> {
                 serde_json::to_string_pretty(&schema_doc())
                     .map_err(|e| Fail::err(format!("schema serialization: {e}")))?
             );
+            Ok(0)
+        }
+        Some(Command::GenCliDocs) => {
+            print!("{}", clap_markdown::help_markdown_command(&Cli::command()));
             Ok(0)
         }
     }
@@ -465,7 +472,8 @@ fn schema_doc() -> Value {
                 "args": ["<driver>:<view> (optional — omit for the dashboard)"]
             },
             "manifest": {"summary": "print the pavo capability manifest (JSON)"},
-            "schema": {"summary": "print this verb schema (JSON)"}
+            "schema": {"summary": "print this verb schema (JSON)"},
+            "gen-cli-docs": {"summary": "print the CLI reference as markdown (docs pipeline)"}
         },
         "wire_ops": [
             "manifest", "views", "view", "query", "render", "submit",
