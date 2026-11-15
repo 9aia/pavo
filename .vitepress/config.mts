@@ -30,7 +30,6 @@ export default defineConfig({
         text: "Tutorials",
         items: [
           { text: "Your first view", link: "/tutorials/first-view" },
-          { text: "Deep links", link: "/tutorials/deep-links" },
         ],
       },
       {
@@ -41,6 +40,7 @@ export default defineConfig({
           { text: "Write a renderer plugin", link: "/how-to/write-a-renderer-plugin" },
           { text: "Serve the web surface", link: "/how-to/serve-web" },
           { text: "Use the config API", link: "/how-to/use-config-api" },
+          { text: "Share a deep link", link: "/how-to/deep-links" },
         ],
       },
       {
@@ -58,6 +58,8 @@ export default defineConfig({
         text: "Explanation",
         items: [
           { text: "Architecture", link: "/explanation/architecture" },
+          { text: "Concepts", link: "/explanation/concepts" },
+          { text: "Decisions", link: "/explanation/decisions" },
           { text: "Why declarative views", link: "/explanation/why-declarative" },
           { text: "Renderer plugins", link: "/explanation/renderer-plugins" },
           { text: "Boundaries", link: "/explanation/boundaries" },

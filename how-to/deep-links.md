@@ -1,4 +1,10 @@
-# Deep links
+# Share a deep link to a view
+
+**Goal:** produce a stable URL (or CLI ref) that opens a specific
+view — with params — for a human or an agent.
+
+**Prerequisites:** pavo installed and at least one driver on `PATH`
+(see [Install a driver](install-a-driver.md)).
 
 Every view has a stable `<driver>:<view>` ref. On the CLI it is an
 argument; on the web it is a URL — the same link agents and humans
@@ -45,6 +51,8 @@ no-build `/view/` stub in `pavo serve` speaks the same rules):
 
 ## Serving the links
 
+## Serve the links
+
 `pavo serve` prints `listening http://127.0.0.1:<port>`; open the
 printed URL for the dashboard, or append a deep link directly:
 
@@ -56,6 +64,17 @@ http://127.0.0.1:7420/view/demo:board/status=open
 With `cd web && npm run build` the bridge serves the Nuxt app;
 without a build it serves a built-in landing page that still
 understands `/view/` links.
+
+## Verify
+
+Open the printed `/view/...` URL in a browser — the view renders
+with the params applied. On the CLI, `pavo view demo:board
+--param status=open` shows the same binding resolved.
+
+## Deeper
+
+- [Architecture — deep links are the UI](/explanation/architecture)
+- [Serve the web host](/how-to/serve-web)
 
 ## CLI equivalents
 
