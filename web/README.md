@@ -150,7 +150,7 @@ server should bypass its proxy.
 6 moderate) inside the Nuxt/Nitro build chain (`deepmerge`,
 `glob`/`minimatch`, `archiver` via `readdir-glob`, `@vercel/nft`).
 Every fix path requires `npm audit fix --force`, which downgrades
-`nuxt` to 4.1.3 — a breaking change — so they are intentionally left
+`nuxt` to 4.1 — a breaking change — so they are intentionally left
 unfixed. Exposure is limited to the local dev/build toolchain; the
 shipped artifact is static files served by `pavo serve`.
 Re-check on Nuxt upgrades.
