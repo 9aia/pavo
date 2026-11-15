@@ -1,5 +1,5 @@
 ---
-url: /pavo/getting-started.md
+url: /pavo/tutorials/getting-started.md
 ---
 # Getting Started
 
