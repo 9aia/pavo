@@ -81,6 +81,7 @@ tamias-driver-* (serve, stdio)          pavo host
 | `pavo-driver-mcp` | adapter | tamias-driver-mcp — surface driver: exposes an engine driver's ops manifest as MCP tools over stdio |
 | `pavo-testkit` | adapter | Recorded driver sessions → conformance fixtures for all pavo surfaces |
 | `pavo-tui` | adapter | ratatui host — chrome slots + ViewNode renderer for pavo |
+| `pavo-xtask` | adapter | Repo chores: check / test / coverage / install |
 | `pavo` | binary | pavo — visualization host: discover tamias drivers, render their views (CLI/TUI/web) |
 
 ## The wire

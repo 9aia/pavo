@@ -14,4 +14,5 @@ documented at source (doc comments).
 * [pavo-driver-mcp](/pavo/api/pavo_driver_mcp/index.html) — adapter
 * [pavo-testkit](/pavo/api/pavo_testkit/index.html) — adapter
 * [pavo-tui](/pavo/api/pavo_tui/index.html) — adapter
+* [pavo-xtask](/pavo/api/pavo_xtask/index.html) — adapter
 * [pavo](/pavo/api/pavo/index.html) — binary

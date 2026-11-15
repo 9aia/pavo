@@ -1666,6 +1666,7 @@ documented at source (doc comments).
 * [pavo-driver-mcp](/pavo/api/pavo_driver_mcp/index.html) — adapter
 * [pavo-testkit](/pavo/api/pavo_testkit/index.html) — adapter
 * [pavo-tui](/pavo/api/pavo_tui/index.html) — adapter
+* [pavo-xtask](/pavo/api/pavo_xtask/index.html) — adapter
 * [pavo](/pavo/api/pavo/index.html) — binary
 
 ---
@@ -1753,6 +1754,7 @@ tamias-driver-* (serve, stdio)          pavo host
 | `pavo-driver-mcp` | adapter | tamias-driver-mcp — surface driver: exposes an engine driver's ops manifest as MCP tools over stdio |
 | `pavo-testkit` | adapter | Recorded driver sessions → conformance fixtures for all pavo surfaces |
 | `pavo-tui` | adapter | ratatui host — chrome slots + ViewNode renderer for pavo |
+| `pavo-xtask` | adapter | Repo chores: check / test / coverage / install |
 | `pavo` | binary | pavo — visualization host: discover tamias drivers, render their views (CLI/TUI/web) |
 
 ## The wire
