@@ -50,6 +50,8 @@ serve pavo views.)
 ```
 crates/    pavo-protocol · pavo-core · pavo-cli · pavo-tui · pavo-testkit
            pavo-driver-config (first-party tamias-driver-config)
+           pavo-driver-cli / pavo-driver-mcp (surface drivers —
+             ops manifest → generated clap CLI / MCP tools)
            pavo-driver-kit (driver-authoring SDK)
 web/       Nuxt 4 app — dashboard + ViewNode renderer; `npm run dev`
            (proxied to the bridge) or `npm run build` → static export
@@ -64,13 +66,14 @@ speaks. JSON Schemas mirroring it live in `protocol/v1/`.
 
 ## Examples
 
-`examples/drivers/` ships four reference `tamias-driver-*`
+`examples/drivers/` ships five reference `tamias-driver-*`
 executables (Python 3, stdlib only — they run anywhere python3 does),
 plus one **first-party Rust driver** and the **driver-authoring kit**
 in the workspace:
 
 | Driver | Location | Shows |
 | --- | --- | --- |
+| `tamias-driver-actions` | `examples/drivers/actions/` | interaction-actions demo — `invoke` wire op, declarative actions at all three `danger` levels, menus contributions |
 | `tamias-driver-config` | `crates/pavo-driver-config` | the common config API — `config:show`/`config:sources` views, `get`/`set`/`resolve` queries over layered TOML/JSON config; statusbar contribution |
 | `tamias-driver-demo` | `examples/drivers/demo/` | board (table+kv+markdown), deps `graph`, timeline `tree`; navbar+dashboard+statusbar |
 | `tamias-driver-myco` | `examples/drivers/myco/` | thin proxy: translates pavo ops onto `myco serve`'s JSON-RPC wire; degrades when myco is absent |
@@ -85,7 +88,7 @@ with the workspace — `cargo xtask install` (or
 
 ```bash
 cargo xtask install   # pavo + tamias-driver-config → ~/.cargo/bin
-export PATH="$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PWD/examples/drivers/platform-demo:$PATH"
+export PATH="$PWD/examples/drivers/actions:$PWD/examples/drivers/demo:$PWD/examples/drivers/myco:$PWD/examples/drivers/viz-graph:$PWD/examples/drivers/platform-demo:$PATH"
 pavo drivers
 pavo view demo:deps --format mermaid   # built-in (plugin doesn't claim mermaid)
 pavo view demo:deps --format svg       # viz-graph plugin SVG
