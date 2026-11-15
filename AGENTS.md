@@ -151,5 +151,5 @@ check`.
 `docs:gen` + `vitepress build`; `docs/scripts/deploy-docs.sh`
 publishes `.vitepress/dist` to `gh-pages`. Module doc comments
 (`//!`) in `pavo-protocol` are the reference seed — keep them
-accurate; `gen-crate-map.py` renders the crate map from workspace
+accurate; `cypera gen crate-map` renders the crate map from workspace
 Cargo.tomls (never hand-edit the generated sections).
