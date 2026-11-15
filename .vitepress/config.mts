@@ -13,7 +13,7 @@ export default defineConfig({
   ignoreDeadLinks: [/\/api\//],
   themeConfig: {
     nav: [
-      { text: "Getting Started", link: "/getting-started" },
+      { text: "Getting Started", link: "/tutorials/getting-started" },
       { text: "Explanation", link: "/explanation/architecture" },
       { text: "Reference", link: "/reference/cli" },
       {
@@ -25,7 +25,7 @@ export default defineConfig({
       },
     ],
     sidebar: [
-      { text: "Getting Started", items: [{ text: "Install pavo", link: "/getting-started" }] },
+      { text: "Getting Started", items: [{ text: "Install pavo", link: "/tutorials/getting-started" }] },
       {
         text: "Tutorials",
         items: [
