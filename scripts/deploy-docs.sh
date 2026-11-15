@@ -13,8 +13,10 @@ export PAVO_ROOT="$REPO"
 echo "==> bun install"
 bun install
 
-echo "==> gen crate map (PAVO_ROOT=$REPO)"
-python3 gen-crate-map.py
+CYPERA="cargo run -q --manifest-path $REPO/../cypera/Cargo.toml -p cypera --"
+echo "==> reference pages (cypera gen, repo=$REPO)"
+$CYPERA gen cli --repo "$REPO"
+$CYPERA gen crate-map --repo "$REPO"
 
 echo "==> rustdoc → public/api (cargo doc in $REPO)"
 python3 gen-api.py
