@@ -5,6 +5,8 @@ url: /pavo/reference/cli.md
 
 This document contains the help content for the `pavo` command-line program.
 
+Visualization host for the 9aia tool suite
+
 **Command Overview:**
 
 * [`pavo`↴](#pavo)
@@ -30,7 +32,7 @@ Visualization host for the 9aia tool suite
 
 **Usage:** `pavo [COMMAND]`
 
-###### **Subcommands:**
+###### **Commands:**
 
 * `drivers` — List discovered pavo-capable drivers
 * `views` — List every view as `<driver>:<view>` refs
@@ -48,6 +50,11 @@ Visualization host for the 9aia tool suite
 * `schema` — Print the CLI verb schema (JSON)
 * `gen-cli-docs` — Print the CLI reference as markdown — the docs pipeline (`docs:cli`) renders `docs/reference/cli.md` from this
 
+###### **Options:**
+
+* `-h, --help` — Print help
+* `-V, --version` — Print version
+
 ## `pavo drivers`
 
 List discovered pavo-capable drivers
@@ -57,6 +64,7 @@ List discovered pavo-capable drivers
 ###### **Options:**
 
 * `--json` — JSON output
+* `-h, --help` — Print help
 
 ## `pavo views`
 
@@ -68,6 +76,7 @@ List every view as `<driver>:<view>` refs
 
 * `--driver <DRIVER>` — Only views of this driver
 * `--json` — JSON output
+* `-h, --help` — Print help
 
 ## `pavo chrome`
 
@@ -78,6 +87,7 @@ Show merged chrome contributions (navbar/dashboard/statusbar/ routes/sidebar/hea
 ###### **Options:**
 
 * `--json` — JSON output
+* `-h, --help` — Print help
 
 ## `pavo view`
 
@@ -92,9 +102,8 @@ Resolve + render a view — `pavo view myco:board` or a `/myco/item?id=T-1` rout
 ###### **Options:**
 
 * `--param <K=V>` — View param, `key=value` (repeatable). Values parse as JSON when possible, else strings. A view's `filter_param` (ViewSpec, convention `q`) is just another `--param`
-* `--format <FORMAT>` — Output format — `text` (default), `json`, `dot`, `mermaid`, or any format a renderer plugin claims (e.g. `svg`, `ascii`; see a driver's manifest `renderers`)
-
-  Default value: `text`
+* `--format <FORMAT>` — Output format — `text` (default), `json`, `dot`, `mermaid`, or any format a renderer plugin claims (e.g. `svg`, `ascii`; see a driver's manifest `renderers`) \[default: text]
+* `-h, --help` — Print help
 
 ## `pavo query`
 
@@ -111,6 +120,7 @@ Raw `query` op passthrough against a driver's serve
 
 * `--param <K=V>` — Query param, `key=value` (repeatable)
 * `--json` — JSON output
+* `-h, --help` — Print help
 
 ## `pavo submit`
 
@@ -127,6 +137,7 @@ Submit a form's field values — `pavo submit config:edit --param key=myco.theme
 * `--form <FORM>` — Form node id when the view carries several forms (the `id` of the `form` ViewNode)
 * `--param <K=V>` — Field value, `key=value` (repeatable) — the form's field keys. Values parse as JSON when possible, else strings
 * `--json` — JSON output — dumps the full SubmitResult
+* `-h, --help` — Print help
 
 ## `pavo actions`
 
@@ -142,6 +153,7 @@ List the actions a target offers — declared `actions[]` (manifest, view-node, 
 
 * `--param <K=V>` — View param, `key=value` (repeatable) — used when resolving the view to collect node/item actions
 * `--json` — JSON output
+* `-h, --help` — Print help
 
 ## `pavo invoke`
 
@@ -162,6 +174,7 @@ Invoke an action — `pavo invoke myco:board refresh`. Dispatches the `invoke` w
 * `--yes` — Skip confirmation prompts. `confirm` actions require it off-TTY; `type-target` actions still need `--target-id` (the id is the confirmation — `--yes` only skips the interactive "type it" prompt)
 * `--interactive` — Prompt on a TTY for each action param not given via `--param` (uses the ParamSchema: enum lists options, bool y/n, defaults on empty input). Errors off-TTY
 * `--json` — JSON output — dumps the full ActionResult
+* `-h, --help` — Print help
 
 ## `pavo jobs`
 
@@ -172,6 +185,7 @@ List the aggregated job feed — every `contributes.jobs` provider driver's `job
 ###### **Options:**
 
 * `--json` — JSON output
+* `-h, --help` — Print help
 
 ## `pavo notifications`
 
@@ -182,6 +196,7 @@ List the aggregated notification feed — every `contributes.notifications` prov
 ###### **Options:**
 
 * `--json` — JSON output
+* `-h, --help` — Print help
 
 ## `pavo serve`
 
@@ -191,9 +206,8 @@ Serve the web bridge — localhost HTTP API + static Nuxt host
 
 ###### **Options:**
 
-* `--port <PORT>` — Port to bind on 127.0.0.1 (0 = pick a free port; the actual port is printed as the first stdout line)
-
-  Default value: `0`
+* `--port <PORT>` — Port to bind on 127.0.0.1 (0 = pick a free port; the actual port is printed as the first stdout line) \[default: 0]
+* `-h, --help` — Print help
 
 ## `pavo open`
 
@@ -203,7 +217,11 @@ Open a view in the TUI (`pavo-tui`) — the interactive surface. Falls back to `
 
 ###### **Arguments:**
 
-* `<TARGET>` — `<driver>:<view>` deep link (bare `<driver>` = its first view) or a `/route?query`. Omit to open the TUI dashboard
+* `[TARGET]` — `<driver>:<view>` deep link (bare `<driver>` = its first view) or a `/route?query`. Omit to open the TUI dashboard
+
+###### **Options:**
+
+* `-h, --help` — Print help
 
 ## `pavo manifest`
 
@@ -211,11 +229,19 @@ Print the pavo capability manifest (JSON)
 
 **Usage:** `pavo manifest`
 
+###### **Options:**
+
+* `-h, --help` — Print help
+
 ## `pavo schema`
 
 Print the CLI verb schema (JSON)
 
 **Usage:** `pavo schema`
+
+###### **Options:**
+
+* `-h, --help` — Print help
 
 ## `pavo gen-cli-docs`
 
@@ -223,5 +249,6 @@ Print the CLI reference as markdown — the docs pipeline (`docs:cli`) renders `
 
 **Usage:** `pavo gen-cli-docs`
 
-&#xA;This document was generated automatically by
-clap-markdown.&#xA;
+###### **Options:**
+
+* `-h, --help` — Print help
