@@ -8,7 +8,7 @@
     "docs:check": "bun run docs:gen && git diff --exit-code",
     "docs:crates": "cypera gen crate-map --repo ..",
     "docs:build": "bun run docs:gen && vitepress build",
-    "docs:api": "python3 gen-api.py",
+    "docs:api": "cypera gen api --repo ..",
     "docs:deploy": "bun run docs:api && bun run docs:build && bunx gh-pages -d .vitepress/dist",
     "fmt": "vp fmt",
     "fmt:check": "vp fmt --check",
