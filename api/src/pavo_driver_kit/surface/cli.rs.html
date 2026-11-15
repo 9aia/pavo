@@ -13,7 +13,7 @@
 <a href=#13 id=13 data-nosnippet>13</a>//! Every op subcommand also accepts `--params-stdin` — read the op's
 <a href=#14 id=14 data-nosnippet>14</a>//! params as one JSON object on stdin and merge them **over** the
 <a href=#15 id=15 data-nosnippet>15</a>//! argv params (stdin wins per key). This is the channel for
-<a href=#16 id=16 data-nosnippet>16</a>//! secret-bearing params ([`ParamSpec::secret`]): values never touch
+<a href=#16 id=16 data-nosnippet>16</a>//! secret-bearing params ([`ParamSpec::secret`](crate::surface::ParamSpec::secret)): values never touch
 <a href=#17 id=17 data-nosnippet>17</a>//! argv, shell history, or `/proc`. Required (`arg`) params may come
 <a href=#18 id=18 data-nosnippet>18</a>//! from either side; a missing one is a usage error either way.
 <a href=#19 id=19 data-nosnippet>19</a>
@@ -118,7 +118,7 @@
 <a href=#118 id=118 data-nosnippet>118</a>    cmd
 <a href=#119 id=119 data-nosnippet>119</a>}
 <a href=#120 id=120 data-nosnippet>120</a>
-<a href=#121 id=121 data-nosnippet>121</a><span class="doccomment">/// Parse `argv` (argv[0] included) against [`command`], dispatch the
+<a href=#121 id=121 data-nosnippet>121</a><span class="doccomment">/// Parse `argv` (argv\[0\] included) against [`command`], dispatch the
 <a href=#122 id=122 data-nosnippet>122</a>/// matched op/surface through `surface`, print captured output, and
 <a href=#123 id=123 data-nosnippet>123</a>/// return the exit code. clap errors/help print and exit `2`/`0`
 <a href=#124 id=124 data-nosnippet>124</a>/// through clap's own rendering. `--params-stdin` reads real stdin.

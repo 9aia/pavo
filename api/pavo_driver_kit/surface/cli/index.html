@@ -10,7 +10,7 @@ roots from params honor it, others ignore it.</p>
 <p>Every op subcommand also accepts <code>--params-stdin</code> — read the op’s
 params as one JSON object on stdin and merge them <strong>over</strong> the
 argv params (stdin wins per key). This is the channel for
-secret-bearing params ([<code>ParamSpec::secret</code>]): values never touch
+secret-bearing params (<a href="../struct.ParamSpec.html#structfield.secret" title="field pavo_driver_kit::surface::ParamSpec::secret"><code>ParamSpec::secret</code></a>): values never touch
 argv, shell history, or <code>/proc</code>. Required (<code>arg</code>) params may come
 from either side; a missing one is a usage error either way.</p>
 </div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.command.html" title="fn pavo_driver_kit::surface::cli::command">command</a></dt><dd>Build the generated CLI’s clap parser for <code>manifest</code>. <code>bin</code> is the

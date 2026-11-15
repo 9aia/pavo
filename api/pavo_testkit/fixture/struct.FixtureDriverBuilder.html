@@ -24,7 +24,7 @@ fixtures.</p>
 metadata but aren’t added to the manifest — declare them
 there yourself.</p>
 </div></details><details class="toggle method-toggle" open><summary><section id="method.invoke" class="method"><a class="src rightside" href="../../src/pavo_testkit/fixture.rs.html#486-489">Source</a><h4 class="code-header">pub fn <a href="#method.invoke" class="fn">invoke</a>(self, action_id: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.99.1/std/primitive.str.html">str</a>, result: <a class="enum" href="https://docs.rs/serde_json/1.0.154/serde_json/value/enum.Value.html" title="enum serde_json::value::Value">Value</a>) -&gt; Self</h4></section></summary><div class="docblock"><p>Canned <code>invoke</code> result for <code>action_id</code> — <code>result</code> is answered
-verbatim as the <code>ok:true</code> payload (an [<code>ActionResult</code>]-shaped
+verbatim as the <code>ok:true</code> payload (an <a href="../../pavo_protocol/wire/struct.ActionResult.html" title="struct pavo_protocol::wire::ActionResult"><code>ActionResult</code></a>-shaped
 object: <code>message</code>/<code>errors</code>/<code>data</code>/<code>view</code>/<code>route</code>/<code>extra</code>).
 Overrides the default dispatch for that action; undeclared
 actions configured here still answer (fixture flexibility).</p>

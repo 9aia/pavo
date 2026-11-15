@@ -13,7 +13,6 @@ tamias drivers emit declarative ViewNode IR — pavo renders it on CLI, TUI, and
 ### Tutorials
 
 - [Your first view](/pavo/tutorials/first-view.md)
-- [Deep links](/pavo/tutorials/deep-links.md)
 
 ### How-to
 
@@ -22,6 +21,7 @@ tamias drivers emit declarative ViewNode IR — pavo renders it on CLI, TUI, and
 - [Write a renderer plugin](/pavo/how-to/write-a-renderer-plugin.md)
 - [Serve the web surface](/pavo/how-to/serve-web.md)
 - [Use the config API](/pavo/how-to/use-config-api.md)
+- [Share a deep link to a view](/pavo/how-to/deep-links.md)
 
 ### Reference
 
@@ -35,6 +35,8 @@ tamias drivers emit declarative ViewNode IR — pavo renders it on CLI, TUI, and
 ### Explanation
 
 - [Architecture](/pavo/explanation/architecture.md)
+- [Concepts](/pavo/explanation/concepts.md)
+- [Decisions](/pavo/explanation/decisions.md)
 - [Why declarative views](/pavo/explanation/why-declarative.md)
 - [Renderer plugins](/pavo/explanation/renderer-plugins.md)
 - [Boundaries](/pavo/explanation/boundaries.md)

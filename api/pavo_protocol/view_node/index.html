@@ -6,7 +6,7 @@ renderer (CLI, TUI, web) interprets.</p>
   &quot;columns&quot;: [{ &quot;key&quot;: &quot;id&quot;, &quot;title&quot;: &quot;ID&quot; }],
   &quot;rows&quot;: [[&quot;T-001&quot;, &quot;pavo scaffold&quot;]] }</code></pre></div>
 <p>Nodes bind to data through <a href="struct.NodeBase.html#structfield.query" title="field pavo_protocol::view_node::NodeBase::query"><code>NodeBase::query</code></a>, which names a
-<a href="../manifest/struct.QueryBinding.html" title="struct pavo_protocol::manifest::QueryBinding"><code>crate::manifest::QueryBinding</code></a> in the enclosing [<code>ViewSpec</code>];
+<a href="../manifest/struct.QueryBinding.html" title="struct pavo_protocol::manifest::QueryBinding"><code>crate::manifest::QueryBinding</code></a> in the enclosing <a href="../manifest/struct.ViewSpec.html" title="struct pavo_protocol::manifest::ViewSpec"><code>ViewSpec</code></a>;
 the host resolves bindings to view-model data before rendering.
 Renderers that don’t know a <code>kind</code> must degrade to a generic
 key/value rendering rather than failing — forward compatibility

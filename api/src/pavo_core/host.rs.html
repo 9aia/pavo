@@ -262,7 +262,7 @@
 <a href=#262 id=262 data-nosnippet>262</a>
 <a href=#263 id=263 data-nosnippet>263</a>    <span class="doccomment">/// The driver's manifest — from discovery when eager, otherwise
 <a href=#264 id=264 data-nosnippet>264</a>    /// fetched once over the `serve` wire's `manifest` op and cached
-<a href=#265 id=265 data-nosnippet>265</a>    /// in [`Host::manifest_cache`].
+<a href=#265 id=265 data-nosnippet>265</a>    /// in `Host::manifest_cache`.
 <a href=#266 id=266 data-nosnippet>266</a>    ///
 <a href=#267 id=267 data-nosnippet>267</a>    /// # Errors
 <a href=#268 id=268 data-nosnippet>268</a>    /// [`PavoError::UnknownDriver`] for undiscovered kinds; client
@@ -306,7 +306,7 @@
 <a href=#306 id=306 data-nosnippet>306</a>    <span class="doccomment">/// The live `serve` client for `kind`, spawning on first use.
 <a href=#307 id=307 data-nosnippet>307</a>    ///
 <a href=#308 id=308 data-nosnippet>308</a>    /// The returned [`Arc&lt;Mutex&lt;DriverClient&gt;&gt;`] is the per-driver
-<a href=#309 id=309 data-nosnippet>309</a>    /// serialization point — [`Host::with_client`] locks it for you.
+<a href=#309 id=309 data-nosnippet>309</a>    /// serialization point — `Host::with_client` locks it for you.
 <a href=#310 id=310 data-nosnippet>310</a>    /// The spawn happens under the clients-map lock so two threads
 <a href=#311 id=311 data-nosnippet>311</a>    /// can't double-spawn; the lock is released before any request.
 <a href=#312 id=312 data-nosnippet>312</a>    ///

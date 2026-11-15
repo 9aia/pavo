@@ -103,6 +103,6 @@ boundary.
 
 ## Next
 
-* [Deep links](/tutorials/deep-links) — stable URLs for views and params
+* [Share a deep link](/how-to/deep-links) — stable URLs for views and params
 * [Write a driver](/how-to/write-a-driver) — build your own
 * [The wire protocol](/reference/wire-ops) — the ops in detail

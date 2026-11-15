@@ -15,7 +15,7 @@
 <a href=#15 id=15 data-nosnippet>15</a>//! | `views`   | —                                   | `Vec&lt;ViewSummary&gt;`|
 <a href=#16 id=16 data-nosnippet>16</a>//! | `view`    | `view`, `params?`                   | [`ViewResult`]    |
 <a href=#17 id=17 data-nosnippet>17</a>//! | `query`   | `query`, `params?`                  | [`QueryResult`]   |
-<a href=#18 id=18 data-nosnippet>18</a>//! | `render`  | `kind`, `node`, `data`, `surface`,  | [`RenderModel`]   |
+<a href=#18 id=18 data-nosnippet>18</a>//! | `render`  | `kind`, `node`, `data`, `surface`,  | [`RenderModel`](crate::RenderModel)|
 <a href=#19 id=19 data-nosnippet>19</a>//! |           | `format?`                           |                   |
 <a href=#20 id=20 data-nosnippet>20</a>//! | `submit`  | `view`, `form?`, `values`           | [`SubmitResult`]  |
 <a href=#21 id=21 data-nosnippet>21</a>//! | `invoke`  | `view?`, `action`, `target?`,       | [`ActionResult`]  |
@@ -101,7 +101,7 @@
 <a href=#101 id=101 data-nosnippet>101</a>        </span>params: Map&lt;String, Value&gt;,
 <a href=#102 id=102 data-nosnippet>102</a>    },
 <a href=#103 id=103 data-nosnippet>103</a>    <span class="doccomment">/// `{"op":"render","kind":"graph","node":{…},"data":{…},
-<a href=#104 id=104 data-nosnippet>104</a>    /// "surface":"cli","format":"svg"}` → [`RenderModel`] — the
+<a href=#104 id=104 data-nosnippet>104</a>    /// "surface":"cli","format":"svg"}` → [`RenderModel`](crate::RenderModel) — the
 <a href=#105 id=105 data-nosnippet>105</a>    /// renderer-plugin verb. `node` is the raw ViewNode JSON (the
 <a href=#106 id=106 data-nosnippet>106</a>    /// host passes it untyped so unknown/future fields survive);
 <a href=#107 id=107 data-nosnippet>107</a>    /// `data` is the view's query-binding map verbatim; `surface` is

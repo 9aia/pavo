@@ -12,16 +12,16 @@
 <a href=#12 id=12 data-nosnippet>12</a>//!
 <a href=#13 id=13 data-nosnippet>13</a>//! The kit is deliberately small — four modules, no framework:
 <a href=#14 id=14 data-nosnippet>14</a>//!
-<a href=#15 id=15 data-nosnippet>15</a>//! - [`serve`] — the ndjson request/response loop every driver
+<a href=#15 id=15 data-nosnippet>15</a>//! - [`mod@serve`] — the ndjson request/response loop every driver
 <a href=#16 id=16 data-nosnippet>16</a>//!   re-implements (`{"op":"…"}` in, `{"ok":…}` out, one per line).
-<a href=#17 id=17 data-nosnippet>17</a>//! - [`manifest`] — fluent builders for [`DriverManifest`],
-<a href=#18 id=18 data-nosnippet>18</a>//!   [`ViewSpec`], [`QueryBinding`], and [`Contribution`] — including
+<a href=#17 id=17 data-nosnippet>17</a>//! - [`manifest`] — fluent builders for [`DriverManifest`](pavo_protocol::DriverManifest),
+<a href=#18 id=18 data-nosnippet>18</a>//!   [`ViewSpec`](pavo_protocol::ViewSpec), [`QueryBinding`](pavo_protocol::QueryBinding), and [`Contribution`](pavo_protocol::Contribution) — including
 <a href=#19 id=19 data-nosnippet>19</a>//!   the `deps` and cross-driver (`QueryBinding.driver`) declarations.
-<a href=#20 id=20 data-nosnippet>20</a>//! - [`node`] — [`ViewNode`] constructors plus a [`node::Base`] builder
+<a href=#20 id=20 data-nosnippet>20</a>//! - [`node`] — [`ViewNode`](pavo_protocol::ViewNode) constructors plus a [`node::Base`] builder
 <a href=#21 id=21 data-nosnippet>21</a>//!   for the shared `id`/`title`/`query`/`description`/`props` fields.
-<a href=#22 id=22 data-nosnippet>22</a>//! - [`platform`] — [`JobItem`] / [`NotificationItem`] constructors
+<a href=#22 id=22 data-nosnippet>22</a>//! - [`platform`] — [`JobItem`](pavo_protocol::JobItem) / [`NotificationItem`](pavo_protocol::NotificationItem) constructors
 <a href=#23 id=23 data-nosnippet>23</a>//!   for the `jobs`/`notifications` feed ops.
-<a href=#24 id=24 data-nosnippet>24</a>//! - [`action`] — [`Action`] / [`ParamSchema`] / [`MenuEntry`]
+<a href=#24 id=24 data-nosnippet>24</a>//! - [`mod@action`] — [`Action`](pavo_protocol::Action) / [`ParamSchema`](pavo_protocol::ParamSchema) / [`MenuEntry`](pavo_protocol::MenuEntry)
 <a href=#25 id=25 data-nosnippet>25</a>//!   constructors for the `invoke` interaction layer.
 <a href=#26 id=26 data-nosnippet>26</a>//! - [`surface`] — the surface-driver layer: an engine's **ops
 <a href=#27 id=27 data-nosnippet>27</a>//!   manifest** (`ops` verb / `cli.*` wire queries) rendered onto real

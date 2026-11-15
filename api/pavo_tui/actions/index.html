@@ -5,7 +5,7 @@ worker ships to the app (scoped actions borrow the view result;
 the UI needs ’static data across frames). <a href="enum.PaletteEntry.html" title="enum pavo_tui::actions::PaletteEntry"><code>PaletteEntry</code></a>,
 <a href="struct.PaletteSession.html" title="struct pavo_tui::actions::PaletteSession"><code>PaletteSession</code></a>, <a href="struct.ConfirmSession.html" title="struct pavo_tui::actions::ConfirmSession"><code>ConfirmSession</code></a> and <a href="struct.TypeTargetSession.html" title="struct pavo_tui::actions::TypeTargetSession"><code>TypeTargetSession</code></a>
 are the overlay sessions; <a href="fn.action_form_spec.html" title="fn pavo_tui::actions::action_form_spec"><code>action_form_spec</code></a> compiles an
-action’s <code>params</code> into the existing <a href="../model/struct.FormSpec.html" title="struct pavo_tui::model::FormSpec"><code>FormSpec</code></a>/[<code>FormSession</code>]
+action’s <code>params</code> into the existing <a href="../model/struct.FormSpec.html" title="struct pavo_tui::model::FormSpec"><code>FormSpec</code></a>/<a href="../form/struct.FormSession.html" title="struct pavo_tui::form::FormSession"><code>FormSession</code></a>
 machinery so auto-forms reuse the form editor verbatim.</p>
 <p>Dispatch flow (<a href="enum.InvokeStep.html" title="enum pavo_tui::actions::InvokeStep"><code>InvokeStep</code></a>): params → auto-form; on submit the
 collected values are <a href="fn.coerce_params.html" title="fn pavo_tui::actions::coerce_params"><code>coerce_params</code></a>-ed and
@@ -19,7 +19,7 @@ the view through the normal <code>Cmd::Resolve</code> path with the param
 set, so drivers see it as an ordinary view param.</dd><dt><a class="struct" href="struct.PaletteSession.html" title="struct pavo_tui::actions::PaletteSession">Palette<wbr>Session</a></dt><dd>The command-palette overlay: a <a href="../form/struct.LineEdit.html" title="struct pavo_tui::form::LineEdit"><code>LineEdit</code></a> filter over
 <a href="fn.palette_entries.html" title="fn pavo_tui::actions::palette_entries"><code>palette_entries</code></a>, ↑↓/jk selection, Enter activates.</dd><dt><a class="struct" href="struct.PendingInvoke.html" title="struct pavo_tui::actions::PendingInvoke">Pending<wbr>Invoke</a></dt><dd>An action awaiting (or having passed) the danger gate — what the
 confirm/type-target sessions carry and what <code>Cmd::Invoke</code>
-eventually sends.</dd><dt><a class="struct" href="struct.TypeTargetSession.html" title="struct pavo_tui::actions::TypeTargetSession">Type<wbr>Target<wbr>Session</a></dt><dd>The <code>danger: type-target</code> modal — “Type <id> to confirm”. Proceeds
+eventually sends.</dd><dt><a class="struct" href="struct.TypeTargetSession.html" title="struct pavo_tui::actions::TypeTargetSession">Type<wbr>Target<wbr>Session</a></dt><dd>The <code>danger: type-target</code> modal — “Type &lt;id&gt; to confirm”. Proceeds
 only on an exact match of the expected id; when the target JSON
 carries no derivable id, any non-empty input confirms (the value
 is still shown back in the prompt).</dd><dt><a class="struct" href="struct.UiAction.html" title="struct pavo_tui::actions::UiAction">UiAction</a></dt><dd>An <a href="../../pavo_protocol/action/struct.Action.html" title="struct pavo_protocol::action::Action"><code>Action</code></a> plus everything the TUI needs to dispatch it —

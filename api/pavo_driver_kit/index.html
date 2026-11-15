@@ -8,16 +8,16 @@ declaration</strong>: build a <a href="manifest/struct.Manifest.html" title="str
 <a href="serve/fn.serve_stdio.html" title="fn pavo_driver_kit::serve::serve_stdio"><code>serve::serve_stdio</code></a>, and spend the rest of your time on data.</p>
 <p>The kit is deliberately small — four modules, no framework:</p>
 <ul>
-<li>[<code>serve</code>] — the ndjson request/response loop every driver
+<li><a href="serve/index.html" title="mod pavo_driver_kit::serve"><code>serve</code></a> — the ndjson request/response loop every driver
 re-implements (<code>{"op":"…"}</code> in, <code>{"ok":…}</code> out, one per line).</li>
-<li><a href="manifest/index.html" title="mod pavo_driver_kit::manifest"><code>manifest</code></a> — fluent builders for [<code>DriverManifest</code>],
-[<code>ViewSpec</code>], [<code>QueryBinding</code>], and [<code>Contribution</code>] — including
+<li><a href="manifest/index.html" title="mod pavo_driver_kit::manifest"><code>manifest</code></a> — fluent builders for <a href="../pavo_protocol/manifest/struct.DriverManifest.html" title="struct pavo_protocol::manifest::DriverManifest"><code>DriverManifest</code></a>,
+<a href="../pavo_protocol/manifest/struct.ViewSpec.html" title="struct pavo_protocol::manifest::ViewSpec"><code>ViewSpec</code></a>, <a href="../pavo_protocol/manifest/struct.QueryBinding.html" title="struct pavo_protocol::manifest::QueryBinding"><code>QueryBinding</code></a>, and <a href="../pavo_protocol/manifest/struct.Contribution.html" title="struct pavo_protocol::manifest::Contribution"><code>Contribution</code></a> — including
 the <code>deps</code> and cross-driver (<code>QueryBinding.driver</code>) declarations.</li>
-<li><a href="node/index.html" title="mod pavo_driver_kit::node"><code>node</code></a> — [<code>ViewNode</code>] constructors plus a <a href="node/struct.Base.html" title="struct pavo_driver_kit::node::Base"><code>node::Base</code></a> builder
+<li><a href="node/index.html" title="mod pavo_driver_kit::node"><code>node</code></a> — <a href="../pavo_protocol/view_node/enum.ViewNode.html" title="enum pavo_protocol::view_node::ViewNode"><code>ViewNode</code></a> constructors plus a <a href="node/struct.Base.html" title="struct pavo_driver_kit::node::Base"><code>node::Base</code></a> builder
 for the shared <code>id</code>/<code>title</code>/<code>query</code>/<code>description</code>/<code>props</code> fields.</li>
-<li><a href="platform/index.html" title="mod pavo_driver_kit::platform"><code>platform</code></a> — [<code>JobItem</code>] / [<code>NotificationItem</code>] constructors
+<li><a href="platform/index.html" title="mod pavo_driver_kit::platform"><code>platform</code></a> — <a href="../pavo_protocol/platform/struct.JobItem.html" title="struct pavo_protocol::platform::JobItem"><code>JobItem</code></a> / <a href="../pavo_protocol/platform/struct.NotificationItem.html" title="struct pavo_protocol::platform::NotificationItem"><code>NotificationItem</code></a> constructors
 for the <code>jobs</code>/<code>notifications</code> feed ops.</li>
-<li>[<code>action</code>] — [<code>Action</code>] / [<code>ParamSchema</code>] / [<code>MenuEntry</code>]
+<li><a href="action/index.html" title="mod pavo_driver_kit::action"><code>action</code></a> — <a href="../pavo_protocol/action/struct.Action.html" title="struct pavo_protocol::action::Action"><code>Action</code></a> / <a href="../pavo_protocol/action/struct.ParamSchema.html" title="struct pavo_protocol::action::ParamSchema"><code>ParamSchema</code></a> / <a href="../pavo_protocol/manifest/struct.MenuEntry.html" title="struct pavo_protocol::manifest::MenuEntry"><code>MenuEntry</code></a>
 constructors for the <code>invoke</code> interaction layer.</li>
 <li><a href="surface/index.html" title="mod pavo_driver_kit::surface"><code>surface</code></a> — the surface-driver layer: an engine’s <strong>ops
 manifest</strong> (<code>ops</code> verb / <code>cli.*</code> wire queries) rendered onto real

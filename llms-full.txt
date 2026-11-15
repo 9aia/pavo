@@ -57,7 +57,9 @@ pavo serve --port 7420    # localhost bridge + web host
 ## Next
 
 * [Your first view](/tutorials/first-view)
-* [Architecture](/explanation/architecture)
+* [Architecture](/explanation/architecture) ·
+  [concepts](/explanation/concepts) ·
+  [decisions](/explanation/decisions)
 * [CLI reference](/reference/cli)
 
 ---
@@ -167,85 +169,9 @@ boundary.
 
 ## Next
 
-* [Deep links](/tutorials/deep-links) — stable URLs for views and params
+* [Share a deep link](/how-to/deep-links) — stable URLs for views and params
 * [Write a driver](/how-to/write-a-driver) — build your own
 * [The wire protocol](/reference/wire-ops) — the ops in detail
-
----
-
----
-url: /pavo/tutorials/deep-links.md
----
-# Deep links
-
-Every view has a stable `<driver>:<view>` ref. On the CLI it is an
-argument; on the web it is a URL — the same link agents and humans
-can drop into PRs, issues, and handoffs.
-
-## The ref
-
-```
-pavo view demo:board
-demo:board  →  route /demo/board  →  ViewSpec { id: "board" }
-```
-
-`pavo views` lists every ref; `pavo view --help` covers the CLI
-flags (`--param`, `--format`, `--json`).
-
-## Params in URLs
-
-Views take params (`--param k=v` on the CLI). In URLs they can be
-carried three ways — all normalize to the same `param.<k>=<v>`
-pairs the bridge API understands:
-
-```
-/view/myco:item/id=T-001/verbose        path segments: one k=v each
-/view/myco:item?id=T-001&verbose        bare query keys (no prefix)
-/view/myco:item?param.id=T-001          legacy param.* form (still works)
-```
-
-Grammar details (parsed by `web/app/utils/view-link.ts`; the
-no-build `/view/` stub in `pavo serve` speaks the same rules):
-
-* The **first** path segment after `/view/` is the `<driver>:<view>`
-  ref (the colon may be percent-encoded). Every later segment is one
-  param: `key=value`, split at the **first** `=` (values may contain
-  `=`); a bare `key` means an empty-string value; empty keys are
-  dropped. So `/view/myco:item/T-001` sets param `T-001` to `""` —
-  write `/view/myco:item/id=T-001` for a real param.
-* Query keys are params too: bare `?k=v`, plus the legacy
-  `?param.k=v` (prefix stripped).
-* Precedence, lowest → highest: **path segments < bare query keys <
-  `param.*` keys** — the bridge merges last-wins, so later sources
-  override earlier ones on a key collision.
-* Values parse as JSON when possible (`n=42`, `ok=true`, `j={…}`),
-  else strings — identical to `--param` / `/api/view?param.*`.
-
-## Serving the links
-
-`pavo serve` prints `listening http://127.0.0.1:<port>`; open the
-printed URL for the dashboard, or append a deep link directly:
-
-```
-http://127.0.0.1:7420/view/demo%3Aboard
-http://127.0.0.1:7420/view/demo:board/status=open
-```
-
-With `cd web && npm run build` the bridge serves the Nuxt app;
-without a build it serves a built-in landing page that still
-understands `/view/` links.
-
-## CLI equivalents
-
-```sh
-pavo view demo:board --param status=open
-pavo open demo:deps          # TUI deep link (falls back to text off-TTY)
-curl 'localhost:7420/api/view?ref=demo:board&param.status=open'
-```
-
-The `param.*` query convention is what the `/api/view` endpoint
-already speaks — URL path segments and bare query keys are
-normalized into it before the bridge sees them.
 
 ---
 
@@ -892,6 +818,100 @@ Callers use dotted paths — `myco.theme`, `kuda.index`, `pavo.refresh_ms`
 — never file paths or raw TOML. `resolve` returns the merged tree;
 `sources` returns every contributing layer so UIs can show
 provenance ("this value came from `~/.config/pavo/pavo.toml`").
+
+---
+
+---
+url: /pavo/how-to/deep-links.md
+---
+# Share a deep link to a view
+
+**Goal:** produce a stable URL (or CLI ref) that opens a specific
+view — with params — for a human or an agent.
+
+**Prerequisites:** pavo installed and at least one driver on `PATH`
+(see [Install a driver](install-a-driver.md)).
+
+Every view has a stable `<driver>:<view>` ref. On the CLI it is an
+argument; on the web it is a URL — the same link agents and humans
+can drop into PRs, issues, and handoffs.
+
+## The ref
+
+```
+pavo view demo:board
+demo:board  →  route /demo/board  →  ViewSpec { id: "board" }
+```
+
+`pavo views` lists every ref; `pavo view --help` covers the CLI
+flags (`--param`, `--format`, `--json`).
+
+## Params in URLs
+
+Views take params (`--param k=v` on the CLI). In URLs they can be
+carried three ways — all normalize to the same `param.<k>=<v>`
+pairs the bridge API understands:
+
+```
+/view/myco:item/id=T-001/verbose        path segments: one k=v each
+/view/myco:item?id=T-001&verbose        bare query keys (no prefix)
+/view/myco:item?param.id=T-001          legacy param.* form (still works)
+```
+
+Grammar details (parsed by `web/app/utils/view-link.ts`; the
+no-build `/view/` stub in `pavo serve` speaks the same rules):
+
+* The **first** path segment after `/view/` is the `<driver>:<view>`
+  ref (the colon may be percent-encoded). Every later segment is one
+  param: `key=value`, split at the **first** `=` (values may contain
+  `=`); a bare `key` means an empty-string value; empty keys are
+  dropped. So `/view/myco:item/T-001` sets param `T-001` to `""` —
+  write `/view/myco:item/id=T-001` for a real param.
+* Query keys are params too: bare `?k=v`, plus the legacy
+  `?param.k=v` (prefix stripped).
+* Precedence, lowest → highest: **path segments < bare query keys <
+  `param.*` keys** — the bridge merges last-wins, so later sources
+  override earlier ones on a key collision.
+* Values parse as JSON when possible (`n=42`, `ok=true`, `j={…}`),
+  else strings — identical to `--param` / `/api/view?param.*`.
+
+## Serving the links
+
+## Serve the links
+
+`pavo serve` prints `listening http://127.0.0.1:<port>`; open the
+printed URL for the dashboard, or append a deep link directly:
+
+```
+http://127.0.0.1:7420/view/demo%3Aboard
+http://127.0.0.1:7420/view/demo:board/status=open
+```
+
+With `cd web && npm run build` the bridge serves the Nuxt app;
+without a build it serves a built-in landing page that still
+understands `/view/` links.
+
+## Verify
+
+Open the printed `/view/...` URL in a browser — the view renders
+with the params applied. On the CLI, `pavo view demo:board --param status=open` shows the same binding resolved.
+
+## Deeper
+
+* [Architecture — deep links are the UI](/explanation/architecture)
+* [Serve the web host](/how-to/serve-web)
+
+## CLI equivalents
+
+```sh
+pavo view demo:board --param status=open
+pavo open demo:deps          # TUI deep link (falls back to text off-TTY)
+curl 'localhost:7420/api/view?ref=demo:board&param.status=open'
+```
+
+The `param.*` query convention is what the `/api/view` endpoint
+already speaks — URL path segments and bare query keys are
+normalized into it before the bridge sees them.
 
 ---
 
@@ -1707,6 +1727,17 @@ Pavo is the visualization **host** for the 9aia org's tool suite —
 the factory's screen. Named for *Pavo* — the peafowl genus; the
 display animal.
 
+## Where it sits
+
+The org stack is **tamias → engines → orchestration → surfaces**.
+Pavo is the top of the **surfaces** layer: the one place engine
+output becomes something a human looks at. Engines (`kuda`,
+`mimus`, `myco`, `cuora`, …) ship `tamias-driver-*` executables;
+tamias installs them; pavo discovers and interprets their
+ViewNode IR on CLI, TUI, and web. Orchestration (`peregrin`)
+decides *who may view what* — pavo serves one localhost user and
+deliberately knows nothing about policy.
+
 The core idea: **products ship drivers, not UIs.** A product
 (kuda, myco, cuora, …) ships a `tamias-driver-<type>` executable
 that speaks an ndjson JSON-RPC wire and emits a declarative
@@ -1844,12 +1875,149 @@ A view is a `<driver>:<view>` ref plus optional params. On the CLI
 it's an argument; on the web it's a URL
 (`/view/myco:item/id=T-001`) that agents and humans can drop into
 PRs, issues, and handoffs. The TUI takes the same ref via
-`pavo open`. See [Deep links](/tutorials/deep-links).
+`pavo open`. See [Share a deep link](/how-to/deep-links).
 
 ## Why this shape
 
 See [Why declarative views](/explanation/why-declarative) and
 [Boundaries](/explanation/boundaries).
+
+---
+
+---
+url: /pavo/explanation/concepts.md
+---
+# Concepts
+
+pavo's vocabulary is the wire contract made human: a **driver**
+ships **views**, a **host** interprets them, and everything in
+between is a **node** in a declarative tree.
+
+## Wire entities
+
+* **Driver** — a `tamias-driver-<type>` executable discovered on
+  `PATH` or in `<tamias-home>/drivers/`. Speaks ndjson JSON-RPC
+  over stdio; declares a manifest (routes, views, chrome
+  contributions, deps) and answers ops (`view`, `query`,
+  `submit`, `render`, `jobs`, `notifications`).
+* **ViewNode IR** — the declarative tree drivers emit:
+  `panel`, `table`, `tree`, `graph`, `form`, `kv`, `markdown`,
+  `embed`, `row`, `column`, `svg`, `placeholder`. Data is *not*
+  embedded — nodes name `query` bindings the host resolves.
+* **QueryBinding** — `{op, params?, driver?}`: which wire op
+  fetches a node's data. `driver` set = cross-driver query into
+  another driver's `serve`.
+* **RenderModel** — the canonical output of a renderer plugin's
+  `render` op: resolved nodes + view-model data, surface-agnostic.
+* **Manifest `contributes`** — eight chrome slots (`navbar`,
+  `dashboard`, `statusbar`, `routes`, `sidebar`,
+  `headerActions`, `notifications`, `jobs`) a driver fills to
+  compose the shared screen.
+* **`deps`** — `requires`/`optional` driver-name graph; the host
+  topologically sorts and quarantines offenders.
+
+## Host entities
+
+* **View ref** — `<driver>:<view>`; on the CLI an argument, on the
+  web a `/view/...` URL — the same link everywhere.
+* **View-model cache** — host-side TTL cache of resolved binding
+  data; partial degradation per binding.
+* **Renderer plugin** — a driver that claims view `kind`s via
+  manifest `renderers[]` and answers `render` with a
+  RenderModel; failure falls back to built-in interpretation.
+* **Surfaces** — the three interpreters of the same IR: CLI
+  (text), TUI (ratatui), web (Nuxt via `pavo serve` bridge).
+
+## Invariants
+
+* **Additive-only v1** — new optional fields, kinds, ops may
+  appear anytime; existing spellings never change meaning.
+* **Unknown kinds degrade** — renderers meet an unknown `kind` as
+  generic KV; `props` is an open map.
+* **Drivers stay proxies** — pavo hosts collect `form` values and
+  display `SubmitResult`; every mutation semantic belongs to the
+  driver.
+
+---
+
+---
+url: /pavo/explanation/decisions.md
+---
+# Decisions
+
+ADR-lite — the decisions that shape pavo, the alternatives
+rejected, and the consequence each carries.
+
+## Declarative IR, not per-product UIs
+
+**Decision:** drivers emit a ViewNode tree — data, not code — and
+hosts interpret it on every surface.
+
+**Alternatives:** each product ships its own TUI/web/CLI (UI silos,
+N surfaces × M products of code); embed a scripting language in
+drivers (untrusted-ish code on PATH becomes a host exploit).
+
+**Consequence:** one driver visualizes everywhere; the worst a
+buggy driver can do is emit a malformed tree, which degrades to
+KV. The cost: the IR can't express everything (rich interaction
+is v2) and drivers pay manifest+wire ceremony even for trivial
+views. See [Why declarative views](why-declarative.md).
+
+## Additive-only protocol within v1
+
+**Decision:** new optional fields, `kind` variants, and ops may
+appear at any time; existing spellings never change meaning.
+Forward compatibility is mandatory.
+
+**Alternatives:** versioned protocol revisions (`/v2` endpoints —
+every consumer must track versions); breaking changes allowed
+(surfaces and drivers drift apart on upgrade).
+
+**Consequence:** a driver written today keeps working as the IR
+grows; every consumer obligation (unknown kind → KV, open `props`,
+`extra` round-trip) follows from this one rule.
+
+## Drivers are executables, not plugins
+
+**Decision:** a view provider is a `tamias-driver-*` binary on
+`PATH` speaking ndjson JSON-RPC — the tamias distribution
+mechanism, reused.
+
+**Alternatives:** in-process plugin API (ABI/version coupling,
+host crashes); per-product UIs again (see above); a daemon
+registry (pavo stays a per-user localhost bridge, no service).
+
+**Consequence:** installing visualization for a product is
+`tamias install` — no pavo-side registry, no plugin sandbox.
+`pavo-driver-kit` exists as an authoring convenience but is not a
+second contract.
+
+## Renderer plugins are opt-in claims, with mandatory fallback
+
+**Decision:** a driver may claim whole view `kind`s via manifest
+`renderers[]` and answer `render` with a canonical RenderModel —
+but failure always falls back to built-in interpretation.
+
+**Alternatives:** no escape hatch (the 90% IR becomes a ceiling);
+mandatory plugins for rich kinds (one bad plugin breaks every
+view of that kind).
+
+**Consequence:** rich visuals (`svg`, custom renderers) exist
+without letting plugins become a reliability liability — the
+second contract is kept honest by construction.
+
+## Chrome is contribution slots, not a shell API
+
+**Decision:** products compose the shared screen by filling eight
+declared `contributes` slots; the host merges deterministically
+(priority → driver name → id).
+
+**Alternatives:** a plugin shell API where drivers draw arbitrary
+chrome (unbounded, unthemed); per-product pages (back to silos).
+
+**Consequence:** the platform emerges from independent drivers —
+ordering is stable, unknown slots round-trip via `extra`, and the
+web shell renders slots it knows while ignoring the rest.
 
 ---
 

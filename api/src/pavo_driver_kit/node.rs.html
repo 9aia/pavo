@@ -95,7 +95,7 @@
 <a href=#95 id=95 data-nosnippet>95</a>    </span>}
 <a href=#96 id=96 data-nosnippet>96</a>
 <a href=#97 id=97 data-nosnippet>97</a>    <span class="doccomment">/// Add an action scoped to this node — dispatched via the
-<a href=#98 id=98 data-nosnippet>98</a>    /// `invoke` wire op. See [`crate::action`].
+<a href=#98 id=98 data-nosnippet>98</a>    /// `invoke` wire op. See [`mod@crate::action`].
 <a href=#99 id=99 data-nosnippet>99</a>    </span><span class="attr">#[must_use]
 <a href=#100 id=100 data-nosnippet>100</a>    </span><span class="kw">pub fn </span>action(<span class="kw-2">mut </span><span class="self">self</span>, action: pavo_protocol::Action) -&gt; <span class="self">Self </span>{
 <a href=#101 id=101 data-nosnippet>101</a>        <span class="self">self</span>.base.actions.push(action);
@@ -162,7 +162,7 @@
 <a href=#162 id=162 data-nosnippet>162</a>    })
 <a href=#163 id=163 data-nosnippet>163</a>}
 <a href=#164 id=164 data-nosnippet>164</a>
-<a href=#165 id=165 data-nosnippet>165</a><span class="doccomment">/// [`column`] with an explicit `gap` spacing hint.
+<a href=#165 id=165 data-nosnippet>165</a><span class="doccomment">/// [`column()`] with an explicit `gap` spacing hint.
 <a href=#166 id=166 data-nosnippet>166</a></span><span class="attr">#[must_use]
 <a href=#167 id=167 data-nosnippet>167</a></span><span class="kw">pub fn </span>column_gap(base: <span class="kw">impl </span>Into&lt;NodeBase&gt;, gap: u32, children: Vec&lt;ViewNode&gt;) -&gt; ViewNode {
 <a href=#168 id=168 data-nosnippet>168</a>    ViewNode::Column(ColumnNode {

@@ -11,7 +11,7 @@
 <a href=#11 id=11 data-nosnippet>11</a>//! └───────────────────────────────────────────────────────────────┘
 <a href=#12 id=12 data-nosnippet>12</a>//! ```
 <a href=#13 id=13 data-nosnippet>13</a>//!
-<a href=#14 id=14 data-nosnippet>14</a>//! All Host work happens on the [`worker`] thread; this module only
+<a href=#14 id=14 data-nosnippet>14</a>//! All Host work happens on the [`worker`](crate::worker) thread; this module only
 <a href=#15 id=15 data-nosnippet>15</a>//! draws [`model`] output and forwards [`Cmd`]s. Panes: `Rail`
 <a href=#16 id=16 data-nosnippet>16</a>//! (drivers) → `Canvas` (current view/dashboard/note) → `Detail`
 <a href=#17 id=17 data-nosnippet>17</a>//! (selected row's fields). `Tab`/`←`/`→` cycle focus.
@@ -450,7 +450,7 @@
 <a href=#450 id=450 data-nosnippet>450</a>        }
 <a href=#451 id=451 data-nosnippet>451</a>    }
 <a href=#452 id=452 data-nosnippet>452</a>
-<a href=#453 id=453 data-nosnippet>453</a>    <span class="doccomment">/// Swap a fresh [`ViewResult`] into the canvas — shared by the
+<a href=#453 id=453 data-nosnippet>453</a>    <span class="doccomment">/// Swap a fresh [`ViewResult`](pavo_protocol::wire::ViewResult) into the canvas — shared by the
 <a href=#454 id=454 data-nosnippet>454</a>    /// `submit` and `invoke` result paths. Plugin renders keyed to
 <a href=#455 id=455 data-nosnippet>455</a>    /// the old tree are stale; built-in rendering covers the new
 <a href=#456 id=456 data-nosnippet>456</a>    /// one until the next resolve.
@@ -686,7 +686,7 @@
 <a href=#686 id=686 data-nosnippet>686</a>        }
 <a href=#687 id=687 data-nosnippet>687</a>    }
 <a href=#688 id=688 data-nosnippet>688</a>
-<a href=#689 id=689 data-nosnippet>689</a>    <span class="doccomment">/// Interpolate an [`ActionResult.route`] template over the invoke
+<a href=#689 id=689 data-nosnippet>689</a>    <span class="doccomment">/// Interpolate an `ActionResult.route` template over the invoke
 <a href=#690 id=690 data-nosnippet>690</a>    /// context remembered by [`App::send_invoke`] (`last_dispatch`),
 <a href=#691 id=691 data-nosnippet>691</a>    /// with the result's fresh view supplying `{view}`/`{data}` when
 <a href=#692 id=692 data-nosnippet>692</a>    /// present. Empty when there's no dispatch context to interpolate
@@ -2530,7 +2530,7 @@
 <a href=#2530 id=2530 data-nosnippet>2530</a>            .render(rect, f.buffer_mut());
 <a href=#2531 id=2531 data-nosnippet>2531</a>    }
 <a href=#2532 id=2532 data-nosnippet>2532</a>
-<a href=#2533 id=2533 data-nosnippet>2533</a>    <span class="doccomment">/// The `danger: type-target` modal — "Type &lt;id&gt; to confirm"
+<a href=#2533 id=2533 data-nosnippet>2533</a>    <span class="doccomment">/// The `danger: type-target` modal — "Type &amp;lt;id&amp;gt; to confirm"
 <a href=#2534 id=2534 data-nosnippet>2534</a>    /// with the input buffer and a mismatch error line.
 <a href=#2535 id=2535 data-nosnippet>2535</a>    </span><span class="kw">fn </span>draw_type_target(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>Frame, area: Rect, s: <span class="kw-2">&amp;</span>TypeTargetSession) {
 <a href=#2536 id=2536 data-nosnippet>2536</a>        <span class="kw">let </span><span class="kw-2">mut </span>lines: Vec&lt;Line&gt; = Vec::new();

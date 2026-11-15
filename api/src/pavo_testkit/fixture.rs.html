@@ -16,7 +16,7 @@
 <a href=#16 id=16 data-nosnippet>16</a>//! Behaviour is driven by a sibling `&lt;name&gt;.fixture.json` config the
 <a href=#17 id=17 data-nosnippet>17</a>//! builder writes next to the executable — manifest, view specs,
 <a href=#18 id=18 data-nosnippet>18</a>//! canned query payloads, a raw `views` override, per-op error
-<a href=#19 id=19 data-nosnippet>19</a>//! injection, a failure-mode block, or a recorded [`Transcript`][crate::record::Transcript]
+<a href=#19 id=19 data-nosnippet>19</a>//! injection, a failure-mode block, or a recorded [`Transcript`]
 <a href=#20 id=20 data-nosnippet>20</a>//! for deterministic replay.
 <a href=#21 id=21 data-nosnippet>21</a>
 <a href=#22 id=22 data-nosnippet>22</a></span><span class="kw">use </span>std::io;
@@ -478,7 +478,7 @@
 <a href=#478 id=478 data-nosnippet>478</a>    </span>}
 <a href=#479 id=479 data-nosnippet>479</a>
 <a href=#480 id=480 data-nosnippet>480</a>    <span class="doccomment">/// Canned `invoke` result for `action_id` — `result` is answered
-<a href=#481 id=481 data-nosnippet>481</a>    /// verbatim as the `ok:true` payload (an [`ActionResult`]-shaped
+<a href=#481 id=481 data-nosnippet>481</a>    /// verbatim as the `ok:true` payload (an [`ActionResult`](pavo_protocol::ActionResult)-shaped
 <a href=#482 id=482 data-nosnippet>482</a>    /// object: `message`/`errors`/`data`/`view`/`route`/`extra`).
 <a href=#483 id=483 data-nosnippet>483</a>    /// Overrides the default dispatch for that action; undeclared
 <a href=#484 id=484 data-nosnippet>484</a>    /// actions configured here still answer (fixture flexibility).

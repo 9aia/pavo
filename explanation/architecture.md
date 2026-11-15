@@ -7,6 +7,17 @@ Pavo is the visualization **host** for the 9aia org's tool suite —
 the factory's screen. Named for *Pavo* — the peafowl genus; the
 display animal.
 
+## Where it sits
+
+The org stack is **tamias → engines → orchestration → surfaces**.
+Pavo is the top of the **surfaces** layer: the one place engine
+output becomes something a human looks at. Engines (`kuda`,
+`mimus`, `myco`, `cuora`, …) ship `tamias-driver-*` executables;
+tamias installs them; pavo discovers and interprets their
+ViewNode IR on CLI, TUI, and web. Orchestration (`peregrin`)
+decides *who may view what* — pavo serves one localhost user and
+deliberately knows nothing about policy.
+
 The core idea: **products ship drivers, not UIs.** A product
 (kuda, myco, cuora, …) ships a `tamias-driver-<type>` executable
 that speaks an ndjson JSON-RPC wire and emits a declarative
@@ -144,7 +155,7 @@ A view is a `<driver>:<view>` ref plus optional params. On the CLI
 it's an argument; on the web it's a URL
 (`/view/myco:item/id=T-001`) that agents and humans can drop into
 PRs, issues, and handoffs. The TUI takes the same ref via
-`pavo open`. See [Deep links](/tutorials/deep-links).
+`pavo open`. See [Share a deep link](/how-to/deep-links).
 
 ## Why this shape
 

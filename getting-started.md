@@ -57,5 +57,7 @@ pavo serve --port 7420    # localhost bridge + web host
 ## Next
 
 * [Your first view](/tutorials/first-view)
-* [Architecture](/explanation/architecture)
+* [Architecture](/explanation/architecture) ·
+  [concepts](/explanation/concepts) ·
+  [decisions](/explanation/decisions)
 * [CLI reference](/reference/cli)

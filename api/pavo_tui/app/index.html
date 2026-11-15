@@ -6,7 +6,7 @@
 ├────────┴───────────────────────────────┴───────────────────────┤
 │ status — driver @ view · message              statusbar slots  │
 └───────────────────────────────────────────────────────────────┘</code></pre></div>
-<p>All Host work happens on the [<code>worker</code>] thread; this module only
+<p>All Host work happens on the <a href="../worker/index.html" title="mod pavo_tui::worker"><code>worker</code></a> thread; this module only
 draws <a href="../model/index.html" title="mod pavo_tui::model"><code>model</code></a> output and forwards <a href="../worker/enum.Cmd.html" title="enum pavo_tui::worker::Cmd"><code>Cmd</code></a>s. Panes: <code>Rail</code>
 (drivers) → <code>Canvas</code> (current view/dashboard/note) → <code>Detail</code>
 (selected row’s fields). <code>Tab</code>/<code>←</code>/<code>→</code> cycle focus.</p>

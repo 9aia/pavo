@@ -5,7 +5,7 @@ cache.</p>
 speak pavo (a <code>manifest</code> verb answering <a href="../pavo_protocol/manifest/struct.DriverManifest.html" title="struct pavo_protocol::manifest::DriverManifest"><code>pavo_protocol::DriverManifest</code></a>,
 or <code>capabilities</code> advertising it), merge their <code>contributes</code> slots
 into one chrome description, and resolve <code>&lt;driver&gt;:&lt;view&gt;</code> deep
-links into [<code>pavo_protocol::ViewResult</code>]s by speaking the ndjson
+links into <a href="../pavo_protocol/wire/struct.ViewResult.html" title="struct pavo_protocol::wire::ViewResult"><code>pavo_protocol::wire::ViewResult</code></a>s by speaking the ndjson
 wire (<code>{"op":"…"}</code> → <code>{"ok":…}</code>) over each driver’s <code>serve</code> verb.</p>
 <p>Everything here is sync and std-only — no async runtime, no
 renderer deps. Renderers (CLI/TUI/web) consume <a href="host/struct.Host.html" title="struct pavo_core::host::Host"><code>Host</code></a>’s output;

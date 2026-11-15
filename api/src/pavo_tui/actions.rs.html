@@ -6,7 +6,7 @@
 <a href=#6 id=6 data-nosnippet>6</a>//! the UI needs 'static data across frames). [`PaletteEntry`],
 <a href=#7 id=7 data-nosnippet>7</a>//! [`PaletteSession`], [`ConfirmSession`] and [`TypeTargetSession`]
 <a href=#8 id=8 data-nosnippet>8</a>//! are the overlay sessions; [`action_form_spec`] compiles an
-<a href=#9 id=9 data-nosnippet>9</a>//! action's `params` into the existing [`FormSpec`]/[`FormSession`]
+<a href=#9 id=9 data-nosnippet>9</a>//! action's `params` into the existing [`FormSpec`]/[`FormSession`](crate::form::FormSession)
 <a href=#10 id=10 data-nosnippet>10</a>//! machinery so auto-forms reuse the form editor verbatim.
 <a href=#11 id=11 data-nosnippet>11</a>//!
 <a href=#12 id=12 data-nosnippet>12</a>//! Dispatch flow ([`InvokeStep`]): params → auto-form; on submit the
@@ -553,7 +553,7 @@
 <a href=#553 id=553 data-nosnippet>553</a>    </span>Submit,
 <a href=#554 id=554 data-nosnippet>554</a>}
 <a href=#555 id=555 data-nosnippet>555</a>
-<a href=#556 id=556 data-nosnippet>556</a><span class="doccomment">/// The `danger: type-target` modal — "Type &lt;id&gt; to confirm". Proceeds
+<a href=#556 id=556 data-nosnippet>556</a><span class="doccomment">/// The `danger: type-target` modal — "Type &amp;lt;id&amp;gt; to confirm". Proceeds
 <a href=#557 id=557 data-nosnippet>557</a>/// only on an exact match of the expected id; when the target JSON
 <a href=#558 id=558 data-nosnippet>558</a>/// carries no derivable id, any non-empty input confirms (the value
 <a href=#559 id=559 data-nosnippet>559</a>/// is still shown back in the prompt).
