@@ -26,3 +26,6 @@ package = "pavo"
 bin = "pavo"
 prefix = []
 out = "docs/reference/cli.md"
+
+[check]
+profile = "engine"
