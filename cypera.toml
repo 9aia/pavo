@@ -1,0 +1,28 @@
+# cypera — org docs/reference generation contract (see ../cypera).
+# Discovered upward from the repo root; `bun run docs:gen` inside
+# docs/ drives `cypera gen crate-map|cli` with no flags (pavo has no
+# generated config page — reference/config.md is hand-written).
+
+[crate_map]
+order = ["domain", "host", "adapter", "binary"]
+
+[crate_map.layers]
+"pavo" = "binary"
+"pavo-protocol" = "domain"
+"pavo-core" = "host"
+"pavo-testkit" = "adapter"
+"pavo-driver-config" = "adapter"
+
+[[crate_map.splices]]
+target = "docs/explanation/architecture.md"
+marker = "<!-- crate-map -->"
+
+[crate_map.crate_api]
+site = "pavo"
+out = "docs/reference/crate-api.md"
+
+[cli]
+package = "pavo"
+bin = "pavo"
+prefix = []
+out = "docs/reference/cli.md"
