@@ -6,13 +6,9 @@ tamias drivers emit declarative ViewNode IR — pavo renders it on CLI, TUI, and
 
 ## Table of Contents
 
-### Getting Started
-
-- [Getting Started](/pavo/tutorials/getting-started.md)
-
 ### Tutorials
 
-- [Your first view](/pavo/tutorials/first-view.md)
+- [Getting started](/pavo/tutorials/getting-started.md)
 
 ### How-to
 
