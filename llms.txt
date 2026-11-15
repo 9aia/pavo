@@ -25,7 +25,7 @@ tamias drivers emit declarative ViewNode IR — pavo renders it on CLI, TUI, and
 
 ### Reference
 
-- [CLI reference](/pavo/reference/cli.md)
+- [Command-Line Help for `pavo`](/pavo/reference/cli.md)
 - [ViewNode IR](/pavo/reference/view-nodes.md)
 - [Wire ops](/pavo/reference/wire-ops.md)
 - [Driver manifest](/pavo/reference/driver-manifest.md)

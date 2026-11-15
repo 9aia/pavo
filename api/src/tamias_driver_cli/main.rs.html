@@ -49,77 +49,78 @@
 <a href=#49 id=49 data-nosnippet>49</a>        contributes: Contributes::default(),
 <a href=#50 id=50 data-nosnippet>50</a>        views: Vec::new(),
 <a href=#51 id=51 data-nosnippet>51</a>        renderers: Vec::new(),
-<a href=#52 id=52 data-nosnippet>52</a>    }
-<a href=#53 id=53 data-nosnippet>53</a>}
-<a href=#54 id=54 data-nosnippet>54</a>
-<a href=#55 id=55 data-nosnippet>55</a><span class="kw">fn </span>dispatch(req: <span class="kw-2">&amp;</span>Request, manifest: <span class="kw-2">&amp;</span>DriverManifest) -&gt; Response {
-<a href=#56 id=56 data-nosnippet>56</a>    <span class="kw">match </span>req {
-<a href=#57 id=57 data-nosnippet>57</a>        Request::Manifest =&gt; Response::ok_typed(manifest),
-<a href=#58 id=58 data-nosnippet>58</a>        Request::Views =&gt; Response::ok(<span class="macro">json!</span>([])),
-<a href=#59 id=59 data-nosnippet>59</a>        <span class="kw">_ </span>=&gt; Response::err(<span class="string">"surface driver — ops manifest + surfaces only, no views"</span>),
-<a href=#60 id=60 data-nosnippet>60</a>    }
-<a href=#61 id=61 data-nosnippet>61</a>}
-<a href=#62 id=62 data-nosnippet>62</a>
-<a href=#63 id=63 data-nosnippet>63</a><span class="kw">fn </span>serve() -&gt; i32 {
-<a href=#64 id=64 data-nosnippet>64</a>    <span class="kw">let </span>manifest = manifest();
-<a href=#65 id=65 data-nosnippet>65</a>    <span class="kw">match </span>kit::serve_stdio(|req| dispatch(req, <span class="kw-2">&amp;</span>manifest)) {
-<a href=#66 id=66 data-nosnippet>66</a>        <span class="prelude-val">Ok</span>(()) =&gt; <span class="number">0</span>,
-<a href=#67 id=67 data-nosnippet>67</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#68 id=68 data-nosnippet>68</a>            <span class="macro">eprintln!</span>(<span class="string">"tamias-driver-cli: {e}"</span>);
-<a href=#69 id=69 data-nosnippet>69</a>            <span class="number">1
-<a href=#70 id=70 data-nosnippet>70</a>        </span>}
-<a href=#71 id=71 data-nosnippet>71</a>    }
-<a href=#72 id=72 data-nosnippet>72</a>}
-<a href=#73 id=73 data-nosnippet>73</a>
-<a href=#74 id=74 data-nosnippet>74</a><span class="kw">fn </span>usage() -&gt; i32 {
-<a href=#75 id=75 data-nosnippet>75</a>    <span class="macro">eprintln!</span>(
-<a href=#76 id=76 data-nosnippet>76</a>        <span class="string">"usage: tamias-driver-cli &lt;engine|driver-path&gt; &lt;op&gt; [args]   # generated CLI over the driver's ops manifest\n       tamias-driver-cli manifest|capabilities|serve          # discovery verbs"
-<a href=#77 id=77 data-nosnippet>77</a>    </span>);
-<a href=#78 id=78 data-nosnippet>78</a>    <span class="number">2
-<a href=#79 id=79 data-nosnippet>79</a></span>}
-<a href=#80 id=80 data-nosnippet>80</a>
-<a href=#81 id=81 data-nosnippet>81</a><span class="kw">fn </span>main() {
-<a href=#82 id=82 data-nosnippet>82</a>    <span class="kw">let </span>args: Vec&lt;String&gt; = std::env::args().skip(<span class="number">1</span>).collect();
-<a href=#83 id=83 data-nosnippet>83</a>    <span class="kw">let </span>code = <span class="kw">match </span>args.first().map(String::as_str) {
-<a href=#84 id=84 data-nosnippet>84</a>        <span class="prelude-val">Some</span>(<span class="string">"manifest"</span>) =&gt; {
-<a href=#85 id=85 data-nosnippet>85</a>            <span class="macro">println!</span>(<span class="string">"{}"</span>, kit::manifest_json(<span class="kw-2">&amp;</span>manifest()));
-<a href=#86 id=86 data-nosnippet>86</a>            <span class="number">0
-<a href=#87 id=87 data-nosnippet>87</a>        </span>}
-<a href=#88 id=88 data-nosnippet>88</a>        <span class="prelude-val">Some</span>(<span class="string">"capabilities"</span>) =&gt; {
-<a href=#89 id=89 data-nosnippet>89</a>            <span class="kw">let </span><span class="kw-2">mut </span>v = kit::capabilities_value(<span class="kw-2">&amp;</span>manifest());
-<a href=#90 id=90 data-nosnippet>90</a>            v[<span class="string">"types"</span>] = <span class="macro">json!</span>([]);
-<a href=#91 id=91 data-nosnippet>91</a>            v[<span class="string">"driver"</span>] = <span class="macro">json!</span>(<span class="string">"cli"</span>);
-<a href=#92 id=92 data-nosnippet>92</a>            <span class="macro">println!</span>(<span class="string">"{v}"</span>);
-<a href=#93 id=93 data-nosnippet>93</a>            <span class="number">0
-<a href=#94 id=94 data-nosnippet>94</a>        </span>}
-<a href=#95 id=95 data-nosnippet>95</a>        <span class="prelude-val">Some</span>(<span class="string">"serve"</span>) =&gt; serve(),
-<a href=#96 id=96 data-nosnippet>96</a>        <span class="prelude-val">Some</span>(<span class="string">"-h"</span>) | <span class="prelude-val">Some</span>(<span class="string">"--help"</span>) | <span class="prelude-val">None </span>=&gt; usage(),
-<a href=#97 id=97 data-nosnippet>97</a>        <span class="prelude-val">Some</span>(engine) =&gt; {
-<a href=#98 id=98 data-nosnippet>98</a>            <span class="kw">let </span><span class="prelude-val">Some</span>(path) = client::find_driver(engine) <span class="kw">else </span>{
-<a href=#99 id=99 data-nosnippet>99</a>                <span class="macro">eprintln!</span>(
-<a href=#100 id=100 data-nosnippet>100</a>                    <span class="string">"tamias-driver-cli: no driver `{engine}` — want tamias-driver-{engine} on PATH or under tamias-home/drivers, or pass a path"
-<a href=#101 id=101 data-nosnippet>101</a>                </span>);
-<a href=#102 id=102 data-nosnippet>102</a>                std::process::exit(<span class="number">2</span>)
-<a href=#103 id=103 data-nosnippet>103</a>            };
-<a href=#104 id=104 data-nosnippet>104</a>            <span class="kw">let </span>ops = <span class="kw">match </span>client::ops_manifest(<span class="kw-2">&amp;</span>path) {
-<a href=#105 id=105 data-nosnippet>105</a>                <span class="prelude-val">Ok</span>(ops) =&gt; ops,
-<a href=#106 id=106 data-nosnippet>106</a>                <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#107 id=107 data-nosnippet>107</a>                    <span class="macro">eprintln!</span>(<span class="string">"tamias-driver-cli: {e}"</span>);
-<a href=#108 id=108 data-nosnippet>108</a>                    std::process::exit(<span class="number">2</span>)
-<a href=#109 id=109 data-nosnippet>109</a>                }
-<a href=#110 id=110 data-nosnippet>110</a>            };
-<a href=#111 id=111 data-nosnippet>111</a>            <span class="kw">let </span>bin = <span class="kw">if </span>ops.engine.is_empty() {
-<a href=#112 id=112 data-nosnippet>112</a>                engine.to_string()
-<a href=#113 id=113 data-nosnippet>113</a>            } <span class="kw">else </span>{
-<a href=#114 id=114 data-nosnippet>114</a>                ops.engine.clone()
-<a href=#115 id=115 data-nosnippet>115</a>            };
-<a href=#116 id=116 data-nosnippet>116</a>            <span class="kw">let </span>argv: Vec&lt;String&gt; = std::iter::once(bin.clone())
-<a href=#117 id=117 data-nosnippet>117</a>                .chain(args.iter().skip(<span class="number">1</span>).cloned())
-<a href=#118 id=118 data-nosnippet>118</a>                .collect();
-<a href=#119 id=119 data-nosnippet>119</a>            <span class="kw">let </span><span class="kw-2">mut </span>driver = client::DriverClient::new(path);
-<a href=#120 id=120 data-nosnippet>120</a>            surface::cli::run(<span class="kw-2">&amp;</span>bin, <span class="kw-2">&amp;</span>ops, <span class="kw-2">&amp;</span>argv, <span class="kw-2">&amp;mut </span>driver)
-<a href=#121 id=121 data-nosnippet>121</a>        }
-<a href=#122 id=122 data-nosnippet>122</a>    };
-<a href=#123 id=123 data-nosnippet>123</a>    std::process::exit(code);
-<a href=#124 id=124 data-nosnippet>124</a>}
+<a href=#52 id=52 data-nosnippet>52</a>        actions: Vec::new(),
+<a href=#53 id=53 data-nosnippet>53</a>    }
+<a href=#54 id=54 data-nosnippet>54</a>}
+<a href=#55 id=55 data-nosnippet>55</a>
+<a href=#56 id=56 data-nosnippet>56</a><span class="kw">fn </span>dispatch(req: <span class="kw-2">&amp;</span>Request, manifest: <span class="kw-2">&amp;</span>DriverManifest) -&gt; Response {
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="kw">match </span>req {
+<a href=#58 id=58 data-nosnippet>58</a>        Request::Manifest =&gt; Response::ok_typed(manifest),
+<a href=#59 id=59 data-nosnippet>59</a>        Request::Views =&gt; Response::ok(<span class="macro">json!</span>([])),
+<a href=#60 id=60 data-nosnippet>60</a>        <span class="kw">_ </span>=&gt; Response::err(<span class="string">"surface driver — ops manifest + surfaces only, no views"</span>),
+<a href=#61 id=61 data-nosnippet>61</a>    }
+<a href=#62 id=62 data-nosnippet>62</a>}
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a><span class="kw">fn </span>serve() -&gt; i32 {
+<a href=#65 id=65 data-nosnippet>65</a>    <span class="kw">let </span>manifest = manifest();
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="kw">match </span>kit::serve_stdio(|req| dispatch(req, <span class="kw-2">&amp;</span>manifest)) {
+<a href=#67 id=67 data-nosnippet>67</a>        <span class="prelude-val">Ok</span>(()) =&gt; <span class="number">0</span>,
+<a href=#68 id=68 data-nosnippet>68</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#69 id=69 data-nosnippet>69</a>            <span class="macro">eprintln!</span>(<span class="string">"tamias-driver-cli: {e}"</span>);
+<a href=#70 id=70 data-nosnippet>70</a>            <span class="number">1
+<a href=#71 id=71 data-nosnippet>71</a>        </span>}
+<a href=#72 id=72 data-nosnippet>72</a>    }
+<a href=#73 id=73 data-nosnippet>73</a>}
+<a href=#74 id=74 data-nosnippet>74</a>
+<a href=#75 id=75 data-nosnippet>75</a><span class="kw">fn </span>usage() -&gt; i32 {
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="macro">eprintln!</span>(
+<a href=#77 id=77 data-nosnippet>77</a>        <span class="string">"usage: tamias-driver-cli &lt;engine|driver-path&gt; &lt;op&gt; [args]   # generated CLI over the driver's ops manifest\n       tamias-driver-cli manifest|capabilities|serve          # discovery verbs"
+<a href=#78 id=78 data-nosnippet>78</a>    </span>);
+<a href=#79 id=79 data-nosnippet>79</a>    <span class="number">2
+<a href=#80 id=80 data-nosnippet>80</a></span>}
+<a href=#81 id=81 data-nosnippet>81</a>
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">fn </span>main() {
+<a href=#83 id=83 data-nosnippet>83</a>    <span class="kw">let </span>args: Vec&lt;String&gt; = std::env::args().skip(<span class="number">1</span>).collect();
+<a href=#84 id=84 data-nosnippet>84</a>    <span class="kw">let </span>code = <span class="kw">match </span>args.first().map(String::as_str) {
+<a href=#85 id=85 data-nosnippet>85</a>        <span class="prelude-val">Some</span>(<span class="string">"manifest"</span>) =&gt; {
+<a href=#86 id=86 data-nosnippet>86</a>            <span class="macro">println!</span>(<span class="string">"{}"</span>, kit::manifest_json(<span class="kw-2">&amp;</span>manifest()));
+<a href=#87 id=87 data-nosnippet>87</a>            <span class="number">0
+<a href=#88 id=88 data-nosnippet>88</a>        </span>}
+<a href=#89 id=89 data-nosnippet>89</a>        <span class="prelude-val">Some</span>(<span class="string">"capabilities"</span>) =&gt; {
+<a href=#90 id=90 data-nosnippet>90</a>            <span class="kw">let </span><span class="kw-2">mut </span>v = kit::capabilities_value(<span class="kw-2">&amp;</span>manifest());
+<a href=#91 id=91 data-nosnippet>91</a>            v[<span class="string">"types"</span>] = <span class="macro">json!</span>([]);
+<a href=#92 id=92 data-nosnippet>92</a>            v[<span class="string">"driver"</span>] = <span class="macro">json!</span>(<span class="string">"cli"</span>);
+<a href=#93 id=93 data-nosnippet>93</a>            <span class="macro">println!</span>(<span class="string">"{v}"</span>);
+<a href=#94 id=94 data-nosnippet>94</a>            <span class="number">0
+<a href=#95 id=95 data-nosnippet>95</a>        </span>}
+<a href=#96 id=96 data-nosnippet>96</a>        <span class="prelude-val">Some</span>(<span class="string">"serve"</span>) =&gt; serve(),
+<a href=#97 id=97 data-nosnippet>97</a>        <span class="prelude-val">Some</span>(<span class="string">"-h"</span>) | <span class="prelude-val">Some</span>(<span class="string">"--help"</span>) | <span class="prelude-val">None </span>=&gt; usage(),
+<a href=#98 id=98 data-nosnippet>98</a>        <span class="prelude-val">Some</span>(engine) =&gt; {
+<a href=#99 id=99 data-nosnippet>99</a>            <span class="kw">let </span><span class="prelude-val">Some</span>(path) = client::find_driver(engine) <span class="kw">else </span>{
+<a href=#100 id=100 data-nosnippet>100</a>                <span class="macro">eprintln!</span>(
+<a href=#101 id=101 data-nosnippet>101</a>                    <span class="string">"tamias-driver-cli: no driver `{engine}` — want tamias-driver-{engine} on PATH or under tamias-home/drivers, or pass a path"
+<a href=#102 id=102 data-nosnippet>102</a>                </span>);
+<a href=#103 id=103 data-nosnippet>103</a>                std::process::exit(<span class="number">2</span>)
+<a href=#104 id=104 data-nosnippet>104</a>            };
+<a href=#105 id=105 data-nosnippet>105</a>            <span class="kw">let </span>ops = <span class="kw">match </span>client::ops_manifest(<span class="kw-2">&amp;</span>path) {
+<a href=#106 id=106 data-nosnippet>106</a>                <span class="prelude-val">Ok</span>(ops) =&gt; ops,
+<a href=#107 id=107 data-nosnippet>107</a>                <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#108 id=108 data-nosnippet>108</a>                    <span class="macro">eprintln!</span>(<span class="string">"tamias-driver-cli: {e}"</span>);
+<a href=#109 id=109 data-nosnippet>109</a>                    std::process::exit(<span class="number">2</span>)
+<a href=#110 id=110 data-nosnippet>110</a>                }
+<a href=#111 id=111 data-nosnippet>111</a>            };
+<a href=#112 id=112 data-nosnippet>112</a>            <span class="kw">let </span>bin = <span class="kw">if </span>ops.engine.is_empty() {
+<a href=#113 id=113 data-nosnippet>113</a>                engine.to_string()
+<a href=#114 id=114 data-nosnippet>114</a>            } <span class="kw">else </span>{
+<a href=#115 id=115 data-nosnippet>115</a>                ops.engine.clone()
+<a href=#116 id=116 data-nosnippet>116</a>            };
+<a href=#117 id=117 data-nosnippet>117</a>            <span class="kw">let </span>argv: Vec&lt;String&gt; = std::iter::once(bin.clone())
+<a href=#118 id=118 data-nosnippet>118</a>                .chain(args.iter().skip(<span class="number">1</span>).cloned())
+<a href=#119 id=119 data-nosnippet>119</a>                .collect();
+<a href=#120 id=120 data-nosnippet>120</a>            <span class="kw">let </span><span class="kw-2">mut </span>driver = client::DriverClient::new(path);
+<a href=#121 id=121 data-nosnippet>121</a>            surface::cli::run(<span class="kw-2">&amp;</span>bin, <span class="kw-2">&amp;</span>ops, <span class="kw-2">&amp;</span>argv, <span class="kw-2">&amp;mut </span>driver)
+<a href=#122 id=122 data-nosnippet>122</a>        }
+<a href=#123 id=123 data-nosnippet>123</a>    };
+<a href=#124 id=124 data-nosnippet>124</a>    std::process::exit(code);
+<a href=#125 id=125 data-nosnippet>125</a>}
 </code></pre></div></section></main></body></html>

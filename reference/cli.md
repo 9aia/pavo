@@ -1,167 +1,227 @@
 ---
 url: /pavo/reference/cli.md
 ---
-# CLI reference
+# Command-Line Help for `pavo`
 
-```
+This document contains the help content for the `pavo` command-line program.
+
+**Command Overview:**
+
+* [`pavo`↴](#pavo)
+* [`pavo drivers`↴](#pavo-drivers)
+* [`pavo views`↴](#pavo-views)
+* [`pavo chrome`↴](#pavo-chrome)
+* [`pavo view`↴](#pavo-view)
+* [`pavo query`↴](#pavo-query)
+* [`pavo submit`↴](#pavo-submit)
+* [`pavo actions`↴](#pavo-actions)
+* [`pavo invoke`↴](#pavo-invoke)
+* [`pavo jobs`↴](#pavo-jobs)
+* [`pavo notifications`↴](#pavo-notifications)
+* [`pavo serve`↴](#pavo-serve)
+* [`pavo open`↴](#pavo-open)
+* [`pavo manifest`↴](#pavo-manifest)
+* [`pavo schema`↴](#pavo-schema)
+* [`pavo gen-cli-docs`↴](#pavo-gen-cli-docs)
+
+## `pavo`
+
 Visualization host for the 9aia tool suite
 
-Usage: pavo [COMMAND]
+**Usage:** `pavo [COMMAND]`
 
-Commands:
-  drivers     List discovered tamias-driver-* executables that speak pavo
-  views       List every <driver>:<view> ref with title/route
-  chrome      Show the merged contribution slots
-  view        Resolve a deep link and render it
-  query       Raw query-op passthrough to a driver
-  submit      Submit a form's field values (submit wire op)
-  jobs        List the aggregated job feed (contributes.jobs providers)
-  notifications  List the aggregated notification feed
-  serve       Run the localhost HTTP bridge for the web host
-  open        Hand off to pavo-tui (falls back to `view` text off-TTY)
-  manifest    Print the machine-readable capability manifest
-  schema      Print the verb schema
-  help        Print this message or the help of the given subcommand(s)
+###### **Subcommands:**
 
-Options:
-  -h, --help     Print help
-  -V, --version  Print version
-```
+* `drivers` — List discovered pavo-capable drivers
+* `views` — List every view as `<driver>:<view>` refs
+* `chrome` — Show merged chrome contributions (navbar/dashboard/statusbar/ routes/sidebar/headerActions/notifications/jobs + extras)
+* `view` — Resolve + render a view — `pavo view myco:board` or a `/myco/item?id=T-1` route
+* `query` — Raw `query` op passthrough against a driver's serve
+* `submit` — Submit a form's field values — `pavo submit config:edit --param key=myco.theme --param value=dark`
+* `actions` — List the actions a target offers — declared `actions[]` (manifest, view-node, tree-item scopes) plus ops-manifest derived actions, with danger level + param schemas
+* `invoke` — Invoke an action — `pavo invoke myco:board refresh`. Dispatches the `invoke` wire op; `--json` dumps the full ActionResult
+* `jobs` — List the aggregated job feed — every `contributes.jobs` provider driver's `jobs` wire op, tagged with its driver
+* `notifications` — List the aggregated notification feed — every `contributes.notifications` provider driver's `notifications` wire op, tagged with its driver
+* `serve` — Serve the web bridge — localhost HTTP API + static Nuxt host
+* `open` — Open a view in the TUI (`pavo-tui`) — the interactive surface. Falls back to `view` text output when stdout is not a TTY
+* `manifest` — Print the pavo capability manifest (JSON)
+* `schema` — Print the CLI verb schema (JSON)
+* `gen-cli-docs` — Print the CLI reference as markdown — the docs pipeline (`docs:cli`) renders `docs/reference/cli.md` from this
 
-`--json` is a per-subcommand flag on the listing/query verbs;
-`view --format json` is its machine-readable mode. Errors go to
-stderr; exit codes are CI-meaningful: `0` ok, `1` view/driver error,
-`2` usage.
+## `pavo drivers`
 
-## drivers
+List discovered pavo-capable drivers
 
-```sh
-pavo drivers [--json]
-```
+**Usage:** `pavo drivers [OPTIONS]`
 
-Lists every discovered `tamias-driver-*` that speaks pavo — name,
-title, version, view count, renderer count, contributes summary.
-Discovery scans `PATH` and `<tamias-home>/drivers/`
-(`$TAMIAS_HOME` → `$XDG_DATA_HOME/tamias` → `~/.local/share/tamias`
-→ `./.tamias`).
+###### **Options:**
 
-## views
+* `--json` — JSON output
 
-```sh
-pavo views [--driver <name>] [--json]
-```
+## `pavo views`
 
-Every view as a `<driver>:<view>` ref with title, route, and query
-names. `--driver` filters to one driver.
+List every view as `<driver>:<view>` refs
 
-## chrome
+**Usage:** `pavo views [OPTIONS]`
 
-```sh
-pavo chrome [--json]
-```
+###### **Options:**
 
-The merged contribution slots — all eight built-ins: `navbar`,
-`dashboard`, `statusbar`, `routes`, `sidebar`, `headerActions`,
-`notifications`, `jobs` — plus forward-compat `extra` slots,
-resolved across all drivers by priority. The `notifications`/`jobs`
-entries are provider display metadata; the feed *data* is what
-`pavo jobs` / `pavo notifications` aggregate.
+* `--driver <DRIVER>` — Only views of this driver
+* `--json` — JSON output
 
-## view
+## `pavo chrome`
 
-```sh
-pavo view <driver>:<view> [--param k=v …] [--format FMT] [--json]
-```
+Show merged chrome contributions (navbar/dashboard/statusbar/ routes/sidebar/headerActions/notifications/jobs + extras)
 
-Resolves the deep link and renders the ViewNode tree plus bound
-data.
+**Usage:** `pavo chrome [OPTIONS]`
 
-| `--format` | Output |
-| --- | --- |
-| `text` (default) | summary of the tree + bound data |
-| `json` | raw `ViewResult` |
-| `dot` | graph nodes → graphviz |
-| `mermaid` | graph nodes → mermaid |
-| `<plugin>` | any format a renderer plugin claims (e.g. `svg`, `ascii`) |
+###### **Options:**
 
-Renderer plugins take precedence per node: a plugin listing a
-built-in format name (`text`/`dot`/`mermaid`) in
-`renderers[].surfaces.cli.formats` overrides it for the kinds it
-claims; unclaimed nodes keep the built-in output. `json` is
-host-owned and never routed to plugins.
+* `--json` — JSON output
 
-`--param k=v` merges caller params into every query binding;
-repeatable, values parse as JSON when possible. `--json` prints the
-machine-readable envelope.
+## `pavo view`
 
-## query
+Resolve + render a view — `pavo view myco:board` or a `/myco/item?id=T-1` route
 
-```sh
-pavo query <driver> <query> [--param k=v …] [--json]
-```
+**Usage:** `pavo view [OPTIONS] <TARGET>`
 
-Raw `query` op passthrough — `{"op":"query","query":"<query>",
-"params":{…}}` — for probing a driver's data without a view.
+###### **Arguments:**
 
-## submit
+* `<TARGET>` — `<driver>:<view>` deep link (bare `<driver>` = its first view) or a `/route?query` matching a declared view route / `item_route` template
 
-```sh
-pavo submit <driver>:<view> [--form <id>] [--param k=v …] [--json]
-```
+###### **Options:**
 
-Sends the `submit` wire op — the form-interaction verb — with the
-given field values (`--param key=value`, repeatable; values parse as
-JSON when possible). `--form` picks a specific form node when the
-view carries several. Prints the driver's `SubmitResult` message and
-data; per-field validation `errors` exit 1 so CI can gate on them.
-`--json` dumps the full `SubmitResult` (including any updated
-`view`). Example: `pavo submit config:edit --param key=myco.theme --param value=dark`.
+* `--param <K=V>` — View param, `key=value` (repeatable). Values parse as JSON when possible, else strings. A view's `filter_param` (ViewSpec, convention `q`) is just another `--param`
+* `--format <FORMAT>` — Output format — `text` (default), `json`, `dot`, `mermaid`, or any format a renderer plugin claims (e.g. `svg`, `ascii`; see a driver's manifest `renderers`)
 
-## jobs
+  Default value: `text`
 
-```sh
-pavo jobs [--json]
-```
+## `pavo query`
 
-The aggregated job feed: `{"op":"jobs"}` fanned out to every
-driver whose manifest declares `contributes.jobs`, each item
-flattened with `driver`/`driver_title` attribution. Per-driver
-failures are skipped, never fatal. Item shape: `JobItem` — see
-[Wire ops → Types](/reference/wire-ops#types).
+Raw `query` op passthrough against a driver's serve
 
-## notifications
+**Usage:** `pavo query [OPTIONS] <DRIVER> <QUERY>`
 
-```sh
-pavo notifications [--json]
-```
+###### **Arguments:**
 
-The aggregated notification feed — same pattern as `jobs` over the
-`notifications` wire op and `contributes.notifications` providers.
-`NotificationItem.read` is display-only in v1 (no write path).
+* `<DRIVER>` — Driver kind
+* `<QUERY>` — Query/binding name (or raw product op for thin drivers)
 
-## serve
+###### **Options:**
 
-```sh
-pavo serve [--port N]
-```
+* `--param <K=V>` — Query param, `key=value` (repeatable)
+* `--json` — JSON output
 
-The localhost HTTP bridge (`127.0.0.1`; `--port 0` picks a free
-port). First stdout line is `listening http://127.0.0.1:<port>`.
-Endpoints and static serving: [Serve the web surface](/how-to/serve-web).
+## `pavo submit`
 
-## open
+Submit a form's field values — `pavo submit config:edit --param key=myco.theme --param value=dark`
 
-```sh
-pavo open [<driver>:<view>]
-```
+**Usage:** `pavo submit [OPTIONS] <TARGET>`
 
-Hands off to `pavo-tui` with the deep link, or the bare dashboard
-when no target is given. On a non-TTY it falls back to `pavo view`
-text output.
+###### **Arguments:**
 
-## manifest / schema
+* `<TARGET>` — `<driver>:<view>` deep link the form lives in (bare `<driver>` = its first view)
 
-```sh
-pavo manifest   # the CLI's own capability manifest (sibling convention)
-pavo schema     # the verb schema
-```
+###### **Options:**
+
+* `--form <FORM>` — Form node id when the view carries several forms (the `id` of the `form` ViewNode)
+* `--param <K=V>` — Field value, `key=value` (repeatable) — the form's field keys. Values parse as JSON when possible, else strings
+* `--json` — JSON output — dumps the full SubmitResult
+
+## `pavo actions`
+
+List the actions a target offers — declared `actions[]` (manifest, view-node, tree-item scopes) plus ops-manifest derived actions, with danger level + param schemas
+
+**Usage:** `pavo actions [OPTIONS] <TARGET>`
+
+###### **Arguments:**
+
+* `<TARGET>` — `<driver>:<view>` deep link, or bare `<driver>` for manifest-scope actions only
+
+###### **Options:**
+
+* `--param <K=V>` — View param, `key=value` (repeatable) — used when resolving the view to collect node/item actions
+* `--json` — JSON output
+
+## `pavo invoke`
+
+Invoke an action — `pavo invoke myco:board refresh`. Dispatches the `invoke` wire op; `--json` dumps the full ActionResult
+
+**Usage:** `pavo invoke [OPTIONS] <TARGET> <ACTION>`
+
+###### **Arguments:**
+
+* `<TARGET>` — `<driver>:<view>` deep link the action lives in (bare `<driver>` = its first view)
+* `<ACTION>` — Action id — see `pavo actions <driver>:<view>`
+
+###### **Options:**
+
+* `--param <K=V>` — Action param, `key=value` (repeatable) — the action's `ParamSchema` names. Values parse as JSON when possible, else strings
+* `--target <JSON-OR-STRING>` — Opaque action target — JSON (`{"id":"T-1"}`) or a bare string. What the action's `target` context calls for (selected row, item id, …); the driver interprets it
+* `--target-id <ID>` — Shorthand for `--target <id>` as a plain string — also the `type-target` confirmation: the id *is* the typed confirmation, so `--yes --target-id T-1` is the non-interactive spelling
+* `--yes` — Skip confirmation prompts. `confirm` actions require it off-TTY; `type-target` actions still need `--target-id` (the id is the confirmation — `--yes` only skips the interactive "type it" prompt)
+* `--interactive` — Prompt on a TTY for each action param not given via `--param` (uses the ParamSchema: enum lists options, bool y/n, defaults on empty input). Errors off-TTY
+* `--json` — JSON output — dumps the full ActionResult
+
+## `pavo jobs`
+
+List the aggregated job feed — every `contributes.jobs` provider driver's `jobs` wire op, tagged with its driver
+
+**Usage:** `pavo jobs [OPTIONS]`
+
+###### **Options:**
+
+* `--json` — JSON output
+
+## `pavo notifications`
+
+List the aggregated notification feed — every `contributes.notifications` provider driver's `notifications` wire op, tagged with its driver
+
+**Usage:** `pavo notifications [OPTIONS]`
+
+###### **Options:**
+
+* `--json` — JSON output
+
+## `pavo serve`
+
+Serve the web bridge — localhost HTTP API + static Nuxt host
+
+**Usage:** `pavo serve [OPTIONS]`
+
+###### **Options:**
+
+* `--port <PORT>` — Port to bind on 127.0.0.1 (0 = pick a free port; the actual port is printed as the first stdout line)
+
+  Default value: `0`
+
+## `pavo open`
+
+Open a view in the TUI (`pavo-tui`) — the interactive surface. Falls back to `view` text output when stdout is not a TTY
+
+**Usage:** `pavo open [TARGET]`
+
+###### **Arguments:**
+
+* `<TARGET>` — `<driver>:<view>` deep link (bare `<driver>` = its first view) or a `/route?query`. Omit to open the TUI dashboard
+
+## `pavo manifest`
+
+Print the pavo capability manifest (JSON)
+
+**Usage:** `pavo manifest`
+
+## `pavo schema`
+
+Print the CLI verb schema (JSON)
+
+**Usage:** `pavo schema`
+
+## `pavo gen-cli-docs`
+
+Print the CLI reference as markdown — the docs pipeline (`docs:cli`) renders `docs/reference/cli.md` from this
+
+**Usage:** `pavo gen-cli-docs`
+
+&#xA;This document was generated automatically by
+clap-markdown.&#xA;

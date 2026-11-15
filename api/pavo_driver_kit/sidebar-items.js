@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["manifest","node","platform","serve","surface"]};
+window.SIDEBAR_ITEMS = {"mod":["action","manifest","node","platform","serve","surface"]};

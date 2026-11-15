@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["Canvas","Pane"],"fn":["field","field_value_line","in_rect","row_style"],"struct":["App","LayoutRects","Tab"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_REFRESH","MIN_REFRESH","NAV_CHARS"],"enum":["Canvas","Pane"],"fn":["empty_manifest","field","field_value_line","in_rect","line_edit_spans","parse_route_query","percent_decode","row_style"],"struct":["App","DispatchCtx","LayoutRects","Tab"]};
