@@ -50,7 +50,8 @@ policy with peregrin.
 
 ## Which quadrant answers which goal
 
-- **Learn it** → [Tutorial: your first view](tutorials/first-view.md)
+- **Learn it** → [Getting started](tutorials/getting-started.md) —
+  install, first view, the wire
 - **Do a task** → [How-to](/how-to/install-a-driver) — install a
   driver, write a driver, renderer plugins, serve web, config API,
   deep links

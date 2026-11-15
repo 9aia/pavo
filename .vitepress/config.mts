@@ -25,11 +25,10 @@ export default defineConfig({
       },
     ],
     sidebar: [
-      { text: "Getting Started", items: [{ text: "Install pavo", link: "/tutorials/getting-started" }] },
       {
         text: "Tutorials",
         items: [
-          { text: "Your first view", link: "/tutorials/first-view" },
+          { text: "Getting started", link: "/tutorials/getting-started" },
         ],
       },
       {
