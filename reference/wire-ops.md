@@ -114,6 +114,21 @@ The driver resolves the form node, reads its `submit_op`
 `pavo submit <driver>:<view> --param k=v …` is the CLI face;
 `GET /api/submit?ref=…&values={…}` the web-bridge face.
 
+### `invoke`
+
+`{"op":"invoke","view":"<id>"?,"action":"<id>","target":{…}?,
+"params":{…}?}` → [`ActionResult`](#actionresult) — the action
+verb. `action` is an [`Action`](/reference/driver-manifest) id
+declared in the manifest (`actions[]` scopes) or derived from the
+ops manifest; `view` optionally names the view the action was
+declared in (node/tree-item actions resolve against it;
+manifest-global actions may omit it); `target` is opaque JSON the
+driver interprets (selected row, item id, …); `params` maps
+`ParamSchema.name` → submitted value. Missing `required` params
+come back in `ActionResult.errors`. Drivers without action support
+answer `ok:false`. `pavo invoke <driver>:<view> <action>` and
+`pavo actions` are the CLI faces.
+
 ### `jobs`
 
 `{"op":"jobs"}` → `Vec<JobItem>` — the job/queue feed op. Drivers
@@ -157,6 +172,15 @@ map keyed by `FormField.key` — non-empty means the driver *rejected*
 the submit (hosts re-render with the messages; `pavo submit` exits
 1). `view`, when present, is a fresh `ViewResult` to swap in.
 Unknown fields survive typed round-trips.
+
+### ActionResult
+
+`{message?, errors?, data?, view?, route?}` — the `invoke` result.
+Same shape family as `SubmitResult` but a distinct type: `errors`
+keys are `ParamSchema.name`, not `FormField.key`. `route` is a
+driver-requested redirect template the host interpolates and
+navigates to after applying `view`/`data`. Unknown fields survive
+via a flatten catch-all.
 
 ### RenderModel
 

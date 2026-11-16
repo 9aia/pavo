@@ -10,10 +10,10 @@ between is a **node** in a declarative tree.
   `PATH` or in `<tamias-home>/drivers/`. Speaks ndjson JSON-RPC
   over stdio; declares a manifest (routes, views, chrome
   contributions, deps) and answers ops (`view`, `query`,
-  `submit`, `render`, `jobs`, `notifications`).
+  `submit`, `invoke`, `render`, `jobs`, `notifications`).
 - **ViewNode IR** — the declarative tree drivers emit:
   `panel`, `table`, `tree`, `graph`, `form`, `kv`, `markdown`,
-  `embed`, `row`, `column`, `svg`, `placeholder`. Data is *not*
+  `embed`, `row`, `column`. Data is *not*
   embedded — nodes name `query` bindings the host resolves.
 - **QueryBinding** — `{op, params?, driver?}`: which wire op
   fetches a node's data. `driver` set = cross-driver query into
