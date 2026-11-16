@@ -6,14 +6,15 @@ display animal.
 
 ## Where it sits
 
-The org stack is **tamias → engines → orchestration → surfaces**.
-Pavo is the top of the **surfaces** layer: the one place engine
-output becomes something a human looks at. Engines (`kuda`,
-`mimus`, `myco`, `cuora`, …) ship `tamias-driver-*` executables;
-tamias installs them; pavo discovers and interprets their
-ViewNode IR on CLI, TUI, and web. Orchestration (`peregrin`)
-decides *who may view what* — pavo serves one localhost user and
-deliberately knows nothing about policy.
+The org stack is **delivery → memory → process → agency**.
+Pavo is the **agency layer's screen**: the one place engine output
+becomes something a human looks at. Products across the lower
+layers (`kuda`, `mimus`, `myco`, `cuora`, …) ship
+`tamias-driver-*` executables; tamias installs them; pavo discovers
+and interprets their ViewNode IR on CLI, TUI, and web.
+Orchestration (`peregrin`, same layer) decides *who may view what*
+— pavo serves one localhost user and deliberately knows nothing
+about policy.
 
 The core idea: **products ship drivers, not UIs.** A product
 (kuda, myco, cuora, …) ships a `tamias-driver-<type>` executable
