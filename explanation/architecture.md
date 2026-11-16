@@ -6,13 +6,13 @@ display animal.
 
 ## Where it sits
 
-The org stack is **delivery → memory → process → agency**.
-Pavo is the **agency layer's screen**: the one place engine output
+The org stack is **delivery → memory → process → interface**.
+Pavo is the **interface organism** — the one place organism output
 becomes something a human looks at. Products across the lower
 layers (`kuda`, `mimus`, `myco`, `cuora`, …) ship
 `tamias-driver-*` executables; tamias installs them; pavo discovers
 and interprets their ViewNode IR on CLI, TUI, and web.
-Orchestration (`peregrin`, same layer) decides *who may view what*
+Orchestration (`peregrin`, process layer) decides *who may view what*
 — pavo serves one localhost user and deliberately knows nothing
 about policy.
 
