@@ -26,10 +26,19 @@
 //! file found, else a fresh `./pavo.toml` in the cwd. Writes preserve
 //! TOML formatting/comments via `toml_edit`; JSON is rewritten
 //! pretty-printed.
+//!
+//! The merge half rides `scarab-config` (P-045): layer folding is
+//! [`merge_value`], the `PAVO_CONFIG_*` env overlay is
+//! [`env_overrides`] + [`apply_overrides`], and `~` expansion is
+//! [`scarab_config::expand_tilde`]. What stays local is the *discovery* (global dir +
+//! cwd-ancestor walk collecting every `pavo.{toml,json}` per dir — a
+//! different shape than scarab's one-file-per-dir sources) and the
+//! document layer (`set`'s comment-preserving `toml_edit` writes).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use scarab_config::{apply_overrides, env_overrides, merge_value};
 use serde_json::{Map, Number, Value};
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
@@ -188,7 +197,7 @@ pub fn load(opts: &Options) -> Config {
         .explicit
         .clone()
         .or_else(|| opts.env_explicit())
-        .map(expand_tilde);
+        .map(|p| scarab_config::expand_tilde(&p));
     if let Some(path) = &explicit {
         push_file(
             &mut layers,
@@ -203,9 +212,13 @@ pub fn load(opts: &Options) -> Config {
         );
     }
 
-    // -- env overrides ----------------------------------------------------
-    let env_map = env_overrides(&opts.env);
-    let ekeys = flatten_count(&env_map);
+    // -- merge ------------------------------------------------------------
+    let mut merged = Value::Object(defaults());
+    for layer in &layers {
+        merge_value(&mut merged, Value::Object(layer.value.clone()));
+    }
+    let env_map = env_overrides(&opts.env, "PAVO_CONFIG_");
+    let ekeys = env_map.len();
     sources.push(SourceInfo {
         label: "env:PAVO_CONFIG_*".to_string(),
         path: None,
@@ -214,13 +227,7 @@ pub fn load(opts: &Options) -> Config {
         keys: ekeys,
         error: None,
     });
-
-    // -- merge ------------------------------------------------------------
-    let mut merged = Value::Object(defaults());
-    for layer in &layers {
-        merge_into(&mut merged, &Value::Object(layer.value.clone()));
-    }
-    merge_into(&mut merged, &Value::Object(env_map));
+    apply_overrides(&mut merged, &env_map);
     let flat = flatten(&merged);
 
     // -- write target -------------------------------------------------------
@@ -317,18 +324,6 @@ fn global_candidates(env: &BTreeMap<String, String>) -> Vec<PathBuf> {
 /// cwd and every ancestor, nearest first.
 fn ancestors(cwd: &Path) -> Vec<PathBuf> {
     cwd.ancestors().map(Path::to_path_buf).collect()
-}
-
-/// `~/…` expansion for explicit paths (pavo never sets HOME-relative
-/// semantics itself, but users type `~/pavo.toml`).
-fn expand_tilde(path: PathBuf) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    path
 }
 
 /// Load one candidate file into a layer, or record why it couldn't
@@ -544,26 +539,7 @@ fn json_to_toml(v: &Value) -> Result<TomlValue, String> {
 }
 
 // ------------------------------------------------------------------
-// merge / flatten / env
-
-/// Deep-merge `over` into `base` — objects recurse, everything else
-/// replaces. Both must be objects at the top level.
-fn merge_into(base: &mut Value, over: &Value) {
-    if let (Value::Object(b), Value::Object(o)) = (base, over) {
-        merge_maps(b, o);
-    }
-}
-
-fn merge_maps(base: &mut Map<String, Value>, over: &Map<String, Value>) {
-    for (k, v) in over {
-        match (base.get_mut(k), v) {
-            (Some(Value::Object(bm)), Value::Object(om)) => merge_maps(bm, om),
-            _ => {
-                base.insert(k.clone(), v.clone());
-            }
-        }
-    }
-}
+// flatten
 
 /// Flatten an object tree to dotted keys; arrays/scalars stay atomic.
 fn flatten(value: &Value) -> BTreeMap<String, Value> {
@@ -594,59 +570,6 @@ fn flatten_count(map: &Map<String, Value>) -> usize {
     let mut out = BTreeMap::new();
     flatten_into(map, "", &mut out);
     out.len()
-}
-
-/// `PAVO_CONFIG_*` env vars → nested override object.
-/// `__` separates dotted segments; `_` stays literal; suffix
-/// lowercases. `PAVO_CONFIG` itself is the explicit-path var and is
-/// excluded.
-fn env_overrides(env: &BTreeMap<String, String>) -> Map<String, Value> {
-    let mut root = Map::new();
-    for (name, raw) in env {
-        let Some(suffix) = name.strip_prefix("PAVO_CONFIG_") else {
-            continue;
-        };
-        if suffix.is_empty() {
-            continue;
-        }
-        let key = suffix
-            .split("__")
-            .map(str::to_lowercase)
-            .collect::<Vec<_>>()
-            .join(".");
-        let parsed =
-            serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::from(raw.clone()));
-        insert_dotted(&mut root, &key, parsed);
-    }
-    root
-}
-
-/// Insert `value` at a dotted path inside a JSON object, creating
-/// intermediate objects.
-fn insert_dotted(map: &mut Map<String, Value>, key: &str, value: Value) {
-    let mut segments = key.split('.');
-    insert_at(map, &mut segments, value);
-}
-
-fn insert_at<'k, 'v>(
-    map: &'v mut Map<String, Value>,
-    segments: &mut std::str::Split<'k, char>,
-    value: Value,
-) {
-    let Some(seg) = segments.next() else { return };
-    if segments.clone().next().is_none() {
-        map.insert(seg.to_string(), value);
-        return;
-    }
-    let entry = map
-        .entry(seg.to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !entry.is_object() {
-        *entry = Value::Object(Map::new());
-    }
-    if let Value::Object(inner) = entry {
-        insert_at(inner, segments, value);
-    }
 }
 
 // ------------------------------------------------------------------
