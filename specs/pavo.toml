@@ -8,6 +8,7 @@
 # matching — this file only declares the repo's own delta.
 
 # proposal: proposal-0055  # org-ledger proposal authorizing this spec set
+# proposal: proposal-0056  # provider wiring: kuda/sturn/myco/cypera markers
 
 family   = "9aia/pavo"
 match    = ["pavo"]
@@ -34,6 +35,7 @@ cover_dirs = [
   "examples",
   "protocol",
   "scripts",
+  "specs",
   "web",
 ]
 
@@ -43,3 +45,8 @@ catalog   = true
 [providers.cargo]
 patches = "org-only"
 org     = "9aia"
+
+[providers.myco]
+worktree = true
+
+[providers.cypera]
