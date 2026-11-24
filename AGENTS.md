@@ -153,3 +153,13 @@ publishes `.vitepress/dist` to `gh-pages`. Module doc comments
 (`//!`) in `pavo-protocol` are the reference seed — keep them
 accurate; `cypera gen crate-map` renders the crate map from workspace
 Cargo.tomls (never hand-edit the generated sections).
+
+## Specs
+
+`specs/<name>.toml` is this repo's mimus-standard conformance spec —
+approval-gated. Any change requires a live org proposal
+(`proposal-NNNN`, status open|done) referenced in the spec header or
+commit range, and no coverage regression vs merge-base. Guard:
+workspace `../../scripts/spec-guard.py`; sweep:
+`../../scripts/standard.sh`; regenerate coverage only via
+`../../scripts/gen-repo-specs.py`.
