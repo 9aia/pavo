@@ -43,6 +43,8 @@ clap-markdown = "0.1.5"
 ratatui = "0.30"
 crossterm = "0.29"
 toml_edit = "0.25"
+# scarab — config expertise; pavo-driver-config's merge/env overlay rides it (P-045)
+scarab-config = { git = "ssh://git@github.com/9aia/scarab.git", rev = "a68fed26d8cea1bdd6fc7d6927bcc33c85e240c1", version = "0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
