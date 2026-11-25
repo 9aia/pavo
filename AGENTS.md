@@ -76,7 +76,7 @@ xtask      check / test / coverage / install (myco anatomy)
 | `pavo-cli` | the `pavo` binary — hub verbs, `--json` everywhere; protocol conformance harness |
 | `pavo-tui` | ratatui host — chrome slots + ViewNode renderer |
 | `pavo-testkit` | recorded driver sessions → conformance for all surfaces |
-| `pavo-driver-config` | `tamias-driver-config` — the common config API driver (layered TOML/JSON, `get`/`set`/`resolve`/`sources` queries) |
+| `pavo-driver-config` | `tamias-driver-config` — the common config API driver over `scarab-config` (layered TOML/JSON + env overlay, `get`/`set`/`resolve`/`sources` queries) |
 | `pavo-driver-cli` | `tamias-driver-cli` — CLI surface driver: another driver's ops manifest → generated clap CLI (op → subcommand, params → args; `surfaces` stream via `run` passthrough) |
 | `pavo-driver-mcp` | `tamias-driver-mcp` — MCP surface driver: ops manifest → `tools/list`/`tools/call` over stdio |
 | `pavo-driver-kit` | driver-authoring SDK — ndjson `serve` loop, manifest/view/query-binding builders, ViewNode constructors, `JobItem`/`NotificationItem` helpers, `surface::*` (ops-manifest types, generated CLI, MCP server, spawned-driver client — `cli`/`mcp` features) |
